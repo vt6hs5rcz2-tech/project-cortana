@@ -2,6 +2,11 @@
 
 from typing import Protocol
 
+from src.conversation import (
+    ConversationApiInput,
+    ConversationHistory,
+    build_conversation_input,
+)
 from src.settings import Settings
 
 
@@ -14,7 +19,7 @@ class AIResponse(Protocol):
 class ResponsesClient(Protocol):
     """Minimum Responses API interface required by Cortana."""
 
-    def create(self, *, model: str, input: str) -> AIResponse:
+    def create(self, *, model: str, input: ConversationApiInput) -> AIResponse:
         """Create an AI response."""
 
 
@@ -28,6 +33,7 @@ def generate_response(
     client: OpenAIClient,
     settings: Settings,
     user_message: str,
+    conversation_history: ConversationHistory | None = None,
 ) -> str:
     """Generate a text response for a validated user message."""
     cleaned_message = user_message.strip()
@@ -35,9 +41,18 @@ def generate_response(
     if not cleaned_message:
         raise ValueError("User message cannot be blank.")
 
+    ai_input: ConversationApiInput
+    if conversation_history is not None:
+        ai_input = build_conversation_input(
+            conversation_history,
+            cleaned_message,
+        )
+    else:
+        ai_input = cleaned_message
+
     response = client.responses.create(
         model=settings.openai_model,
-        input=cleaned_message,
+        input=ai_input,
     )
 
     return response.output_text
