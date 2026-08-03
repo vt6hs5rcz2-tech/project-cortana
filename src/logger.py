@@ -1,13 +1,14 @@
-import logging
-from pathlib import Path
+"""Logging configuration for Project Cortana."""
 
-LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+import logging
+
+from src.config import LOG_DIR
+
 LOG_FILE = LOG_DIR / "cortana.log"
 
 
 def setup_logging() -> logging.Logger:
-    """Configure application logging and return the project logger."""
-
+    """Configure application logging and return the Cortana logger."""
     LOG_DIR.mkdir(exist_ok=True)
 
     logging.basicConfig(

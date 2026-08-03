@@ -40,6 +40,8 @@ project-cortana/
 - Avoid duplicated code.
 - Prefer composition over large classes.
 
+- Use print() only for user-facing assistant output.
+- Use logging for diagnostics, auditing, errors, and application events.
 ---
 
 ## Security Rules
