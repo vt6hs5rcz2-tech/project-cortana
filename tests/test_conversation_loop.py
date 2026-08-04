@@ -15,6 +15,8 @@ from src.document_chunker import DocumentChunker
 from src.document_extractor import DefaultTextExtractor
 from src.document_retrieval import LexicalDocumentRetriever
 from src.document_vault import DocumentVault, JsonDocumentVault
+from src.evidence_store import EvidenceStore, LocalEvidenceStore
+from src.incident_repository import IncidentRepository, JsonIncidentRepository
 from src.memory_store import JsonMemoryStore, MemoryStore
 from src.retrieval_session import RetrievalSession
 from src.settings import Settings
@@ -523,6 +525,8 @@ def test_main_orchestrates_conversation_loop(
     fake_client = cast(OpenAIClient, object())
     memory_path = tmp_path / "memories.json"
     vault_path = tmp_path / "documents.json"
+    incident_path = tmp_path / "incidents.json"
+    evidence_dir = tmp_path / "evidence"
     received_client: OpenAIClient | None = None
     received_settings: Settings | None = None
     received_logger: logging.Logger | None = None
@@ -533,6 +537,8 @@ def test_main_orchestrates_conversation_loop(
     received_document_chunker: DocumentChunker | None = None
     received_document_retriever: LexicalDocumentRetriever | None = None
     received_retrieval_session: RetrievalSession | None = None
+    received_incident_repository: IncidentRepository | None = None
+    received_evidence_store: EvidenceStore | None = None
 
     monkeypatch.setattr(main_module, "setup_logging", lambda: logger)
     monkeypatch.setattr(
@@ -550,6 +556,16 @@ def test_main_orchestrates_conversation_loop(
         "get_default_document_vault_file_path",
         lambda: vault_path,
     )
+    monkeypatch.setattr(
+        main_module,
+        "get_default_incident_repository_file_path",
+        lambda: incident_path,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "get_default_evidence_store_dir_path",
+        lambda: evidence_dir,
+    )
 
     def fake_run_conversation_loop(
         *,
@@ -563,12 +579,15 @@ def test_main_orchestrates_conversation_loop(
         document_chunker: DocumentChunker,
         document_retriever: LexicalDocumentRetriever,
         retrieval_session: RetrievalSession,
+        incident_repository: IncidentRepository,
+        evidence_store: EvidenceStore,
     ) -> None:
         nonlocal received_client, received_settings, received_logger, received_memory_store
         nonlocal received_active_memory_context
         nonlocal received_document_vault, received_document_extractor
         nonlocal received_document_chunker, received_document_retriever
         nonlocal received_retrieval_session
+        nonlocal received_incident_repository, received_evidence_store
         received_client = client
         received_settings = settings
         received_logger = logger
@@ -579,6 +598,8 @@ def test_main_orchestrates_conversation_loop(
         received_document_chunker = document_chunker
         received_document_retriever = document_retriever
         received_retrieval_session = retrieval_session
+        received_incident_repository = incident_repository
+        received_evidence_store = evidence_store
 
     monkeypatch.setattr(
         main_module,
@@ -603,3 +624,7 @@ def test_main_orchestrates_conversation_loop(
     assert received_document_retriever.chunker is received_document_chunker
     assert isinstance(received_retrieval_session, RetrievalSession)
     assert received_retrieval_session.has_source_manifest is False
+    assert isinstance(received_incident_repository, JsonIncidentRepository)
+    assert received_incident_repository.file_path == incident_path
+    assert isinstance(received_evidence_store, LocalEvidenceStore)
+    assert received_evidence_store.directory_path == evidence_dir

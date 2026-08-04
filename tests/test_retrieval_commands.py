@@ -601,6 +601,7 @@ def test_new_application_session_starts_with_empty_manifest(
         document_chunker: object,
         document_retriever: object,
         retrieval_session: RetrievalSession,
+        **_: object,
     ) -> None:
         received_sessions.append(retrieval_session)
 

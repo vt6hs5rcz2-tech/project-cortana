@@ -32,7 +32,11 @@ from src.config import (
     TARGET_CHUNK_SIZE,
     TESTS_DIR,
     VERSION,
+    EVIDENCE_STORE_DIRNAME,
+    INCIDENT_REPOSITORY_FILENAME,
     get_default_document_vault_file_path,
+    get_default_evidence_store_dir_path,
+    get_default_incident_repository_file_path,
     get_default_memory_file_path,
 )
 
@@ -118,6 +122,36 @@ def test_default_document_vault_path_is_outside_project_source(
     path = get_default_document_vault_file_path()
 
     assert path.name == DOCUMENT_VAULT_FILENAME
+    assert "ProjectCortana" in path.parts
+    assert PROJECT_ROOT not in path.parents
+    assert "src" not in path.parts
+    assert "tests" not in path.parts
+
+
+def test_default_incident_repository_path_is_outside_project_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default incident repository storage should use a user-local application data path."""
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Example\AppData\Local")
+
+    path = get_default_incident_repository_file_path()
+
+    assert path.name == INCIDENT_REPOSITORY_FILENAME
+    assert "ProjectCortana" in path.parts
+    assert PROJECT_ROOT not in path.parents
+    assert "src" not in path.parts
+    assert "tests" not in path.parts
+
+
+def test_default_evidence_store_path_is_outside_project_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default evidence store directory should use a user-local application data path."""
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Example\AppData\Local")
+
+    path = get_default_evidence_store_dir_path()
+
+    assert path.name == EVIDENCE_STORE_DIRNAME
     assert "ProjectCortana" in path.parts
     assert PROJECT_ROOT not in path.parents
     assert "src" not in path.parts

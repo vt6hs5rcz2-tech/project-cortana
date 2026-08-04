@@ -14,6 +14,7 @@ Project Cortana is an early software milestone focused on:
 - Local Knowledge Vault for explicit document ingestion and inspection
 - Deterministic local lexical document retrieval
 - Explicit source-grounded AI questions over retrieved document passages
+- Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
 
 ## Conversation history, persistent memory, active context, and documents
 
@@ -24,12 +25,15 @@ Project Cortana is an early software milestone focused on:
 | Active memory context | Current session only | Selected with `/recall`; cleared with `/release`, `/release-all`, or restart | Yes, only while active |
 | Knowledge Vault documents | Survives restarts | Ingested only through local `/add-document` | No by default |
 | Retrieved document passages | Current request/session only | Selected only by `/search-docs` (local) or `/ask-docs` (AI) | Only selected chunks through `/ask-docs` |
+| Security incidents and evidence | Survives restarts | Created only through explicit local Milestone 8 commands | Never in this milestone |
 
-Persistent memories and Knowledge Vault documents are stored locally by Project Cortana in user-local application data files. They are not placed in Git-tracked source directories.
+Persistent memories, Knowledge Vault documents, incident records, and evidence copies are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories.
 
 Saved memories remain inactive by default. Nothing from persistent memory is sent to the AI model unless the user explicitly activates it with `/recall` for the current session.
 
 Documents remain inactive by default. No document text is sent to the AI unless the user explicitly invokes `/ask-docs`. Ordinary conversation never reads the Knowledge Vault.
+
+Security incident records, analyst notes, indicators, evidence metadata, and evidence file bytes are never sent to the AI in this milestone. They are not injected into ordinary chat, active-memory requests, or `/ask-docs`.
 
 Active memory selections:
 
@@ -116,6 +120,91 @@ Source manifests:
 
 Active-memory context and retrieved-document context can appear in the same AI request, but remain separate structured developer messages.
 
+## Security event, incident, and evidence foundation
+
+Milestone 8 adds a defensive, documentation-focused local foundation for cybersecurity casework. Records are created or modified only through explicit user commands. This is an audit-support foundation, not a substitute for certified forensic procedure, and it does not claim legal forensic admissibility.
+
+Supported record types and relationships:
+
+- Security events can optionally link to one incident
+- Incidents can link many events, indicators, evidence records, and analyst notes
+- Indicators store normalized and original values without reputation lookups
+- Evidence metadata is stored in the incident repository JSON
+- Evidence byte copies are stored separately under a user-local evidence directory
+- Chain-of-custody entries are append-only and tied to evidence records
+- Timelines are derived locally from events, notes, and custody entries and are never persisted as a separate source of truth
+
+Severity values:
+
+- `informational`
+- `low`
+- `medium`
+- `high`
+- `critical`
+
+Event statuses:
+
+- `new`
+- `investigating`
+- `contained`
+- `resolved`
+- `false-positive`
+
+Incident statuses:
+
+- `open`
+- `triage`
+- `investigating`
+- `contained`
+- `monitoring`
+- `resolved`
+- `closed`
+
+Indicator types:
+
+- `ipv4`
+- `ipv6`
+- `domain`
+- `url`
+- `email`
+- `sha256`
+- `sha1`
+- `md5`
+- `filename`
+- `process`
+- `registry-key`
+- `generic`
+
+Evidence storage statuses:
+
+- `metadata-only` — metadata recorded without claiming a preserved local copy
+- `copied` — a local evidence byte copy exists and was hash-verified at registration
+
+Behavior and limits:
+
+- All Milestone 8 commands are local and never call the AI service.
+- Incident data is never injected into AI requests in this milestone.
+- No automatic collection, scanning, remediation, containment, malware execution, packet capture, vulnerability scanning, penetration-testing actions, threat-intelligence network lookups, cloud SIEM integrations, or telemetry.
+- Evidence files may be dangerous. Cortana stores opaque bytes and never executes, opens for parsing, imports, or inspects evidence contents beyond hashing and byte-copying.
+- SHA-256 is calculated locally with streaming reads.
+- `/evidence-verify` recalculates the stored copy hash, compares it to the recorded digest, appends a custody verification entry, and never repairs or deletes evidence automatically.
+- Chain-of-custody entries are append-only through normal application commands.
+- Repository and evidence storage live in user-local application data, outside the Git repository.
+- Atomic JSON writes prevent partial repository files during a single save.
+- Atomic writes do not coordinate concurrent Cortana processes. Last-writer-wins lost updates remain possible. Use one application instance per incident repository. Cross-process locking is not implemented yet.
+- `/clear` clears conversation history and the grounded source manifest only. It does not delete incidents or evidence.
+- `/remember` does not create incidents or evidence.
+- `/add-document` / Knowledge Vault ingestion does not register evidence.
+- `/ask-docs` does not search incident records.
+- Recording an indicator does not mean the indicator is malicious.
+
+Multi-field Milestone 8 commands use the delimiter ` | ` so paths and free text can contain spaces. Example:
+
+```text
+/evidence-register C:\Cases\packet capture.pcap | Edge capture | Captured by analyst
+/event-new high | Phishing report | User clicked a suspicious link
+```
+
 ## Local commands
 
 | Command | Description |
@@ -141,21 +230,42 @@ Active-memory context and retrieved-document context can appear in the same AI r
 | `/search-docs <query>` | Search Knowledge Vault documents locally without calling the AI |
 | `/ask-docs <question>` | Ask a source-grounded question using retrieved document passages |
 | `/sources` | Show sources from the latest successful `/ask-docs` request |
+| `/event-new <severity> \| <title> \| <description>` | Record one local security event |
+| `/events` | List saved security events |
+| `/event <event-id>` | Show one security event |
+| `/event-status <event-id> <status>` | Update one security event status |
+| `/incident-new <severity> \| <title> \| <summary>` | Open one local security incident |
+| `/incidents` | List saved security incidents |
+| `/incident <incident-id>` | Show one security incident |
+| `/incident-status <incident-id> <status>` | Update one security incident status |
+| `/incident-link-event <incident-id> <event-id>` | Link an event to an incident |
+| `/incident-unlink-event <incident-id> <event-id>` | Unlink an event from an incident |
+| `/indicator-add <type> \| <value> \| <confidence>` | Record one local indicator |
+| `/indicators` | List saved indicators |
+| `/indicator <indicator-id>` | Show one indicator |
+| `/evidence-register <path> \| <title> \| <description>` | Register and copy local evidence bytes |
+| `/evidence` | List saved evidence metadata |
+| `/evidence-show <evidence-id>` | Show one evidence record |
+| `/evidence-verify <evidence-id>` | Verify a stored evidence copy by SHA-256 |
+| `/incident-add-note <incident-id> \| <note-type> \| <text>` | Add one analyst note to an incident |
+| `/incident-notes <incident-id>` | List analyst notes for an incident |
+| `/incident-timeline <incident-id>` | Show a derived incident timeline |
 | `/about` | Describe Project Cortana and this milestone |
 | `/exit` | End the session cleanly |
 
 Notes:
 
-- `/clear` affects temporary conversation history and the latest `/sources` manifest. It does not delete documents or persistent memories, and does not remove active memories.
-- `/remember` saves a persistent memory but does not activate it or ingest documents.
+- `/clear` affects temporary conversation history and the latest `/sources` manifest. It does not delete documents, persistent memories, incidents, or evidence, and does not remove active memories.
+- `/remember` saves a persistent memory but does not activate it, ingest documents, or create incidents/evidence.
 - `/release` and `/release-all` clear temporary active context only; they do not delete persistent memories.
 - `/forget` deletes a persistent memory and also removes it from active context when selected.
 - `/forget-all confirm` deletes all persistent memories and clears active memory selections.
 - `/remove-document` removes one vault document and invalidates matching source-manifest entries.
-- `/remove-all-documents confirm` deletes all vault documents and clears the source manifest. It does not affect persistent memories or active-memory context.
+- `/remove-all-documents confirm` deletes all vault documents and clears the source manifest. It does not affect persistent memories, active-memory context, incidents, or evidence.
 - `/search-docs` never calls the AI service.
-- `/ask-docs` sends only selected retrieved chunks, never the entire vault.
-- Absolute path-like input such as `/etc/passwd` is treated as conversation content for the AI, not as a local command, unless it is explicitly provided as an `/add-document` argument.
+- `/ask-docs` sends only selected retrieved chunks, never the entire vault and never incident records.
+- Milestone 8 security commands never call the AI service.
+- Absolute path-like input such as `/etc/passwd` is treated as conversation content for the AI, not as a local command, unless it is explicitly provided as an `/add-document` or `/evidence-register` argument.
 
 ## Active memory limits
 

@@ -55,6 +55,41 @@ MAX_RETRIEVED_CONTEXT_CHARS = 12_000
 MAX_SEARCH_RESULT_PREVIEW_CHARS = 200
 MAX_SEARCH_DOCS_RESULTS = 5
 
+# Security incident repository and evidence foundation (Milestone 8)
+INCIDENT_REPOSITORY_ENABLED = True
+EVIDENCE_COPY_ENABLED = True
+CHAIN_OF_CUSTODY_ENABLED = True
+AUTOMATED_RESPONSE_ENABLED = False
+EXTERNAL_THREAT_INTELLIGENCE_LOOKUPS_ENABLED = False
+INCIDENT_AI_CONTEXT_INJECTION_ENABLED = False
+INCIDENT_REPOSITORY_PERSISTENCE_ENABLED = True
+INCIDENT_SINGLE_INSTANCE_COORDINATION_ENABLED = False
+
+INCIDENT_REPOSITORY_SCHEMA_VERSION = 1
+INCIDENT_REPOSITORY_FILENAME = "incidents.json"
+EVIDENCE_STORE_DIRNAME = "evidence"
+
+MAX_EVENT_TITLE_LENGTH = 200
+MAX_EVENT_DESCRIPTION_LENGTH = 5_000
+MAX_EVENT_SOURCE_LENGTH = 200
+MAX_INCIDENT_TITLE_LENGTH = 200
+MAX_INCIDENT_SUMMARY_LENGTH = 5_000
+MAX_INDICATOR_VALUE_LENGTH = 2_000
+MAX_INDICATOR_NOTES_LENGTH = 2_000
+MAX_EVIDENCE_TITLE_LENGTH = 200
+MAX_EVIDENCE_DESCRIPTION_LENGTH = 5_000
+MAX_EVIDENCE_FILENAME_LENGTH = 255
+MAX_EVIDENCE_SOURCE_BYTES = 50 * 1024 * 1024
+MAX_NOTE_TEXT_LENGTH = 5_000
+MAX_CUSTODY_ACTOR_LENGTH = 200
+MAX_CUSTODY_REASON_LENGTH = 1_000
+MAX_CUSTODY_NOTES_LENGTH = 2_000
+MAX_TAG_LENGTH = 64
+MAX_TAGS_PER_RECORD = 20
+MAX_SECURITY_LIST_PREVIEW_CHARS = 120
+INDICATOR_CONFIDENCE_MIN = 0
+INDICATOR_CONFIDENCE_MAX = 100
+
 
 def _default_app_data_dir() -> Path:
     """Return the user-local application data directory for Project Cortana."""
@@ -79,3 +114,13 @@ def get_default_memory_file_path() -> Path:
 def get_default_document_vault_file_path() -> Path:
     """Return the default user-local path for Knowledge Vault documents."""
     return _default_app_data_dir() / DOCUMENT_VAULT_FILENAME
+
+
+def get_default_incident_repository_file_path() -> Path:
+    """Return the default user-local path for the incident repository JSON file."""
+    return _default_app_data_dir() / INCIDENT_REPOSITORY_FILENAME
+
+
+def get_default_evidence_store_dir_path() -> Path:
+    """Return the default user-local directory for copied evidence files."""
+    return _default_app_data_dir() / EVIDENCE_STORE_DIRNAME

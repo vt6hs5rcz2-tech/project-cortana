@@ -1,9 +1,11 @@
 """Local slash-command framework for Project Cortana."""
 
 import logging
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
 from src.active_memory import (
     ActiveMemoryCharLimitError,
@@ -17,9 +19,17 @@ from src.citation_validation import validate_response_citations
 from src.config import (
     ACTIVE_MEMORY_PERSISTENCE_ENABLED,
     ALLOWED_DOCUMENT_EXTENSIONS,
+    AUTOMATED_RESPONSE_ENABLED,
+    CHAIN_OF_CUSTODY_ENABLED,
     DOCUMENT_CONTEXT_INJECTION_ENABLED,
+    EVIDENCE_COPY_ENABLED,
     EXPLICIT_PERSISTENT_MEMORY_ENABLED,
+    EXTERNAL_THREAT_INTELLIGENCE_LOOKUPS_ENABLED,
     HISTORY_PERSISTENCE_ENABLED,
+    INCIDENT_AI_CONTEXT_INJECTION_ENABLED,
+    INCIDENT_REPOSITORY_ENABLED,
+    INCIDENT_REPOSITORY_PERSISTENCE_ENABLED,
+    INCIDENT_SINGLE_INSTANCE_COORDINATION_ENABLED,
     KNOWLEDGE_VAULT_ENABLED,
     LOCAL_DOCUMENT_RETRIEVAL_ENABLED,
     MAX_ACTIVE_MEMORIES,
@@ -56,9 +66,20 @@ from src.document_vault import (
     DocumentVault,
     DuplicateDocumentHashError,
 )
+from src.evidence_store import EvidenceStore, LocalEvidenceStore
+from src.incident_repository import (
+    IncidentRepository,
+    IncidentStorageError,
+    JsonIncidentRepository,
+)
 from src.memory import MemoryRecord, MemoryTextTooLongError, MemoryValidationError
 from src.memory_store import MemoryStorageError, MemoryStore
 from src.retrieval_session import RetrievalSession
+from src.security_commands import (
+    SECURITY_COMMAND_NAMES,
+    SecurityCommandContext,
+    handle_security_command,
+)
 from src.settings import Settings
 
 logger = logging.getLogger("ProjectCortana")
@@ -111,6 +132,7 @@ SUPPORTED_COMMANDS = frozenset(
         COMMAND_SEARCH_DOCS,
         COMMAND_ASK_DOCS,
         COMMAND_SOURCES,
+        *SECURITY_COMMAND_NAMES,
     }
 )
 
@@ -134,6 +156,26 @@ HELP_TEXT = """Cortana: Available commands:
   /search-docs          - Search Knowledge Vault documents locally
   /ask-docs             - Ask a source-grounded question over retrieved documents
   /sources              - Show sources from the latest grounded answer
+  /event-new            - Record one local security event
+  /events               - List saved security events
+  /event                - Show one security event by ID
+  /event-status         - Update one security event status
+  /incident-new         - Open one local security incident
+  /incidents            - List saved security incidents
+  /incident             - Show one security incident by ID
+  /incident-status      - Update one security incident status
+  /incident-link-event  - Link an event to an incident
+  /incident-unlink-event - Unlink an event from an incident
+  /indicator-add        - Record one local indicator
+  /indicators           - List saved indicators
+  /indicator            - Show one indicator by ID
+  /evidence-register    - Register and copy local evidence bytes
+  /evidence             - List saved evidence metadata
+  /evidence-show        - Show one evidence record by ID
+  /evidence-verify      - Verify a stored evidence copy by SHA-256
+  /incident-add-note    - Add one analyst note to an incident
+  /incident-notes       - List analyst notes for an incident
+  /incident-timeline    - Show a derived incident timeline
   /about                - Describe Project Cortana and this software milestone
   /exit                 - End the session cleanly"""
 
@@ -142,16 +184,19 @@ ABOUT_TEXT = (
     "defensive-operations assistant. This build is an early software milestone "
     "focused on identity, local commands, in-session conversation, explicit "
     "user-controlled persistent memory, temporary active memory context, a "
-    "local Knowledge Vault, and explicit source-grounded document questions."
+    "local Knowledge Vault, source-grounded document questions, and a local "
+    "human-controlled security event, incident, indicator, evidence, and "
+    "chain-of-custody foundation."
 )
 
 CLEAR_CONFIRMATION = (
     "Cortana: Conversation history and the latest grounded source manifest "
-    "have been cleared."
+    "have been cleared. Incident records and evidence were left unchanged."
 )
 CLEAR_ALREADY_EMPTY = (
     "Cortana: Conversation history is already empty. "
-    "Any grounded source manifest has also been cleared."
+    "Any grounded source manifest has also been cleared. "
+    "Incident records and evidence were left unchanged."
 )
 
 REMEMBER_MISSING_TEXT = "Cortana: Please provide text to remember. Usage: /remember <text>"
@@ -298,10 +343,21 @@ class CommandContext:
     document_extractor: TextExtractor
     document_retriever: LexicalDocumentRetriever
     retrieval_session: RetrievalSession
+    incident_repository: IncidentRepository
+    evidence_store: EvidenceStore
     client: OpenAIClient | None = None
 
 
 CommandHandler = Callable[[CommandContext], CommandResult]
+
+
+def _ephemeral_incident_services() -> tuple[IncidentRepository, EvidenceStore]:
+    """Create disposable local stores for tests that omit Milestone 8 injection."""
+    root = Path(tempfile.mkdtemp(prefix="cortana-incident-"))
+    return (
+        JsonIncidentRepository(root / "incidents.json"),
+        LocalEvidenceStore(root / "evidence"),
+    )
 
 
 def parse_slash_input(message: str) -> str | None:
@@ -353,14 +409,38 @@ def handle_slash_command(
     document_extractor: TextExtractor,
     document_retriever: LexicalDocumentRetriever | None = None,
     retrieval_session: RetrievalSession | None = None,
+    incident_repository: IncidentRepository | None = None,
+    evidence_store: EvidenceStore | None = None,
     client: OpenAIClient | None = None,
 ) -> CommandResult:
     """Handle a slash command locally.
 
     Most commands never call the AI service. ``/ask-docs`` is the explicit
-    exception and requires an injected client.
+    exception and requires an injected client. Milestone 8 security commands
+    are always local and never call the AI service.
     """
     command_name = normalize_command_name(message)
+
+    if incident_repository is None or evidence_store is None:
+        ephemeral_repository, ephemeral_store = _ephemeral_incident_services()
+        incident_repository = incident_repository or ephemeral_repository
+        evidence_store = evidence_store or ephemeral_store
+
+    if command_name in SECURITY_COMMAND_NAMES:
+        security_result = handle_security_command(
+            command_name,
+            SecurityCommandContext(
+                message=message,
+                incident_repository=incident_repository,
+                evidence_store=evidence_store,
+            ),
+        )
+        if security_result is not None:
+            return CommandResult(
+                outcome=CommandOutcome.CONTINUE,
+                message=security_result.message,
+            )
+
     handler = COMMAND_HANDLERS.get(command_name)
 
     if handler is None:
@@ -379,6 +459,8 @@ def handle_slash_command(
         document_extractor=document_extractor,
         document_retriever=document_retriever or LexicalDocumentRetriever(),
         retrieval_session=retrieval_session or RetrievalSession(),
+        incident_repository=incident_repository,
+        evidence_store=evidence_store,
         client=client,
     )
     return handler(context)
@@ -399,10 +481,13 @@ def _handle_status(context: CommandContext) -> CommandResult:
             context.active_memory_context,
             context.document_vault,
             context.retrieval_session,
+            context.incident_repository,
         )
     except MemoryStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
     except DocumentStorageError as error:
+        return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
+    except IncidentStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
 
     return CommandResult(outcome=CommandOutcome.CONTINUE, message=status_text)
@@ -1139,6 +1224,7 @@ def format_status(
     active_memory_context: ActiveMemoryContext,
     document_vault: DocumentVault,
     retrieval_session: RetrievalSession | None = None,
+    incident_repository: IncidentRepository | None = None,
 ) -> str:
     """Build safe local session status text for /status."""
     completed_turns = conversation_history.completed_turn_count
@@ -1155,6 +1241,16 @@ def format_status(
         if DOCUMENT_CONTEXT_INJECTION_ENABLED
         else "disabled"
     )
+    if incident_repository is None:
+        saved_event_count = 0
+        saved_incident_count = 0
+        saved_indicator_count = 0
+        saved_evidence_count = 0
+    else:
+        saved_event_count = incident_repository.event_count()
+        saved_incident_count = incident_repository.incident_count()
+        saved_indicator_count = incident_repository.indicator_count()
+        saved_evidence_count = incident_repository.evidence_count()
 
     return (
         "Cortana: Session status\n"
@@ -1189,7 +1285,27 @@ def format_status(
         "  Current source manifest: "
         f"{'present' if has_manifest else 'absent'}\n"
         "  Source manifest persistence: "
-        f"{'enabled' if SOURCE_MANIFEST_PERSISTENCE_ENABLED else 'disabled'}"
+        f"{'enabled' if SOURCE_MANIFEST_PERSISTENCE_ENABLED else 'disabled'}\n"
+        "  Incident repository: "
+        f"{'enabled' if INCIDENT_REPOSITORY_ENABLED else 'disabled'}\n"
+        f"  Saved events: {saved_event_count}\n"
+        f"  Saved incidents: {saved_incident_count}\n"
+        f"  Saved indicators: {saved_indicator_count}\n"
+        f"  Saved evidence: {saved_evidence_count}\n"
+        "  Evidence-copy capability: "
+        f"{'enabled' if EVIDENCE_COPY_ENABLED else 'disabled'}\n"
+        "  Chain-of-custody: "
+        f"{'enabled' if CHAIN_OF_CUSTODY_ENABLED else 'disabled'}\n"
+        "  Automated response: "
+        f"{'enabled' if AUTOMATED_RESPONSE_ENABLED else 'disabled'}\n"
+        "  External threat-intelligence lookups: "
+        f"{'enabled' if EXTERNAL_THREAT_INTELLIGENCE_LOOKUPS_ENABLED else 'disabled'}\n"
+        "  Incident AI-context injection: "
+        f"{'enabled' if INCIDENT_AI_CONTEXT_INJECTION_ENABLED else 'disabled'}\n"
+        "  Repository persistence: "
+        f"{'enabled' if INCIDENT_REPOSITORY_PERSISTENCE_ENABLED else 'disabled'}\n"
+        "  Single-instance coordination: "
+        f"{'enabled' if INCIDENT_SINGLE_INSTANCE_COORDINATION_ENABLED else 'disabled'}"
     )
 
 

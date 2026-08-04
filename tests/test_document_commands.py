@@ -559,6 +559,7 @@ def test_startup_injects_one_vault_and_reload_preserves_documents(
         document_chunker: object = None,
         document_retriever: object = None,
         retrieval_session: object = None,
+        **_: object,
     ) -> None:
         received_vaults.append(document_vault)
 

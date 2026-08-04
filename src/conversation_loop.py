@@ -16,6 +16,8 @@ from src.document_chunker import DocumentChunker
 from src.document_extractor import TextExtractor
 from src.document_retrieval import LexicalDocumentRetriever
 from src.document_vault import DocumentVault
+from src.evidence_store import EvidenceStore
+from src.incident_repository import IncidentRepository
 from src.memory_store import MemoryStore
 from src.retrieval_session import RetrievalSession
 from src.settings import Settings
@@ -95,6 +97,8 @@ def run_conversation_loop(
     document_chunker: DocumentChunker | None = None,
     document_retriever: LexicalDocumentRetriever | None = None,
     retrieval_session: RetrievalSession | None = None,
+    incident_repository: IncidentRepository | None = None,
+    evidence_store: EvidenceStore | None = None,
     read_input: Callable[[], str] | None = None,
     conversation_history: ConversationHistory | None = None,
 ) -> None:
@@ -133,6 +137,8 @@ def run_conversation_loop(
                 document_extractor=document_extractor,
                 document_retriever=retriever,
                 retrieval_session=session,
+                incident_repository=incident_repository,
+                evidence_store=evidence_store,
                 client=client,
             )
             if command_result.message:

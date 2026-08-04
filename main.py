@@ -9,6 +9,8 @@ from src.config import (
     APP_NAME,
     VERSION,
     get_default_document_vault_file_path,
+    get_default_evidence_store_dir_path,
+    get_default_incident_repository_file_path,
     get_default_memory_file_path,
 )
 from src.conversation_loop import run_conversation_loop
@@ -16,6 +18,8 @@ from src.document_chunker import DocumentChunker
 from src.document_extractor import DefaultTextExtractor
 from src.document_retrieval import LexicalDocumentRetriever
 from src.document_vault import JsonDocumentVault
+from src.evidence_store import LocalEvidenceStore
+from src.incident_repository import JsonIncidentRepository
 from src.logger import setup_logging
 from src.memory_store import JsonMemoryStore
 from src.openai_client import create_openai_client
@@ -65,6 +69,10 @@ def main() -> None:
     document_chunker = DocumentChunker()
     document_retriever = LexicalDocumentRetriever(chunker=document_chunker)
     retrieval_session = RetrievalSession()
+    incident_repository = JsonIncidentRepository(
+        get_default_incident_repository_file_path()
+    )
+    evidence_store = LocalEvidenceStore(get_default_evidence_store_dir_path())
 
     run_conversation_loop(
         client=client,
@@ -77,6 +85,8 @@ def main() -> None:
         document_chunker=document_chunker,
         document_retriever=document_retriever,
         retrieval_session=retrieval_session,
+        incident_repository=incident_repository,
+        evidence_store=evidence_store,
     )
 
 
