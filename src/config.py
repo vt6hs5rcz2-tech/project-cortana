@@ -22,10 +22,15 @@ VERSION = "0.1.0"
 # Session capabilities
 HISTORY_PERSISTENCE_ENABLED = False
 EXPLICIT_PERSISTENT_MEMORY_ENABLED = True
+ACTIVE_MEMORY_PERSISTENCE_ENABLED = False
 
 # Explicit persistent memory limits and storage
 MAX_MEMORY_TEXT_LENGTH = 2000
 MEMORY_FILENAME = "memories.json"
+
+# Active memory context limits (session-only AI reference context)
+MAX_ACTIVE_MEMORIES = 10
+MAX_ACTIVE_MEMORY_CHARS = 8000
 
 
 def get_default_memory_file_path() -> Path:

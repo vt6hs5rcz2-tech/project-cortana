@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Callable
 
+from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient, generate_response
 from src.commands import CommandOutcome, handle_slash_command, parse_slash_input
 from src.conversation import (
@@ -38,14 +39,28 @@ def handle_message(
     user_message: str,
     logger: logging.Logger,
     conversation_history: ConversationHistory | None = None,
+    active_memory_context: ActiveMemoryContext | None = None,
 ) -> None:
     """Generate and display one Cortana response."""
+    active_memories = (
+        active_memory_context.list_active()
+        if active_memory_context is not None
+        else None
+    )
+    memory_boundary_token = (
+        active_memory_context.boundary_token
+        if active_memory_context is not None
+        else None
+    )
+
     try:
         answer = generate_response(
             client=client,
             settings=settings,
             user_message=user_message,
             conversation_history=conversation_history,
+            active_memories=active_memories,
+            memory_boundary_token=memory_boundary_token,
         )
     except Exception as error:
         logger.error(
@@ -69,6 +84,7 @@ def run_conversation_loop(
     settings: Settings,
     logger: logging.Logger,
     memory_store: MemoryStore,
+    active_memory_context: ActiveMemoryContext,
     read_input: Callable[[], str] | None = None,
     conversation_history: ConversationHistory | None = None,
 ) -> None:
@@ -99,6 +115,7 @@ def run_conversation_loop(
                 settings=settings,
                 conversation_history=history,
                 memory_store=memory_store,
+                active_memory_context=active_memory_context,
             )
             if command_result.message:
                 print(command_result.message)
@@ -113,4 +130,5 @@ def run_conversation_loop(
             user_message=user_message,
             logger=logger,
             conversation_history=history,
+            active_memory_context=active_memory_context,
         )

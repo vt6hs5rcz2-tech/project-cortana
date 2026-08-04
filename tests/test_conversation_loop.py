@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 
 import main as main_module
+from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient
 from src.conversation import ConversationHistory, SHUTDOWN_MESSAGE, STARTUP_GREETING
 from src.conversation_loop import handle_message, run_conversation_loop
@@ -18,6 +19,10 @@ FAKE_CLIENT = cast(OpenAIClient, object())
 
 def _memory_store(tmp_path: Path) -> JsonMemoryStore:
     return JsonMemoryStore(tmp_path / "memories.json")
+
+
+def _active_memory_context() -> ActiveMemoryContext:
+    return ActiveMemoryContext()
 
 
 class FakeLogger(logging.Logger):
@@ -68,6 +73,8 @@ def test_handle_message_prints_ai_response(
         settings: Settings,
         user_message: str,
         conversation_history: ConversationHistory | None = None,
+        active_memories: object = None,
+        memory_boundary_token: object = None,
     ) -> str:
         nonlocal captured_message
         captured_message = user_message
@@ -177,6 +184,8 @@ def test_handle_message_logs_only_safe_error_type(
         settings: Settings,
         user_message: str,
         conversation_history: ConversationHistory | None = None,
+        active_memories: object = None,
+        memory_boundary_token: object = None,
     ) -> str:
         raise RuntimeError("Sensitive simulated error details")
 
@@ -216,6 +225,7 @@ def test_run_conversation_loop_displays_startup_greeting(
             openai_model="test-model",
         ),
         logger=logger,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -241,6 +251,7 @@ def test_run_conversation_loop_exits_on_exit_command(
             openai_model="test-model",
         ),
         logger=logger,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -277,6 +288,7 @@ def test_run_conversation_loop_rejects_blank_input_without_ai_call(
             openai_model="test-model",
         ),
         logger=logger,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -316,6 +328,7 @@ def test_run_conversation_loop_continues_after_ai_error(
             openai_model="test-model",
         ),
         logger=logger,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -344,6 +357,7 @@ def test_run_conversation_loop_processes_multiple_messages(
         user_message: str,
         logger: logging.Logger,
         conversation_history: ConversationHistory | None = None,
+        active_memory_context: ActiveMemoryContext | None = None,
     ) -> None:
         handled_messages.append(user_message)
         print(f"Cortana: Response to {user_message}")
@@ -360,6 +374,7 @@ def test_run_conversation_loop_processes_multiple_messages(
             openai_model="test-model",
         ),
         logger=logger,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -398,6 +413,7 @@ def test_run_conversation_loop_rejects_whitespace_only_input_without_ai_call(
             openai_model="test-model",
         ),
         logger=logger,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -425,6 +441,7 @@ def test_run_conversation_loop_exits_cleanly_on_eof(
             openai_model="test-model",
         ),
         logger=logger,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
         read_input=raise_eof,
     )
@@ -452,6 +469,7 @@ def test_run_conversation_loop_exits_cleanly_on_keyboard_interrupt(
             openai_model="test-model",
         ),
         logger=logger,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
         read_input=raise_keyboard_interrupt,
     )
@@ -478,6 +496,7 @@ def test_main_orchestrates_conversation_loop(
     received_settings: Settings | None = None
     received_logger: logging.Logger | None = None
     received_memory_store: MemoryStore | None = None
+    received_active_memory_context: ActiveMemoryContext | None = None
 
     monkeypatch.setattr(main_module, "setup_logging", lambda: logger)
     monkeypatch.setattr(
@@ -497,12 +516,15 @@ def test_main_orchestrates_conversation_loop(
         settings: Settings,
         logger: logging.Logger,
         memory_store: MemoryStore,
+        active_memory_context: ActiveMemoryContext,
     ) -> None:
         nonlocal received_client, received_settings, received_logger, received_memory_store
+        nonlocal received_active_memory_context
         received_client = client
         received_settings = settings
         received_logger = logger
         received_memory_store = memory_store
+        received_active_memory_context = active_memory_context
 
     monkeypatch.setattr(
         main_module,
@@ -517,3 +539,5 @@ def test_main_orchestrates_conversation_loop(
     assert received_logger is logger
     assert isinstance(received_memory_store, JsonMemoryStore)
     assert received_memory_store.file_path == memory_path
+    assert isinstance(received_active_memory_context, ActiveMemoryContext)
+    assert received_active_memory_context.active_count == 0

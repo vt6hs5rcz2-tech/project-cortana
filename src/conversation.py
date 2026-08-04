@@ -29,13 +29,20 @@ class ConversationTurn:
 
 
 class ConversationApiMessage(TypedDict):
-    """Structured message entry for the OpenAI Responses API."""
+    """Structured conversation message entry for the OpenAI Responses API."""
 
     role: Literal["user", "assistant"]
     content: str
 
 
-ConversationApiInput = str | list[ConversationApiMessage]
+class ApiInputMessage(TypedDict):
+    """Structured API input message, including non-conversation roles."""
+
+    role: Literal["user", "assistant", "developer"]
+    content: str
+
+
+ConversationApiInput = str | list[ApiInputMessage]
 
 
 @dataclass
@@ -96,7 +103,7 @@ class ConversationHistory:
         return completed_turns
 
 
-def _turn_to_api_message(turn: ConversationTurn) -> ConversationApiMessage:
+def _turn_to_api_message(turn: ConversationTurn) -> ApiInputMessage:
     """Convert one stored turn into a structured API message entry."""
     return {"role": turn.role, "content": turn.content}
 
@@ -111,7 +118,7 @@ def build_conversation_input(
     if not history.turns:
         return cleaned_message
 
-    messages: list[ConversationApiMessage] = [
+    messages: list[ApiInputMessage] = [
         _turn_to_api_message(turn) for turn in history.turns
     ]
     messages.append({"role": "user", "content": cleaned_message})

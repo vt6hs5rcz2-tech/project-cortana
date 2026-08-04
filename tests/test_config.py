@@ -1,6 +1,7 @@
 import pytest
 
 from src.config import (
+    ACTIVE_MEMORY_PERSISTENCE_ENABLED,
     APP_NAME,
     APP_DATA_DIR_NAME,
     DATA_DIR,
@@ -8,6 +9,8 @@ from src.config import (
     EXPLICIT_PERSISTENT_MEMORY_ENABLED,
     HISTORY_PERSISTENCE_ENABLED,
     LOG_DIR,
+    MAX_ACTIVE_MEMORIES,
+    MAX_ACTIVE_MEMORY_CHARS,
     MAX_MEMORY_TEXT_LENGTH,
     MEMORY_FILENAME,
     PROJECT_ROOT,
@@ -49,6 +52,9 @@ def test_memory_limits_and_filename_are_centralized() -> None:
     assert MAX_MEMORY_TEXT_LENGTH == 2000
     assert MEMORY_FILENAME == "memories.json"
     assert APP_DATA_DIR_NAME == "ProjectCortana"
+    assert MAX_ACTIVE_MEMORIES == 10
+    assert MAX_ACTIVE_MEMORY_CHARS == 8000
+    assert ACTIVE_MEMORY_PERSISTENCE_ENABLED is False
 
 
 def test_default_memory_path_is_outside_project_source(

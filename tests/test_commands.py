@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import pytest
 
+from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient
 from src.commands import (
     ABOUT_TEXT,
@@ -31,8 +32,11 @@ from src.commands import (
     parse_slash_input,
 )
 from src.config import (
+    ACTIVE_MEMORY_PERSISTENCE_ENABLED,
     EXPLICIT_PERSISTENT_MEMORY_ENABLED,
     HISTORY_PERSISTENCE_ENABLED,
+    MAX_ACTIVE_MEMORIES,
+    MAX_ACTIVE_MEMORY_CHARS,
     MAX_MEMORY_TEXT_LENGTH,
 )
 from src.conversation import ConversationHistory, SHUTDOWN_MESSAGE
@@ -84,6 +88,10 @@ def _memory_store(tmp_path: Path) -> JsonMemoryStore:
     return JsonMemoryStore(tmp_path / "memories.json")
 
 
+def _active_memory_context() -> ActiveMemoryContext:
+    return ActiveMemoryContext()
+
+
 def test_parse_slash_input_recognizes_command_like_messages() -> None:
     """Command-like slash input should return a normalized command name."""
     assert parse_slash_input("/help") == COMMAND_HELP
@@ -122,6 +130,7 @@ def test_handle_slash_command_help_lists_commands(tmp_path: Path) -> None:
         "/help",
         settings=_settings(),
         conversation_history=history,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
     )
 
@@ -133,6 +142,10 @@ def test_handle_slash_command_help_lists_commands(tmp_path: Path) -> None:
     assert "/memories" in result.message
     assert "/forget" in result.message
     assert "/forget-all" in result.message
+    assert "/recall" in result.message
+    assert "/active-memories" in result.message
+    assert "/release" in result.message
+    assert "/release-all" in result.message
     assert "/about" in result.message
     assert "/exit" in result.message
 
@@ -144,6 +157,7 @@ def test_handle_slash_command_about_describes_milestone(tmp_path: Path) -> None:
         "/about",
         settings=_settings(),
         conversation_history=history,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
     )
 
@@ -167,6 +181,7 @@ def test_handle_slash_command_status_reports_session_information(
         "/status",
         settings=_settings(),
         conversation_history=history,
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -181,6 +196,15 @@ def test_handle_slash_command_status_reports_session_information(
     assert f"History persistence: {persistence_label}" in result.message
     assert f"Explicit persistent memory: {memory_label}" in result.message
     assert "Saved memories: 1" in result.message
+    assert "Active memories: 0" in result.message
+    assert f"Maximum active memories: {MAX_ACTIVE_MEMORIES}" in result.message
+    assert "Active memory characters: 0" in result.message
+    assert (
+        f"Maximum active memory characters: {MAX_ACTIVE_MEMORY_CHARS}"
+        in result.message
+    )
+    active_persistence = "enabled" if ACTIVE_MEMORY_PERSISTENCE_ENABLED else "disabled"
+    assert f"Active memory persistence: {active_persistence}" in result.message
 
 
 def test_format_status_reports_centralized_persistence_capability(
@@ -188,15 +212,24 @@ def test_format_status_reports_centralized_persistence_capability(
 ) -> None:
     """Status output should reflect the centralized persistence capability."""
     history = ConversationHistory()
-    status_text = format_status(_settings(), history, _memory_store(tmp_path))
+    status_text = format_status(
+        _settings(),
+        history,
+        _memory_store(tmp_path),
+        _active_memory_context(),
+    )
     persistence_label = "enabled" if HISTORY_PERSISTENCE_ENABLED else "disabled"
     memory_label = "enabled" if EXPLICIT_PERSISTENT_MEMORY_ENABLED else "disabled"
+    active_persistence = "enabled" if ACTIVE_MEMORY_PERSISTENCE_ENABLED else "disabled"
 
     assert f"History persistence: {persistence_label}" in status_text
     assert f"Explicit persistent memory: {memory_label}" in status_text
     assert HISTORY_PERSISTENCE_ENABLED is False
     assert EXPLICIT_PERSISTENT_MEMORY_ENABLED is True
+    assert ACTIVE_MEMORY_PERSISTENCE_ENABLED is False
     assert "Saved memories: 0" in status_text
+    assert "Active memories: 0" in status_text
+    assert f"Active memory persistence: {active_persistence}" in status_text
 
 
 def test_format_status_does_not_expose_sensitive_configuration(
@@ -205,7 +238,7 @@ def test_format_status_does_not_expose_sensitive_configuration(
     """Status output must not reveal secrets, paths, or environment values."""
     history = ConversationHistory()
     store = _memory_store(tmp_path)
-    status_text = format_status(_settings(), history, store).lower()
+    status_text = format_status(_settings(), history, store, _active_memory_context()).lower()
 
     assert "test-api-key" not in status_text
     assert "openai_api_key" not in status_text
@@ -225,6 +258,7 @@ def test_handle_slash_command_clear_removes_active_history(tmp_path: Path) -> No
         "/clear",
         settings=_settings(),
         conversation_history=history,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
     )
 
@@ -251,6 +285,7 @@ def test_handle_slash_command_exit_requests_shutdown(tmp_path: Path) -> None:
         "/exit",
         settings=_settings(),
         conversation_history=history,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
     )
 
@@ -265,6 +300,7 @@ def test_handle_slash_command_unknown_suggests_help(tmp_path: Path) -> None:
         "/unknown",
         settings=_settings(),
         conversation_history=history,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
     )
 
@@ -283,6 +319,7 @@ def test_handle_slash_command_matches_with_surrounding_whitespace(
         "  /HELP  ",
         settings=_settings(),
         conversation_history=history,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
     )
 
@@ -298,6 +335,7 @@ def test_remember_saves_memory_and_returns_id(tmp_path: Path) -> None:
         "/remember Remember this fact",
         settings=_settings(),
         conversation_history=history,
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -317,6 +355,7 @@ def test_remember_preserves_argument_capitalization(tmp_path: Path) -> None:
         "/remember Keep CamelCase Values",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -331,6 +370,7 @@ def test_remember_accepts_slash_containing_text(tmp_path: Path) -> None:
         "/remember Check /var/log/auth.log carefully",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -345,6 +385,7 @@ def test_remember_rejects_missing_text(tmp_path: Path) -> None:
         "/remember   ",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -361,6 +402,7 @@ def test_remember_rejects_oversized_text(tmp_path: Path) -> None:
         f"/remember {oversized}",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -383,6 +425,7 @@ def test_remember_maps_validation_errors_by_type_not_message_text(
         "/remember Any text",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -394,6 +437,7 @@ def test_remember_maps_validation_errors_by_type_not_message_text(
         "/remember Any text",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -410,6 +454,7 @@ def test_memories_lists_records(tmp_path: Path) -> None:
         "/memories",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -425,6 +470,7 @@ def test_memories_empty_state(tmp_path: Path) -> None:
         "/memories",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
     )
 
@@ -440,6 +486,7 @@ def test_forget_deletes_matching_id(tmp_path: Path) -> None:
         f"/forget {record.id}",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -454,6 +501,7 @@ def test_forget_missing_id(tmp_path: Path) -> None:
         "/forget",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
     )
 
@@ -466,6 +514,7 @@ def test_forget_nonexistent_id(tmp_path: Path) -> None:
         "/forget missing-id",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
     )
 
@@ -481,6 +530,7 @@ def test_forget_all_requires_confirmation(tmp_path: Path) -> None:
         "/forget-all",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -498,6 +548,7 @@ def test_forget_all_confirm_deletes_everything(tmp_path: Path) -> None:
         "/forget-all confirm",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -516,6 +567,7 @@ def test_forget_all_failed_confirmation_leaves_memories_intact(
         "/forget-all yes",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -537,12 +589,14 @@ def test_memory_commands_do_not_alter_temporary_conversation_history(
         "/remember Important note",
         settings=_settings(),
         conversation_history=history,
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
     handle_slash_command(
         "/memories",
         settings=_settings(),
         conversation_history=history,
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
     memory_id = store.list_memories()[0].id
@@ -550,6 +604,7 @@ def test_memory_commands_do_not_alter_temporary_conversation_history(
         f"/forget {memory_id}",
         settings=_settings(),
         conversation_history=history,
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -568,6 +623,7 @@ def test_clear_does_not_delete_persistent_memories(tmp_path: Path) -> None:
         "/clear",
         settings=_settings(),
         conversation_history=history,
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -585,6 +641,7 @@ def test_storage_errors_return_safe_local_messages(tmp_path: Path) -> None:
         "/memories",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
@@ -616,6 +673,7 @@ def test_run_conversation_loop_handles_commands_without_ai_call(
         client=FAKE_CLIENT,
         settings=_settings(),
         logger=logger,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -659,6 +717,7 @@ def test_memory_commands_avoid_ai_calls(
         client=FAKE_CLIENT,
         settings=_settings(),
         logger=logger,
+        active_memory_context=_active_memory_context(),
         memory_store=store,
         read_input=lambda: next(inputs),
     )
@@ -682,6 +741,7 @@ def test_run_conversation_loop_exit_command_uses_clean_shutdown(
         client=FAKE_CLIENT,
         settings=_settings(),
         logger=logger,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -709,6 +769,7 @@ def test_run_conversation_loop_normal_message_still_calls_ai(
         user_message: str,
         logger: logging.Logger,
         conversation_history: ConversationHistory | None = None,
+        active_memory_context: ActiveMemoryContext | None = None,
     ) -> None:
         handled_messages.append(user_message)
         print("Cortana: AI response")
@@ -722,6 +783,7 @@ def test_run_conversation_loop_normal_message_still_calls_ai(
         client=FAKE_CLIENT,
         settings=_settings(),
         logger=logger,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -758,6 +820,7 @@ def test_run_conversation_loop_path_like_messages_call_ai(
         user_message: str,
         logger: logging.Logger,
         conversation_history: ConversationHistory | None = None,
+        active_memory_context: ActiveMemoryContext | None = None,
     ) -> None:
         handled_messages.append(user_message)
         if conversation_history is not None:
@@ -776,6 +839,7 @@ def test_run_conversation_loop_path_like_messages_call_ai(
         client=FAKE_CLIENT,
         settings=_settings(),
         logger=logger,
+        active_memory_context=_active_memory_context(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
         conversation_history=history,
@@ -826,6 +890,7 @@ def test_status_storage_error_does_not_crash_session(tmp_path: Path) -> None:
         "/status",
         settings=_settings(),
         conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
         memory_store=store,
     )
 
