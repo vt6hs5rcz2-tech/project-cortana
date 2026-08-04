@@ -16,3 +16,6 @@ TESTS_DIR = PROJECT_ROOT / "tests"
 # Application information
 APP_NAME = "Project Cortana"
 VERSION = "0.1.0"
+
+# Session capabilities
+HISTORY_PERSISTENCE_ENABLED = False

@@ -4,6 +4,7 @@ import logging
 from collections.abc import Callable
 
 from src.ai_service import OpenAIClient, generate_response
+from src.commands import CommandOutcome, handle_slash_command, parse_slash_input
 from src.conversation import (
     STARTUP_GREETING,
     SHUTDOWN_MESSAGE,
@@ -89,6 +90,19 @@ def run_conversation_loop(
         if is_exit_command(user_message):
             end_conversation(logger=logger)
             return
+
+        if parse_slash_input(user_message) is not None:
+            command_result = handle_slash_command(
+                user_message,
+                settings=settings,
+                conversation_history=history,
+            )
+            if command_result.message:
+                print(command_result.message)
+            if command_result.outcome == CommandOutcome.EXIT:
+                end_conversation(logger=logger)
+                return
+            continue
 
         handle_message(
             client=client,

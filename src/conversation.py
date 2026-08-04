@@ -59,6 +59,15 @@ class ConversationHistory:
         """Return a copy of recorded conversation turns."""
         return list(self._turns)
 
+    @property
+    def completed_turn_count(self) -> int:
+        """Return the number of completed user/assistant pairs in history."""
+        return self._completed_turn_count()
+
+    def clear(self) -> None:
+        """Remove all in-memory conversation turns for the active session."""
+        self._turns.clear()
+
     def _trim_completed_turns(self) -> None:
         """Remove the oldest completed user/assistant pairs when over the limit."""
         while self._completed_turn_count() > self.max_completed_turns:

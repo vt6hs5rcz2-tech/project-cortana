@@ -7,6 +7,7 @@ from src.conversation import (
     ConversationHistory,
     build_conversation_input,
 )
+from src.identity import CORTANA_SYSTEM_INSTRUCTIONS
 from src.settings import Settings
 
 
@@ -19,7 +20,13 @@ class AIResponse(Protocol):
 class ResponsesClient(Protocol):
     """Minimum Responses API interface required by Cortana."""
 
-    def create(self, *, model: str, input: ConversationApiInput) -> AIResponse:
+    def create(
+        self,
+        *,
+        model: str,
+        input: ConversationApiInput,
+        instructions: str | None = None,
+    ) -> AIResponse:
         """Create an AI response."""
 
 
@@ -53,6 +60,7 @@ def generate_response(
     response = client.responses.create(
         model=settings.openai_model,
         input=ai_input,
+        instructions=CORTANA_SYSTEM_INSTRUCTIONS,
     )
 
     return response.output_text

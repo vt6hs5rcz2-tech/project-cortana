@@ -113,6 +113,28 @@ def test_conversation_history_keeps_recent_turns_after_trim() -> None:
     assert turns[-1].content == "Answer 21"
 
 
+def test_conversation_history_clear_removes_turns() -> None:
+    """Clear should remove all stored conversation turns."""
+    history = ConversationHistory()
+    history.add_user_message("Hello")
+    history.add_assistant_message("Hi there.")
+
+    history.clear()
+
+    assert history.turns == []
+    assert history.completed_turn_count == 0
+
+
+def test_conversation_history_completed_turn_count() -> None:
+    """Completed turn count should reflect stored user/assistant pairs."""
+    history = ConversationHistory()
+    history.add_user_message("One")
+    history.add_assistant_message("Answer one")
+    history.add_user_message("Two")
+
+    assert history.completed_turn_count == 1
+
+
 def test_startup_and_shutdown_messages_are_defined() -> None:
     """Greeting and shutdown messages should be available for the loop."""
     assert "Hello" in STARTUP_GREETING
