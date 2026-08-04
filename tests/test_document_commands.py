@@ -491,8 +491,12 @@ def test_status_reports_knowledge_vault_safely(tmp_path: Path) -> None:
     assert "Supported document types:" in status
     for extension in sorted(ALLOWED_DOCUMENT_EXTENSIONS):
         assert extension in status
-    assert "Document context injection: disabled" in status
-    assert DOCUMENT_CONTEXT_INJECTION_ENABLED is False
+    assert "Document context injection: enabled (explicit /ask-docs only)" in status
+    assert DOCUMENT_CONTEXT_INJECTION_ENABLED is True
+    assert "Local document retrieval: enabled" in status
+    assert "Semantic retrieval: disabled" in status
+    assert "Current source manifest: absent" in status
+    assert "Source manifest persistence: disabled" in status
     assert "documents.json" not in lowered
     assert str(vault.file_path).lower() not in lowered
     assert str(source.resolve()).lower() not in lowered
@@ -552,6 +556,9 @@ def test_startup_injects_one_vault_and_reload_preserves_documents(
         active_memory_context: ActiveMemoryContext,
         document_vault: DocumentVault,
         document_extractor: DefaultTextExtractor,
+        document_chunker: object = None,
+        document_retriever: object = None,
+        retrieval_session: object = None,
     ) -> None:
         received_vaults.append(document_vault)
 

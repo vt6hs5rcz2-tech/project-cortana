@@ -5,6 +5,7 @@ from src.config import (
     ALLOWED_DOCUMENT_EXTENSIONS,
     APP_NAME,
     APP_DATA_DIR_NAME,
+    CHUNK_OVERLAP,
     DATA_DIR,
     DOCS_DIR,
     DOCUMENT_CONTEXT_INJECTION_ENABLED,
@@ -12,15 +13,23 @@ from src.config import (
     EXPLICIT_PERSISTENT_MEMORY_ENABLED,
     HISTORY_PERSISTENCE_ENABLED,
     KNOWLEDGE_VAULT_ENABLED,
+    LOCAL_DOCUMENT_RETRIEVAL_ENABLED,
     LOG_DIR,
     MAX_ACTIVE_MEMORIES,
     MAX_ACTIVE_MEMORY_CHARS,
+    MAX_CHUNKS_PER_DOCUMENT,
     MAX_DOCUMENT_SOURCE_BYTES,
     MAX_DOCUMENT_TEXT_LENGTH,
     MAX_MEMORY_TEXT_LENGTH,
+    MAX_RETRIEVED_CHUNKS,
+    MAX_RETRIEVED_CONTEXT_CHARS,
     MAX_STORED_DOCUMENTS,
     MEMORY_FILENAME,
+    MIN_CHUNK_LENGTH,
     PROJECT_ROOT,
+    SEMANTIC_RETRIEVAL_ENABLED,
+    SOURCE_MANIFEST_PERSISTENCE_ENABLED,
+    TARGET_CHUNK_SIZE,
     TESTS_DIR,
     VERSION,
     get_default_document_vault_file_path,
@@ -68,12 +77,21 @@ def test_memory_limits_and_filename_are_centralized() -> None:
 def test_knowledge_vault_limits_and_capabilities_are_centralized() -> None:
     """Knowledge Vault configuration should use centralized constants."""
     assert KNOWLEDGE_VAULT_ENABLED is True
-    assert DOCUMENT_CONTEXT_INJECTION_ENABLED is False
+    assert DOCUMENT_CONTEXT_INJECTION_ENABLED is True
+    assert LOCAL_DOCUMENT_RETRIEVAL_ENABLED is True
+    assert SEMANTIC_RETRIEVAL_ENABLED is False
+    assert SOURCE_MANIFEST_PERSISTENCE_ENABLED is False
     assert MAX_DOCUMENT_SOURCE_BYTES == 10 * 1024 * 1024
     assert MAX_DOCUMENT_TEXT_LENGTH == 500_000
     assert MAX_STORED_DOCUMENTS == 100
     assert ALLOWED_DOCUMENT_EXTENSIONS == frozenset({".txt", ".md", ".pdf"})
     assert DOCUMENT_VAULT_FILENAME == "documents.json"
+    assert TARGET_CHUNK_SIZE == 1200
+    assert CHUNK_OVERLAP == 150
+    assert MIN_CHUNK_LENGTH == 40
+    assert MAX_CHUNKS_PER_DOCUMENT == 500
+    assert MAX_RETRIEVED_CHUNKS == 8
+    assert MAX_RETRIEVED_CONTEXT_CHARS == 12_000
 
 
 def test_default_memory_path_is_outside_project_source(

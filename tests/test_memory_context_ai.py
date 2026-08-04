@@ -528,6 +528,9 @@ def test_main_initializes_active_memory_context_once(
         active_memory_context: ActiveMemoryContext,
         document_vault: DocumentVault,
         document_extractor: DefaultTextExtractor,
+        document_chunker: object = None,
+        document_retriever: object = None,
+        retrieval_session: object = None,
     ) -> None:
         received_contexts.append(active_memory_context)
 

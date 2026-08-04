@@ -9,6 +9,8 @@ from src.conversation import (
     ConversationHistory,
     build_conversation_input,
 )
+from src.document_context import build_document_context_api_messages
+from src.document_retrieval import RetrievalResult
 from src.identity import CORTANA_SYSTEM_INSTRUCTIONS
 from src.memory import MemoryRecord
 from src.memory_context import build_active_memory_api_messages
@@ -47,6 +49,8 @@ def generate_response(
     conversation_history: ConversationHistory | None = None,
     active_memories: Sequence[MemoryRecord] | None = None,
     memory_boundary_token: str | None = None,
+    document_results: Sequence[RetrievalResult] | None = None,
+    document_boundary_token: str | None = None,
 ) -> str:
     """Generate a text response for a validated user message."""
     cleaned_message = user_message.strip()
@@ -59,6 +63,8 @@ def generate_response(
         conversation_history=conversation_history,
         active_memories=active_memories,
         memory_boundary_token=memory_boundary_token,
+        document_results=document_results,
+        document_boundary_token=document_boundary_token,
     )
 
     response = client.responses.create(
@@ -76,8 +82,21 @@ def _build_ai_input(
     conversation_history: ConversationHistory | None,
     active_memories: Sequence[MemoryRecord] | None,
     memory_boundary_token: str | None,
+    document_results: Sequence[RetrievalResult] | None,
+    document_boundary_token: str | None,
 ) -> ConversationApiInput:
-    """Build API input, injecting active memories only when explicitly provided."""
+    """Build API input with intentional context ordering.
+
+    Order when context is present:
+    1. active-memory developer context
+    2. retrieved-document developer context
+    3. conversation history
+    4. current user question
+
+    Identity instructions remain in the separate ``instructions`` field.
+    """
+    prefix_messages: list[ApiInputMessage] = []
+
     memories = tuple(active_memories or ())
     if memories:
         if memory_boundary_token is None:
@@ -88,8 +107,26 @@ def _build_ai_input(
             memories,
             boundary_token=memory_boundary_token,
         )
-    else:
-        memory_messages = []
+        prefix_messages.extend(
+            {"role": message["role"], "content": message["content"]}
+            for message in memory_messages
+        )
+
+    documents = tuple(document_results or ())
+    if documents:
+        if document_boundary_token is None:
+            raise ValueError(
+                "A document boundary token is required when document "
+                "results are provided."
+            )
+        document_messages = build_document_context_api_messages(
+            documents,
+            boundary_token=document_boundary_token,
+        )
+        prefix_messages.extend(
+            {"role": message["role"], "content": message["content"]}
+            for message in document_messages
+        )
 
     conversation_input: ConversationApiInput
     if conversation_history is not None:
@@ -100,7 +137,7 @@ def _build_ai_input(
     else:
         conversation_input = cleaned_message
 
-    if not memory_messages:
+    if not prefix_messages:
         return conversation_input
 
     conversation_messages: list[ApiInputMessage]
@@ -111,9 +148,6 @@ def _build_ai_input(
     else:
         conversation_messages = list(conversation_input)
 
-    combined: list[ApiInputMessage] = [
-        {"role": message["role"], "content": message["content"]}
-        for message in memory_messages
-    ]
+    combined: list[ApiInputMessage] = list(prefix_messages)
     combined.extend(conversation_messages)
     return combined

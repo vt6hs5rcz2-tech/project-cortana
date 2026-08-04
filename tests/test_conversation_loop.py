@@ -11,9 +11,12 @@ from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient
 from src.conversation import ConversationHistory, SHUTDOWN_MESSAGE, STARTUP_GREETING
 from src.conversation_loop import handle_message, run_conversation_loop
+from src.document_chunker import DocumentChunker
 from src.document_extractor import DefaultTextExtractor
+from src.document_retrieval import LexicalDocumentRetriever
 from src.document_vault import DocumentVault, JsonDocumentVault
 from src.memory_store import JsonMemoryStore, MemoryStore
+from src.retrieval_session import RetrievalSession
 from src.settings import Settings
 
 FAKE_CLIENT = cast(OpenAIClient, object())
@@ -527,6 +530,9 @@ def test_main_orchestrates_conversation_loop(
     received_active_memory_context: ActiveMemoryContext | None = None
     received_document_vault: DocumentVault | None = None
     received_document_extractor: DefaultTextExtractor | None = None
+    received_document_chunker: DocumentChunker | None = None
+    received_document_retriever: LexicalDocumentRetriever | None = None
+    received_retrieval_session: RetrievalSession | None = None
 
     monkeypatch.setattr(main_module, "setup_logging", lambda: logger)
     monkeypatch.setattr(
@@ -554,10 +560,15 @@ def test_main_orchestrates_conversation_loop(
         active_memory_context: ActiveMemoryContext,
         document_vault: DocumentVault,
         document_extractor: DefaultTextExtractor,
+        document_chunker: DocumentChunker,
+        document_retriever: LexicalDocumentRetriever,
+        retrieval_session: RetrievalSession,
     ) -> None:
         nonlocal received_client, received_settings, received_logger, received_memory_store
         nonlocal received_active_memory_context
         nonlocal received_document_vault, received_document_extractor
+        nonlocal received_document_chunker, received_document_retriever
+        nonlocal received_retrieval_session
         received_client = client
         received_settings = settings
         received_logger = logger
@@ -565,6 +576,9 @@ def test_main_orchestrates_conversation_loop(
         received_active_memory_context = active_memory_context
         received_document_vault = document_vault
         received_document_extractor = document_extractor
+        received_document_chunker = document_chunker
+        received_document_retriever = document_retriever
+        received_retrieval_session = retrieval_session
 
     monkeypatch.setattr(
         main_module,
@@ -584,3 +598,8 @@ def test_main_orchestrates_conversation_loop(
     assert isinstance(received_document_vault, JsonDocumentVault)
     assert received_document_vault.file_path == vault_path
     assert isinstance(received_document_extractor, DefaultTextExtractor)
+    assert isinstance(received_document_chunker, DocumentChunker)
+    assert isinstance(received_document_retriever, LexicalDocumentRetriever)
+    assert received_document_retriever.chunker is received_document_chunker
+    assert isinstance(received_retrieval_session, RetrievalSession)
+    assert received_retrieval_session.has_source_manifest is False

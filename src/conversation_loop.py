@@ -12,9 +12,12 @@ from src.conversation import (
     ConversationHistory,
     is_exit_command,
 )
+from src.document_chunker import DocumentChunker
 from src.document_extractor import TextExtractor
+from src.document_retrieval import LexicalDocumentRetriever
 from src.document_vault import DocumentVault
 from src.memory_store import MemoryStore
+from src.retrieval_session import RetrievalSession
 from src.settings import Settings
 
 BLANK_INPUT_MESSAGE = "Cortana: Please enter a message."
@@ -89,12 +92,18 @@ def run_conversation_loop(
     active_memory_context: ActiveMemoryContext,
     document_vault: DocumentVault,
     document_extractor: TextExtractor,
+    document_chunker: DocumentChunker | None = None,
+    document_retriever: LexicalDocumentRetriever | None = None,
+    retrieval_session: RetrievalSession | None = None,
     read_input: Callable[[], str] | None = None,
     conversation_history: ConversationHistory | None = None,
 ) -> None:
     """Run the interactive conversation until the user exits."""
     input_reader = read_input or (lambda: input("You: "))
     history = conversation_history or ConversationHistory()
+    chunker = document_chunker or DocumentChunker()
+    retriever = document_retriever or LexicalDocumentRetriever(chunker=chunker)
+    session = retrieval_session or RetrievalSession()
 
     print(STARTUP_GREETING)
 
@@ -122,6 +131,9 @@ def run_conversation_loop(
                 active_memory_context=active_memory_context,
                 document_vault=document_vault,
                 document_extractor=document_extractor,
+                document_retriever=retriever,
+                retrieval_session=session,
+                client=client,
             )
             if command_result.message:
                 print(command_result.message)

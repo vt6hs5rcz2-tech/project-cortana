@@ -12,6 +12,8 @@ from src.active_memory import (
     DuplicateActiveMemoryError,
     normalize_memory_id,
 )
+from src.ai_service import OpenAIClient, generate_response
+from src.citation_validation import validate_response_citations
 from src.config import (
     ACTIVE_MEMORY_PERSISTENCE_ENABLED,
     ALLOWED_DOCUMENT_EXTENSIONS,
@@ -19,10 +21,17 @@ from src.config import (
     EXPLICIT_PERSISTENT_MEMORY_ENABLED,
     HISTORY_PERSISTENCE_ENABLED,
     KNOWLEDGE_VAULT_ENABLED,
+    LOCAL_DOCUMENT_RETRIEVAL_ENABLED,
     MAX_ACTIVE_MEMORIES,
     MAX_ACTIVE_MEMORY_CHARS,
     MAX_MEMORY_TEXT_LENGTH,
+    MAX_RETRIEVED_CHUNKS,
+    MAX_RETRIEVED_CONTEXT_CHARS,
+    MAX_SEARCH_DOCS_RESULTS,
+    MAX_SEARCH_RESULT_PREVIEW_CHARS,
     MAX_STORED_DOCUMENTS,
+    SEMANTIC_RETRIEVAL_ENABLED,
+    SOURCE_MANIFEST_PERSISTENCE_ENABLED,
 )
 from src.conversation import ConversationHistory
 from src.document import (
@@ -30,8 +39,17 @@ from src.document import (
     DocumentValidationError,
     validate_document_id,
 )
+from src.document_chunker import DocumentChunkingError
 from src.document_extractor import DocumentExtractionError, TextExtractor
 from src.document_ingestion import DocumentIngestionError, ingest_local_document
+from src.document_retrieval import (
+    BlankRetrievalQueryError,
+    DocumentRetrievalError,
+    LexicalDocumentRetriever,
+    RetrievalContextLimitError,
+    RetrievalResult,
+    build_source_manifest,
+)
 from src.document_vault import (
     DocumentCountLimitError,
     DocumentStorageError,
@@ -40,6 +58,7 @@ from src.document_vault import (
 )
 from src.memory import MemoryRecord, MemoryTextTooLongError, MemoryValidationError
 from src.memory_store import MemoryStorageError, MemoryStore
+from src.retrieval_session import RetrievalSession
 from src.settings import Settings
 
 logger = logging.getLogger("ProjectCortana")
@@ -62,6 +81,9 @@ COMMAND_DOCUMENTS = "documents"
 COMMAND_DOCUMENT = "document"
 COMMAND_REMOVE_DOCUMENT = "remove-document"
 COMMAND_REMOVE_ALL_DOCUMENTS = "remove-all-documents"
+COMMAND_SEARCH_DOCS = "search-docs"
+COMMAND_ASK_DOCS = "ask-docs"
+COMMAND_SOURCES = "sources"
 
 FORGET_ALL_CONFIRM_TOKEN = "confirm"
 REMOVE_ALL_DOCUMENTS_CONFIRM_TOKEN = "confirm"
@@ -86,6 +108,9 @@ SUPPORTED_COMMANDS = frozenset(
         COMMAND_DOCUMENT,
         COMMAND_REMOVE_DOCUMENT,
         COMMAND_REMOVE_ALL_DOCUMENTS,
+        COMMAND_SEARCH_DOCS,
+        COMMAND_ASK_DOCS,
+        COMMAND_SOURCES,
     }
 )
 
@@ -106,6 +131,9 @@ HELP_TEXT = """Cortana: Available commands:
   /document             - Inspect one stored document by ID
   /remove-document      - Delete one stored document by ID
   /remove-all-documents - Delete all stored documents after confirmation
+  /search-docs          - Search Knowledge Vault documents locally
+  /ask-docs             - Ask a source-grounded question over retrieved documents
+  /sources              - Show sources from the latest grounded answer
   /about                - Describe Project Cortana and this software milestone
   /exit                 - End the session cleanly"""
 
@@ -113,12 +141,18 @@ ABOUT_TEXT = (
     "Cortana: Project Cortana is an AI-powered authorized cybersecurity and "
     "defensive-operations assistant. This build is an early software milestone "
     "focused on identity, local commands, in-session conversation, explicit "
-    "user-controlled persistent memory, temporary active memory context, and a "
-    "local Knowledge Vault for explicit document ingestion."
+    "user-controlled persistent memory, temporary active memory context, a "
+    "local Knowledge Vault, and explicit source-grounded document questions."
 )
 
-CLEAR_CONFIRMATION = "Cortana: Conversation history cleared."
-CLEAR_ALREADY_EMPTY = "Cortana: Conversation history is already empty."
+CLEAR_CONFIRMATION = (
+    "Cortana: Conversation history and the latest grounded source manifest "
+    "have been cleared."
+)
+CLEAR_ALREADY_EMPTY = (
+    "Cortana: Conversation history is already empty. "
+    "Any grounded source manifest has also been cleared."
+)
 
 REMEMBER_MISSING_TEXT = "Cortana: Please provide text to remember. Usage: /remember <text>"
 REMEMBER_TOO_LONG = (
@@ -204,6 +238,33 @@ REMOVE_ALL_DOCUMENTS_NOT_CONFIRMED = (
     "Type /remove-all-documents confirm to permanently delete all documents."
 )
 
+SEARCH_DOCS_MISSING_QUERY = (
+    "Cortana: Please provide a search query. Usage: /search-docs <query>"
+)
+SEARCH_DOCS_EMPTY_VAULT = (
+    "Cortana: No documents are stored in the Knowledge Vault."
+)
+SEARCH_DOCS_NO_RESULTS = (
+    "Cortana: No matching document passages were found."
+)
+ASK_DOCS_MISSING_QUESTION = (
+    "Cortana: Please provide a question. Usage: /ask-docs <question>"
+)
+ASK_DOCS_EMPTY_VAULT = (
+    "Cortana: No documents are stored in the Knowledge Vault."
+)
+ASK_DOCS_NO_EVIDENCE = (
+    "Cortana: No supporting document evidence was found for that question."
+)
+ASK_DOCS_AI_FAILURE = "Cortana: I could not complete that request."
+ASK_DOCS_UNAVAILABLE = (
+    "Cortana: Source-grounded document questions are unavailable right now."
+)
+SOURCES_EMPTY = (
+    "Cortana: No grounded document sources are available in this session yet. "
+    "Use /ask-docs to ask a source-grounded question first."
+)
+
 UNKNOWN_COMMAND_TEMPLATE = (
     "Cortana: Unknown command '{command}'. Type /help for available commands."
 )
@@ -235,6 +296,9 @@ class CommandContext:
     active_memory_context: ActiveMemoryContext
     document_vault: DocumentVault
     document_extractor: TextExtractor
+    document_retriever: LexicalDocumentRetriever
+    retrieval_session: RetrievalSession
+    client: OpenAIClient | None = None
 
 
 CommandHandler = Callable[[CommandContext], CommandResult]
@@ -287,8 +351,15 @@ def handle_slash_command(
     active_memory_context: ActiveMemoryContext,
     document_vault: DocumentVault,
     document_extractor: TextExtractor,
+    document_retriever: LexicalDocumentRetriever | None = None,
+    retrieval_session: RetrievalSession | None = None,
+    client: OpenAIClient | None = None,
 ) -> CommandResult:
-    """Handle a slash command locally without calling the AI service."""
+    """Handle a slash command locally.
+
+    Most commands never call the AI service. ``/ask-docs`` is the explicit
+    exception and requires an injected client.
+    """
     command_name = normalize_command_name(message)
     handler = COMMAND_HANDLERS.get(command_name)
 
@@ -306,6 +377,9 @@ def handle_slash_command(
         active_memory_context=active_memory_context,
         document_vault=document_vault,
         document_extractor=document_extractor,
+        document_retriever=document_retriever or LexicalDocumentRetriever(),
+        retrieval_session=retrieval_session or RetrievalSession(),
+        client=client,
     )
     return handler(context)
 
@@ -324,6 +398,7 @@ def _handle_status(context: CommandContext) -> CommandResult:
             context.memory_store,
             context.active_memory_context,
             context.document_vault,
+            context.retrieval_session,
         )
     except MemoryStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
@@ -334,10 +409,13 @@ def _handle_status(context: CommandContext) -> CommandResult:
 
 
 def _handle_clear(context: CommandContext) -> CommandResult:
-    """Clear only temporary conversation history."""
+    """Clear temporary conversation history and the grounded source manifest."""
     return CommandResult(
         outcome=CommandOutcome.CONTINUE,
-        message=clear_conversation_history(context.conversation_history),
+        message=clear_conversation_history(
+            context.conversation_history,
+            retrieval_session=context.retrieval_session,
+        ),
     )
 
 
@@ -750,6 +828,7 @@ def _handle_remove_document(context: CommandContext) -> CommandResult:
             ),
         )
 
+    context.retrieval_session.remove_document(document.id)
     logger.info(
         "Document deleted id=%s filename=%s extension=%s",
         document.id,
@@ -782,6 +861,7 @@ def _handle_remove_all_documents(context: CommandContext) -> CommandResult:
     except DocumentStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
 
+    context.retrieval_session.clear()
     logger.info("Documents deleted count=%s", deleted_count)
 
     if deleted_count == 0:
@@ -794,6 +874,218 @@ def _handle_remove_all_documents(context: CommandContext) -> CommandResult:
         outcome=CommandOutcome.CONTINUE,
         message=REMOVE_ALL_DOCUMENTS_SUCCESS,
     )
+
+
+def _handle_search_docs(context: CommandContext) -> CommandResult:
+    """Run local lexical document search without calling the AI service."""
+    query = extract_command_argument(context.message)
+    if not query.strip():
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=SEARCH_DOCS_MISSING_QUERY,
+        )
+
+    try:
+        documents = context.document_vault.list_documents()
+    except DocumentStorageError as error:
+        return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
+
+    if not documents:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=SEARCH_DOCS_EMPTY_VAULT,
+        )
+
+    try:
+        results = context.document_retriever.search(
+            query,
+            documents,
+            max_results=MAX_SEARCH_DOCS_RESULTS,
+        )
+    except BlankRetrievalQueryError:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=SEARCH_DOCS_MISSING_QUERY,
+        )
+    except (
+        DocumentChunkingError,
+        DocumentRetrievalError,
+        RetrievalContextLimitError,
+    ) as error:
+        logger.error(
+            "Local document search failed error_type=%s",
+            type(error).__name__,
+        )
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message="Cortana: Local document search could not be completed safely.",
+        )
+
+    logger.info("Local document search completed result_count=%s", len(results))
+
+    if not results:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=SEARCH_DOCS_NO_RESULTS,
+        )
+
+    return CommandResult(
+        outcome=CommandOutcome.CONTINUE,
+        message=_format_search_docs_results(results),
+    )
+
+
+def _handle_ask_docs(context: CommandContext) -> CommandResult:
+    """Retrieve local evidence and ask a source-grounded AI question."""
+    question = extract_command_argument(context.message)
+    if not question.strip():
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=ASK_DOCS_MISSING_QUESTION,
+        )
+
+    if context.client is None:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=ASK_DOCS_UNAVAILABLE,
+        )
+
+    try:
+        documents = context.document_vault.list_documents()
+    except DocumentStorageError as error:
+        return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
+
+    if not documents:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=ASK_DOCS_EMPTY_VAULT,
+        )
+
+    try:
+        results = context.document_retriever.search(question, documents)
+    except BlankRetrievalQueryError:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=ASK_DOCS_MISSING_QUESTION,
+        )
+    except (
+        DocumentChunkingError,
+        DocumentRetrievalError,
+        RetrievalContextLimitError,
+    ) as error:
+        logger.error(
+            "Grounded document retrieval failed error_type=%s",
+            type(error).__name__,
+        )
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message="Cortana: Document evidence could not be prepared safely.",
+        )
+
+    if not results:
+        logger.info("Grounded document question found no evidence result_count=0")
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=ASK_DOCS_NO_EVIDENCE,
+        )
+
+    active_memories = context.active_memory_context.list_active()
+    try:
+        answer = generate_response(
+            client=context.client,
+            settings=context.settings,
+            user_message=question.strip(),
+            conversation_history=context.conversation_history,
+            active_memories=active_memories or None,
+            memory_boundary_token=(
+                context.active_memory_context.boundary_token
+                if active_memories
+                else None
+            ),
+            document_results=results,
+            document_boundary_token=context.retrieval_session.boundary_token,
+        )
+    except Exception as error:
+        logger.error(
+            "Grounded document AI request failed error_type=%s",
+            type(error).__name__,
+        )
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=ASK_DOCS_AI_FAILURE,
+        )
+
+    citation_result = validate_response_citations(
+        answer,
+        {result.citation_label for result in results},
+    )
+    final_answer = citation_result.sanitized_response
+    logger.info(
+        "Grounded document question completed result_count=%s "
+        "citation_validation_succeeded=%s",
+        len(results),
+        citation_result.is_valid,
+    )
+
+    manifest = build_source_manifest(results)
+    context.retrieval_session.record_grounded_result(
+        query=question.strip(),
+        source_manifest=manifest,
+        citation_labels={result.citation_label for result in results},
+    )
+
+    context.conversation_history.add_user_message(question.strip())
+    context.conversation_history.add_assistant_message(final_answer)
+
+    return CommandResult(
+        outcome=CommandOutcome.CONTINUE,
+        message=f"Cortana: {final_answer}",
+    )
+
+
+def _handle_sources(context: CommandContext) -> CommandResult:
+    """Show the source manifest from the latest successful /ask-docs request."""
+    manifest = context.retrieval_session.source_manifest
+    if not manifest:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=SOURCES_EMPTY,
+        )
+
+    lines = ["Cortana: Latest grounded sources:"]
+    for entry in manifest:
+        lines.append(
+            f"  {entry.citation_label} filename={entry.filename} "
+            f"chunk_index={entry.chunk_index} "
+            f"chars={entry.start_offset}-{entry.end_offset}"
+        )
+
+    return CommandResult(
+        outcome=CommandOutcome.CONTINUE,
+        message="\n".join(lines),
+    )
+
+
+def _format_search_docs_results(results: list[RetrievalResult]) -> str:
+    """Format ranked local search results with bounded previews."""
+    lines = ["Cortana: Document search results:"]
+    for result in results:
+        preview = _bounded_preview(result.chunk.text)
+        lines.append(
+            f"  {result.citation_label} filename={result.chunk.document_filename} "
+            f"chunk_index={result.chunk.chunk_index}"
+        )
+        lines.append(f"    {preview}")
+    return "\n".join(lines)
+
+
+def _bounded_preview(text: str) -> str:
+    """Return a safely bounded preview of chunk text for local display."""
+    limit = MAX_SEARCH_RESULT_PREVIEW_CHARS
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[:limit]}..."
 
 
 def _find_stored_document(
@@ -834,6 +1126,9 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     COMMAND_DOCUMENT: _handle_document,
     COMMAND_REMOVE_DOCUMENT: _handle_remove_document,
     COMMAND_REMOVE_ALL_DOCUMENTS: _handle_remove_all_documents,
+    COMMAND_SEARCH_DOCS: _handle_search_docs,
+    COMMAND_ASK_DOCS: _handle_ask_docs,
+    COMMAND_SOURCES: _handle_sources,
 }
 
 
@@ -843,6 +1138,7 @@ def format_status(
     memory_store: MemoryStore,
     active_memory_context: ActiveMemoryContext,
     document_vault: DocumentVault,
+    retrieval_session: RetrievalSession | None = None,
 ) -> str:
     """Build safe local session status text for /status."""
     completed_turns = conversation_history.completed_turn_count
@@ -852,6 +1148,13 @@ def format_status(
     active_characters = active_memory_context.total_character_usage
     stored_document_count = document_vault.document_count()
     supported_types = ", ".join(sorted(ALLOWED_DOCUMENT_EXTENSIONS))
+    session = retrieval_session
+    has_manifest = session.has_source_manifest if session is not None else False
+    document_injection = (
+        "enabled (explicit /ask-docs only)"
+        if DOCUMENT_CONTEXT_INJECTION_ENABLED
+        else "disabled"
+    )
 
     return (
         "Cortana: Session status\n"
@@ -875,15 +1178,32 @@ def format_status(
         f"  Stored documents: {stored_document_count}\n"
         f"  Maximum documents: {MAX_STORED_DOCUMENTS}\n"
         f"  Supported document types: {supported_types}\n"
-        "  Document context injection: "
-        f"{'enabled' if DOCUMENT_CONTEXT_INJECTION_ENABLED else 'disabled'}"
+        "  Local document retrieval: "
+        f"{'enabled' if LOCAL_DOCUMENT_RETRIEVAL_ENABLED else 'disabled'}\n"
+        "  Semantic retrieval: "
+        f"{'enabled' if SEMANTIC_RETRIEVAL_ENABLED else 'disabled'}\n"
+        f"  Document context injection: {document_injection}\n"
+        f"  Maximum retrieved chunks: {MAX_RETRIEVED_CHUNKS}\n"
+        "  Maximum retrieved context characters: "
+        f"{MAX_RETRIEVED_CONTEXT_CHARS}\n"
+        "  Current source manifest: "
+        f"{'present' if has_manifest else 'absent'}\n"
+        "  Source manifest persistence: "
+        f"{'enabled' if SOURCE_MANIFEST_PERSISTENCE_ENABLED else 'disabled'}"
     )
 
 
-def clear_conversation_history(conversation_history: ConversationHistory) -> str:
-    """Clear active in-memory history and return a user-facing confirmation."""
-    if not conversation_history.turns:
-        return CLEAR_ALREADY_EMPTY
-
+def clear_conversation_history(
+    conversation_history: ConversationHistory,
+    *,
+    retrieval_session: RetrievalSession | None = None,
+) -> str:
+    """Clear in-memory history and grounded source manifest for the session."""
+    history_was_empty = not conversation_history.turns
     conversation_history.clear()
+    if retrieval_session is not None:
+        retrieval_session.clear()
+
+    if history_was_empty:
+        return CLEAR_ALREADY_EMPTY
     return CLEAR_CONFIRMATION
