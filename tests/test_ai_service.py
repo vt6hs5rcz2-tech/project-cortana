@@ -1,13 +1,20 @@
 """Tests for Project Cortana AI response service."""
 
-from types import SimpleNamespace
+from dataclasses import dataclass
 
 import pytest
 
-from src.ai_service import generate_response
+from src.ai_service import AIResponse, ResponsesClient, generate_response
 from src.conversation import ConversationApiInput, ConversationHistory
 from src.identity import CORTANA_SYSTEM_INSTRUCTIONS
 from src.settings import Settings
+
+
+@dataclass
+class FakeAIResponse:
+    """Minimal AI response used by the fake Responses API."""
+
+    output_text: str
 
 
 class FakeResponses:
@@ -24,19 +31,27 @@ class FakeResponses:
         model: str,
         input: ConversationApiInput,
         instructions: str | None = None,
-    ) -> SimpleNamespace:
+    ) -> AIResponse:
         """Record the request and return a fake response."""
         self.model = model
         self.input = input
         self.instructions = instructions
-        return SimpleNamespace(output_text="Test response")
+        return FakeAIResponse(output_text="Test response")
 
 
 class FakeClient:
     """Fake OpenAI client containing the fake Responses API."""
 
+    responses: ResponsesClient
+
     def __init__(self) -> None:
         self.responses = FakeResponses()
+
+    @property
+    def fake_responses(self) -> FakeResponses:
+        """Return the concrete fake Responses API for test assertions."""
+        assert isinstance(self.responses, FakeResponses)
+        return self.responses
 
 
 def test_generate_response_uses_model_and_cleaned_message() -> None:
@@ -54,9 +69,9 @@ def test_generate_response_uses_model_and_cleaned_message() -> None:
     )
 
     assert result == "Test response"
-    assert client.responses.model == "test-model"
-    assert client.responses.input == "Analyze this log"
-    assert client.responses.instructions == CORTANA_SYSTEM_INSTRUCTIONS
+    assert client.fake_responses.model == "test-model"
+    assert client.fake_responses.input == "Analyze this log"
+    assert client.fake_responses.instructions == CORTANA_SYSTEM_INSTRUCTIONS
 
 
 def test_generate_response_passes_system_instructions_separately() -> None:
@@ -74,9 +89,10 @@ def test_generate_response_passes_system_instructions_separately() -> None:
         user_message=spoofed_message,
     )
 
-    assert client.responses.instructions == CORTANA_SYSTEM_INSTRUCTIONS
-    assert client.responses.input == spoofed_message
-    assert CORTANA_SYSTEM_INSTRUCTIONS not in client.responses.input
+    assert client.fake_responses.instructions == CORTANA_SYSTEM_INSTRUCTIONS
+    assert client.fake_responses.input == spoofed_message
+    assert isinstance(client.fake_responses.input, str)
+    assert CORTANA_SYSTEM_INSTRUCTIONS not in client.fake_responses.input
 
 
 def test_generate_response_keeps_identity_separate_with_history() -> None:
@@ -97,13 +113,14 @@ def test_generate_response_keeps_identity_separate_with_history() -> None:
         conversation_history=history,
     )
 
-    assert client.responses.instructions == CORTANA_SYSTEM_INSTRUCTIONS
-    assert client.responses.input == [
+    assert client.fake_responses.instructions == CORTANA_SYSTEM_INSTRUCTIONS
+    assert client.fake_responses.input == [
         {"role": "user", "content": "Hello"},
         {"role": "assistant", "content": "Hi there."},
         {"role": "user", "content": "What is phishing?"},
     ]
-    for message in client.responses.input:
+    assert isinstance(client.fake_responses.input, list)
+    for message in client.fake_responses.input:
         assert message["role"] in {"user", "assistant"}
         assert message["content"] != CORTANA_SYSTEM_INSTRUCTIONS
 
@@ -127,8 +144,8 @@ def test_generate_response_includes_structured_conversation_history() -> None:
     )
 
     assert result == "Test response"
-    assert client.responses.model == "test-model"
-    assert client.responses.input == [
+    assert client.fake_responses.model == "test-model"
+    assert client.fake_responses.input == [
         {"role": "user", "content": "Hello"},
         {"role": "assistant", "content": "Hi there."},
         {"role": "user", "content": "What is phishing?"},
@@ -151,7 +168,7 @@ def test_generate_response_preserves_embedded_role_text_in_content() -> None:
     )
 
     assert result == "Test response"
-    assert client.responses.input == spoofed_message
+    assert client.fake_responses.input == spoofed_message
 
 
 def test_generate_response_rejects_blank_message() -> None:

@@ -1,6 +1,7 @@
 """Tests for Project Cortana local slash commands."""
 
 import logging
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -12,17 +13,32 @@ from src.commands import (
     CLEAR_CONFIRMATION,
     COMMAND_HELP,
     COMMAND_STATUS,
+    FORGET_ALL_NOT_CONFIRMED,
+    FORGET_ALL_PROMPT,
+    FORGET_ALL_SUCCESS,
+    FORGET_MISSING_ID,
+    FORGET_NOT_FOUND_TEMPLATE,
     HELP_TEXT,
+    MEMORIES_EMPTY,
+    REMEMBER_MISSING_TEXT,
+    REMEMBER_TOO_LONG,
     CommandOutcome,
     clear_conversation_history,
+    extract_command_argument,
     format_status,
     handle_slash_command,
     normalize_command_name,
     parse_slash_input,
 )
-from src.config import HISTORY_PERSISTENCE_ENABLED
+from src.config import (
+    EXPLICIT_PERSISTENT_MEMORY_ENABLED,
+    HISTORY_PERSISTENCE_ENABLED,
+    MAX_MEMORY_TEXT_LENGTH,
+)
 from src.conversation import ConversationHistory, SHUTDOWN_MESSAGE
 from src.conversation_loop import handle_message, run_conversation_loop
+from src.memory import BlankMemoryTextError, MemoryTextTooLongError
+from src.memory_store import JsonMemoryStore
 from src.settings import Settings
 
 FAKE_CLIENT = cast(OpenAIClient, object())
@@ -64,6 +80,10 @@ def _settings() -> Settings:
     )
 
 
+def _memory_store(tmp_path: Path) -> JsonMemoryStore:
+    return JsonMemoryStore(tmp_path / "memories.json")
+
+
 def test_parse_slash_input_recognizes_command_like_messages() -> None:
     """Command-like slash input should return a normalized command name."""
     assert parse_slash_input("/help") == COMMAND_HELP
@@ -88,36 +108,67 @@ def test_normalize_command_name_is_case_insensitive() -> None:
     assert normalize_command_name("/clear") == "clear"
 
 
-def test_handle_slash_command_help_lists_commands() -> None:
+def test_extract_command_argument_preserves_capitalization() -> None:
+    """Arguments after the command token should keep original capitalization."""
+    assert extract_command_argument("/remember Keep CASE") == "Keep CASE"
+    assert extract_command_argument("/forget-all confirm") == "confirm"
+    assert extract_command_argument("/remember") == ""
+
+
+def test_handle_slash_command_help_lists_commands(tmp_path: Path) -> None:
     """The /help command should describe available local commands."""
     history = ConversationHistory()
-    result = handle_slash_command("/help", settings=_settings(), conversation_history=history)
+    result = handle_slash_command(
+        "/help",
+        settings=_settings(),
+        conversation_history=history,
+        memory_store=_memory_store(tmp_path),
+    )
 
     assert result.outcome == CommandOutcome.CONTINUE
     assert result.message == HELP_TEXT
     assert "/status" in result.message
     assert "/clear" in result.message
+    assert "/remember" in result.message
+    assert "/memories" in result.message
+    assert "/forget" in result.message
+    assert "/forget-all" in result.message
     assert "/about" in result.message
     assert "/exit" in result.message
 
 
-def test_handle_slash_command_about_describes_milestone() -> None:
+def test_handle_slash_command_about_describes_milestone(tmp_path: Path) -> None:
     """The /about command should explain the current software milestone."""
     history = ConversationHistory()
-    result = handle_slash_command("/about", settings=_settings(), conversation_history=history)
+    result = handle_slash_command(
+        "/about",
+        settings=_settings(),
+        conversation_history=history,
+        memory_store=_memory_store(tmp_path),
+    )
 
     assert result.outcome == CommandOutcome.CONTINUE
     assert result.message == ABOUT_TEXT
     assert "early software milestone" in result.message
+    assert "persistent memory" in result.message.lower()
 
 
-def test_handle_slash_command_status_reports_session_information() -> None:
+def test_handle_slash_command_status_reports_session_information(
+    tmp_path: Path,
+) -> None:
     """The /status command should report safe local session details."""
     history = ConversationHistory(max_completed_turns=5)
     history.add_user_message("Hello")
     history.add_assistant_message("Hi there.")
+    store = _memory_store(tmp_path)
+    store.add_memory("Status memory")
 
-    result = handle_slash_command("/status", settings=_settings(), conversation_history=history)
+    result = handle_slash_command(
+        "/status",
+        settings=_settings(),
+        conversation_history=history,
+        memory_store=store,
+    )
 
     assert result.outcome == CommandOutcome.CONTINUE
     assert result.message is not None
@@ -126,37 +177,56 @@ def test_handle_slash_command_status_reports_session_information() -> None:
     assert "Retained completed turns: 1" in result.message
     assert "Maximum retained turns: 5" in result.message
     persistence_label = "enabled" if HISTORY_PERSISTENCE_ENABLED else "disabled"
+    memory_label = "enabled" if EXPLICIT_PERSISTENT_MEMORY_ENABLED else "disabled"
     assert f"History persistence: {persistence_label}" in result.message
+    assert f"Explicit persistent memory: {memory_label}" in result.message
+    assert "Saved memories: 1" in result.message
 
 
-def test_format_status_reports_centralized_persistence_capability() -> None:
+def test_format_status_reports_centralized_persistence_capability(
+    tmp_path: Path,
+) -> None:
     """Status output should reflect the centralized persistence capability."""
     history = ConversationHistory()
-    status_text = format_status(_settings(), history)
+    status_text = format_status(_settings(), history, _memory_store(tmp_path))
     persistence_label = "enabled" if HISTORY_PERSISTENCE_ENABLED else "disabled"
+    memory_label = "enabled" if EXPLICIT_PERSISTENT_MEMORY_ENABLED else "disabled"
 
     assert f"History persistence: {persistence_label}" in status_text
+    assert f"Explicit persistent memory: {memory_label}" in status_text
     assert HISTORY_PERSISTENCE_ENABLED is False
+    assert EXPLICIT_PERSISTENT_MEMORY_ENABLED is True
+    assert "Saved memories: 0" in status_text
 
 
-def test_format_status_does_not_expose_sensitive_configuration() -> None:
-    """Status output must not reveal secrets or environment values."""
+def test_format_status_does_not_expose_sensitive_configuration(
+    tmp_path: Path,
+) -> None:
+    """Status output must not reveal secrets, paths, or environment values."""
     history = ConversationHistory()
-    status_text = format_status(_settings(), history).lower()
+    store = _memory_store(tmp_path)
+    status_text = format_status(_settings(), history, store).lower()
 
     assert "test-api-key" not in status_text
     assert "openai_api_key" not in status_text
     assert ".env" not in status_text
     assert "api key" not in status_text
+    assert "memories.json" not in status_text
+    assert str(store.file_path).lower() not in status_text
 
 
-def test_handle_slash_command_clear_removes_active_history() -> None:
+def test_handle_slash_command_clear_removes_active_history(tmp_path: Path) -> None:
     """The /clear command should remove in-memory conversation history."""
     history = ConversationHistory()
     history.add_user_message("Hello")
     history.add_assistant_message("Hi there.")
 
-    result = handle_slash_command("/clear", settings=_settings(), conversation_history=history)
+    result = handle_slash_command(
+        "/clear",
+        settings=_settings(),
+        conversation_history=history,
+        memory_store=_memory_store(tmp_path),
+    )
 
     assert result.outcome == CommandOutcome.CONTINUE
     assert result.message == CLEAR_CONFIRMATION
@@ -174,19 +244,29 @@ def test_clear_conversation_history_when_already_empty() -> None:
     assert history.turns == []
 
 
-def test_handle_slash_command_exit_requests_shutdown() -> None:
+def test_handle_slash_command_exit_requests_shutdown(tmp_path: Path) -> None:
     """The /exit command should signal clean session termination."""
     history = ConversationHistory()
-    result = handle_slash_command("/exit", settings=_settings(), conversation_history=history)
+    result = handle_slash_command(
+        "/exit",
+        settings=_settings(),
+        conversation_history=history,
+        memory_store=_memory_store(tmp_path),
+    )
 
     assert result.outcome == CommandOutcome.EXIT
     assert result.message is None
 
 
-def test_handle_slash_command_unknown_suggests_help() -> None:
+def test_handle_slash_command_unknown_suggests_help(tmp_path: Path) -> None:
     """Unknown slash commands should suggest /help."""
     history = ConversationHistory()
-    result = handle_slash_command("/unknown", settings=_settings(), conversation_history=history)
+    result = handle_slash_command(
+        "/unknown",
+        settings=_settings(),
+        conversation_history=history,
+        memory_store=_memory_store(tmp_path),
+    )
 
     assert result.outcome == CommandOutcome.CONTINUE
     assert result.message is not None
@@ -194,17 +274,329 @@ def test_handle_slash_command_unknown_suggests_help() -> None:
     assert "/help" in result.message
 
 
-def test_handle_slash_command_matches_with_surrounding_whitespace() -> None:
+def test_handle_slash_command_matches_with_surrounding_whitespace(
+    tmp_path: Path,
+) -> None:
     """Commands should match case-insensitively with surrounding whitespace."""
     history = ConversationHistory()
-    result = handle_slash_command("  /HELP  ", settings=_settings(), conversation_history=history)
+    result = handle_slash_command(
+        "  /HELP  ",
+        settings=_settings(),
+        conversation_history=history,
+        memory_store=_memory_store(tmp_path),
+    )
 
     assert result.message == HELP_TEXT
 
 
+def test_remember_saves_memory_and_returns_id(tmp_path: Path) -> None:
+    """The /remember command should save one memory and return its ID."""
+    store = _memory_store(tmp_path)
+    history = ConversationHistory()
+
+    result = handle_slash_command(
+        "/remember Remember this fact",
+        settings=_settings(),
+        conversation_history=history,
+        memory_store=store,
+    )
+
+    memories = store.list_memories()
+    assert result.outcome == CommandOutcome.CONTINUE
+    assert result.message is not None
+    assert len(memories) == 1
+    assert memories[0].text == "Remember this fact"
+    assert memories[0].id in result.message
+
+
+def test_remember_preserves_argument_capitalization(tmp_path: Path) -> None:
+    """Memory text should preserve the user's original capitalization."""
+    store = _memory_store(tmp_path)
+
+    handle_slash_command(
+        "/remember Keep CamelCase Values",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=store,
+    )
+
+    assert store.list_memories()[0].text == "Keep CamelCase Values"
+
+
+def test_remember_accepts_slash_containing_text(tmp_path: Path) -> None:
+    """Ordinary slash characters in memory text should be preserved."""
+    store = _memory_store(tmp_path)
+
+    handle_slash_command(
+        "/remember Check /var/log/auth.log carefully",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=store,
+    )
+
+    assert store.list_memories()[0].text == "Check /var/log/auth.log carefully"
+
+
+def test_remember_rejects_missing_text(tmp_path: Path) -> None:
+    """The /remember command should reject blank or missing text."""
+    store = _memory_store(tmp_path)
+
+    result = handle_slash_command(
+        "/remember   ",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=store,
+    )
+
+    assert result.message == REMEMBER_MISSING_TEXT
+    assert store.list_memories() == []
+
+
+def test_remember_rejects_oversized_text(tmp_path: Path) -> None:
+    """The /remember command should reject text above the maximum length."""
+    store = _memory_store(tmp_path)
+    oversized = "x" * (MAX_MEMORY_TEXT_LENGTH + 1)
+
+    result = handle_slash_command(
+        f"/remember {oversized}",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=store,
+    )
+
+    assert result.message == REMEMBER_TOO_LONG
+    assert store.list_memories() == []
+
+
+def test_remember_maps_validation_errors_by_type_not_message_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Remember responses should follow typed validation errors, not exception wording."""
+    store = _memory_store(tmp_path)
+
+    def raise_too_long(text: str) -> object:
+        raise MemoryTextTooLongError("unrelated wording that must not be inspected")
+
+    monkeypatch.setattr(store, "add_memory", raise_too_long)
+    too_long_result = handle_slash_command(
+        "/remember Any text",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=store,
+    )
+
+    def raise_blank(text: str) -> object:
+        raise BlankMemoryTextError("also unrelated wording")
+
+    monkeypatch.setattr(store, "add_memory", raise_blank)
+    blank_result = handle_slash_command(
+        "/remember Any text",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=store,
+    )
+
+    assert too_long_result.message == REMEMBER_TOO_LONG
+    assert blank_result.message == REMEMBER_MISSING_TEXT
+
+
+def test_memories_lists_records(tmp_path: Path) -> None:
+    """The /memories command should list saved memory details."""
+    store = _memory_store(tmp_path)
+    record = store.add_memory("Listed memory")
+
+    result = handle_slash_command(
+        "/memories",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=store,
+    )
+
+    assert result.message is not None
+    assert record.id in result.message
+    assert record.created_at in result.message
+    assert "Listed memory" in result.message
+
+
+def test_memories_empty_state(tmp_path: Path) -> None:
+    """The /memories command should return a clear empty-state message."""
+    result = handle_slash_command(
+        "/memories",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=_memory_store(tmp_path),
+    )
+
+    assert result.message == MEMORIES_EMPTY
+
+
+def test_forget_deletes_matching_id(tmp_path: Path) -> None:
+    """The /forget command should delete a matching memory ID."""
+    store = _memory_store(tmp_path)
+    record = store.add_memory("Delete me")
+
+    result = handle_slash_command(
+        f"/forget {record.id}",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=store,
+    )
+
+    assert result.message is not None
+    assert record.id in result.message
+    assert store.list_memories() == []
+
+
+def test_forget_missing_id(tmp_path: Path) -> None:
+    """The /forget command should require a memory ID argument."""
+    result = handle_slash_command(
+        "/forget",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=_memory_store(tmp_path),
+    )
+
+    assert result.message == FORGET_MISSING_ID
+
+
+def test_forget_nonexistent_id(tmp_path: Path) -> None:
+    """The /forget command should report when an ID does not exist."""
+    result = handle_slash_command(
+        "/forget missing-id",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=_memory_store(tmp_path),
+    )
+
+    assert result.message == FORGET_NOT_FOUND_TEMPLATE.format(memory_id="missing-id")
+
+
+def test_forget_all_requires_confirmation(tmp_path: Path) -> None:
+    """The first /forget-all command should not delete anything."""
+    store = _memory_store(tmp_path)
+    store.add_memory("Keep me")
+
+    result = handle_slash_command(
+        "/forget-all",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=store,
+    )
+
+    assert result.message == FORGET_ALL_PROMPT
+    assert len(store.list_memories()) == 1
+
+
+def test_forget_all_confirm_deletes_everything(tmp_path: Path) -> None:
+    """Confirmed /forget-all should delete every saved memory."""
+    store = _memory_store(tmp_path)
+    store.add_memory("One")
+    store.add_memory("Two")
+
+    result = handle_slash_command(
+        "/forget-all confirm",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=store,
+    )
+
+    assert result.message == FORGET_ALL_SUCCESS
+    assert store.list_memories() == []
+
+
+def test_forget_all_failed_confirmation_leaves_memories_intact(
+    tmp_path: Path,
+) -> None:
+    """Any non-confirm follow-up should leave memories intact."""
+    store = _memory_store(tmp_path)
+    store.add_memory("Still here")
+
+    result = handle_slash_command(
+        "/forget-all yes",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=store,
+    )
+
+    assert result.message == FORGET_ALL_NOT_CONFIRMED
+    assert len(store.list_memories()) == 1
+
+
+def test_memory_commands_do_not_alter_temporary_conversation_history(
+    tmp_path: Path,
+) -> None:
+    """Memory commands should not modify temporary conversation history."""
+    store = _memory_store(tmp_path)
+    history = ConversationHistory()
+    history.add_user_message("Hello")
+    history.add_assistant_message("Hi")
+    original_turns = history.turns
+
+    handle_slash_command(
+        "/remember Important note",
+        settings=_settings(),
+        conversation_history=history,
+        memory_store=store,
+    )
+    handle_slash_command(
+        "/memories",
+        settings=_settings(),
+        conversation_history=history,
+        memory_store=store,
+    )
+    memory_id = store.list_memories()[0].id
+    handle_slash_command(
+        f"/forget {memory_id}",
+        settings=_settings(),
+        conversation_history=history,
+        memory_store=store,
+    )
+
+    assert history.turns == original_turns
+
+
+def test_clear_does_not_delete_persistent_memories(tmp_path: Path) -> None:
+    """Clearing conversation history must not delete persistent memories."""
+    store = _memory_store(tmp_path)
+    store.add_memory("Persistent")
+    history = ConversationHistory()
+    history.add_user_message("Hello")
+    history.add_assistant_message("Hi")
+
+    handle_slash_command(
+        "/clear",
+        settings=_settings(),
+        conversation_history=history,
+        memory_store=store,
+    )
+
+    assert history.turns == []
+    assert len(store.list_memories()) == 1
+
+
+def test_storage_errors_return_safe_local_messages(tmp_path: Path) -> None:
+    """Memory storage failures should return safe local messages."""
+    path = tmp_path / "memories.json"
+    path.write_text("{bad-json", encoding="utf-8")
+    store = JsonMemoryStore(path)
+
+    result = handle_slash_command(
+        "/memories",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=store,
+    )
+
+    assert result.message is not None
+    assert "could not be loaded safely" in result.message
+    assert path.read_text(encoding="utf-8") == "{bad-json"
+
+
 def test_run_conversation_loop_handles_commands_without_ai_call(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """Slash commands should be handled locally without calling the AI service."""
     logger = FakeLogger()
@@ -224,6 +616,7 @@ def test_run_conversation_loop_handles_commands_without_ai_call(
         client=FAKE_CLIENT,
         settings=_settings(),
         logger=logger,
+        memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
 
@@ -234,8 +627,52 @@ def test_run_conversation_loop_handles_commands_without_ai_call(
     assert SHUTDOWN_MESSAGE in output
 
 
+def test_memory_commands_avoid_ai_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """All memory commands should be handled locally without AI calls."""
+    logger = FakeLogger()
+    ai_calls = 0
+    store = _memory_store(tmp_path)
+    inputs = iter(
+        [
+            "/remember Local only",
+            "/memories",
+            "/forget-all",
+            "/forget-all confirm",
+            "exit",
+        ]
+    )
+
+    def fake_handle_message(**kwargs: object) -> None:
+        nonlocal ai_calls
+        ai_calls += 1
+
+    monkeypatch.setattr(
+        "src.conversation_loop.handle_message",
+        fake_handle_message,
+    )
+
+    run_conversation_loop(
+        client=FAKE_CLIENT,
+        settings=_settings(),
+        logger=logger,
+        memory_store=store,
+        read_input=lambda: next(inputs),
+    )
+
+    output = capsys.readouterr().out
+
+    assert ai_calls == 0
+    assert "Memory saved" in output
+    assert FORGET_ALL_SUCCESS in output
+
+
 def test_run_conversation_loop_exit_command_uses_clean_shutdown(
-    capsys,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """The /exit command should use the same shutdown behavior as exit text."""
     logger = FakeLogger()
@@ -245,6 +682,7 @@ def test_run_conversation_loop_exit_command_uses_clean_shutdown(
         client=FAKE_CLIENT,
         settings=_settings(),
         logger=logger,
+        memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
 
@@ -255,8 +693,9 @@ def test_run_conversation_loop_exit_command_uses_clean_shutdown(
 
 
 def test_run_conversation_loop_normal_message_still_calls_ai(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """Non-command input should continue through the AI conversation path."""
     logger = FakeLogger()
@@ -283,6 +722,7 @@ def test_run_conversation_loop_normal_message_still_calls_ai(
         client=FAKE_CLIENT,
         settings=_settings(),
         logger=logger,
+        memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
 
@@ -301,8 +741,9 @@ def test_run_conversation_loop_normal_message_still_calls_ai(
     ],
 )
 def test_run_conversation_loop_path_like_messages_call_ai(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
     path_message: str,
 ) -> None:
     """Absolute paths should continue through the AI conversation path."""
@@ -335,6 +776,7 @@ def test_run_conversation_loop_path_like_messages_call_ai(
         client=FAKE_CLIENT,
         settings=_settings(),
         logger=logger,
+        memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
         conversation_history=history,
     )
@@ -348,8 +790,8 @@ def test_run_conversation_loop_path_like_messages_call_ai(
 
 
 def test_handle_message_records_path_like_input_in_history(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Path-like user input should be stored in conversation history normally."""
     logger = FakeLogger()
@@ -372,3 +814,21 @@ def test_handle_message_records_path_like_input_in_history(
 
     assert history.turns[0].content == "/etc/passwd"
     assert history.turns[1].content == "Review complete."
+
+
+def test_status_storage_error_does_not_crash_session(tmp_path: Path) -> None:
+    """Status should surface storage errors without raising from command handling."""
+    path = tmp_path / "memories.json"
+    path.write_text("", encoding="utf-8")
+    store = JsonMemoryStore(path)
+
+    result = handle_slash_command(
+        "/status",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        memory_store=store,
+    )
+
+    assert result.outcome == CommandOutcome.CONTINUE
+    assert result.message is not None
+    assert "could not be loaded safely" in result.message

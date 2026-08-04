@@ -6,7 +6,7 @@ import src.settings
 from src.settings import Settings, load_settings
 
 
-def test_load_settings_calls_dotenv(monkeypatch) -> None:
+def test_load_settings_calls_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     """Environment-file loading should occur only when settings are loaded."""
     dotenv_called = False
 
@@ -23,7 +23,9 @@ def test_load_settings_calls_dotenv(monkeypatch) -> None:
     assert dotenv_called is True
 
 
-def test_load_settings_uses_environment_values(monkeypatch) -> None:
+def test_load_settings_uses_environment_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Settings should use values supplied through environment variables."""
     monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
     monkeypatch.setenv("OPENAI_MODEL", "test-model")
@@ -34,7 +36,7 @@ def test_load_settings_uses_environment_values(monkeypatch) -> None:
     assert settings.openai_model == "test-model"
 
 
-def test_load_settings_strips_whitespace(monkeypatch) -> None:
+def test_load_settings_strips_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
     """Settings should remove accidental surrounding whitespace."""
     monkeypatch.setenv("OPENAI_API_KEY", "  test-api-key  ")
     monkeypatch.setenv("OPENAI_MODEL", "  test-model  ")
@@ -45,7 +47,9 @@ def test_load_settings_strips_whitespace(monkeypatch) -> None:
     assert settings.openai_model == "test-model"
 
 
-def test_load_settings_uses_default_model_when_blank(monkeypatch) -> None:
+def test_load_settings_uses_default_model_when_blank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A blank model value should fall back to the default model."""
     monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
     monkeypatch.setenv("OPENAI_MODEL", "   ")
@@ -55,7 +59,9 @@ def test_load_settings_uses_default_model_when_blank(monkeypatch) -> None:
     assert settings.openai_model == "gpt-5"
 
 
-def test_load_settings_rejects_blank_api_key(monkeypatch) -> None:
+def test_load_settings_rejects_blank_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A blank API key should produce a clear configuration error."""
     monkeypatch.setenv("OPENAI_API_KEY", "   ")
     monkeypatch.setenv("OPENAI_MODEL", "gpt-5")
@@ -78,4 +84,3 @@ def test_settings_repr_hides_api_key() -> None:
 
     assert "super-secret-api-key" not in displayed_settings
     assert "test-model" in displayed_settings
-    

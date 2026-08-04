@@ -1,16 +1,20 @@
 """Tests for Project Cortana OpenAI client creation."""
 
+import pytest
+
 import src.openai_client
 from src.openai_client import create_openai_client
 from src.settings import Settings
 
 
-def test_create_openai_client_uses_settings_api_key(monkeypatch) -> None:
+def test_create_openai_client_uses_settings_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The OpenAI client should receive the validated API key."""
-    captured_api_key = None
+    captured_api_key: str | None = None
     fake_client = object()
 
-    def fake_openai(*, api_key: str):
+    def fake_openai(*, api_key: str) -> object:
         nonlocal captured_api_key
         captured_api_key = api_key
         return fake_client
@@ -26,4 +30,3 @@ def test_create_openai_client_uses_settings_api_key(monkeypatch) -> None:
 
     assert client is fake_client
     assert captured_api_key == "test-api-key"
-    

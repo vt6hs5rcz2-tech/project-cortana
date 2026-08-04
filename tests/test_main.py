@@ -3,6 +3,8 @@
 import logging
 from typing import Any, cast
 
+import pytest
+
 import main as main_module
 from src.ai_service import OpenAIClient
 from src.settings import Settings
@@ -38,8 +40,8 @@ class FakeLogger(logging.Logger):
 
 
 def test_initialize_ai_handles_missing_api_key(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Initialization should explain a missing API key without crashing."""
     logger = FakeLogger()
@@ -63,7 +65,7 @@ def test_initialize_ai_handles_missing_api_key(
 
 
 def test_initialize_ai_returns_settings_and_client(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Valid settings should produce an OpenAI client."""
     logger = FakeLogger()

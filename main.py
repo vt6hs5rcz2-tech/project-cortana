@@ -4,9 +4,10 @@ import logging
 from typing import cast
 
 from src.ai_service import OpenAIClient
-from src.config import APP_NAME, VERSION
+from src.config import APP_NAME, VERSION, get_default_memory_file_path
 from src.conversation_loop import run_conversation_loop
 from src.logger import setup_logging
+from src.memory_store import JsonMemoryStore
 from src.openai_client import create_openai_client
 from src.settings import Settings, load_settings
 
@@ -46,10 +47,13 @@ def main() -> None:
     settings, client = initialized
     print("Cortana's AI connection is configured.")
 
+    memory_store = JsonMemoryStore(get_default_memory_file_path())
+
     run_conversation_loop(
         client=client,
         settings=settings,
         logger=logger,
+        memory_store=memory_store,
     )
 
 

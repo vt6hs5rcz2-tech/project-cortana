@@ -1,15 +1,23 @@
 """Tests for Project Cortana conversation loop."""
 
 import logging
+from pathlib import Path
 from typing import Any, cast
+
+import pytest
 
 import main as main_module
 from src.ai_service import OpenAIClient
 from src.conversation import ConversationHistory, SHUTDOWN_MESSAGE, STARTUP_GREETING
 from src.conversation_loop import handle_message, run_conversation_loop
+from src.memory_store import JsonMemoryStore, MemoryStore
 from src.settings import Settings
 
 FAKE_CLIENT = cast(OpenAIClient, object())
+
+
+def _memory_store(tmp_path: Path) -> JsonMemoryStore:
+    return JsonMemoryStore(tmp_path / "memories.json")
 
 
 class FakeLogger(logging.Logger):
@@ -42,8 +50,8 @@ class FakeLogger(logging.Logger):
 
 
 def test_handle_message_prints_ai_response(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A successful AI response should be displayed to the user."""
     logger = FakeLogger()
@@ -89,8 +97,8 @@ def test_handle_message_prints_ai_response(
 
 
 def test_handle_message_updates_conversation_history(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Successful responses should be stored in session history."""
     logger = FakeLogger()
@@ -121,8 +129,8 @@ def test_handle_message_updates_conversation_history(
 
 
 def test_handle_message_does_not_update_history_on_error(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Failed AI requests should not alter conversation history."""
     logger = FakeLogger()
@@ -153,8 +161,8 @@ def test_handle_message_does_not_update_history_on_error(
 
 
 def test_handle_message_logs_only_safe_error_type(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """AI failures should not expose the exception message."""
     logger = FakeLogger()
@@ -194,7 +202,8 @@ def test_handle_message_logs_only_safe_error_type(
 
 
 def test_run_conversation_loop_displays_startup_greeting(
-    capsys,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """The loop should greet the user before accepting input."""
     logger = FakeLogger()
@@ -207,6 +216,7 @@ def test_run_conversation_loop_displays_startup_greeting(
             openai_model="test-model",
         ),
         logger=logger,
+        memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
 
@@ -216,8 +226,9 @@ def test_run_conversation_loop_displays_startup_greeting(
 
 
 def test_run_conversation_loop_exits_on_exit_command(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """Exit commands should end the session with a shutdown message."""
     logger = FakeLogger()
@@ -230,6 +241,7 @@ def test_run_conversation_loop_exits_on_exit_command(
             openai_model="test-model",
         ),
         logger=logger,
+        memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
 
@@ -240,8 +252,9 @@ def test_run_conversation_loop_exits_on_exit_command(
 
 
 def test_run_conversation_loop_rejects_blank_input_without_ai_call(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """Blank input should be rejected and the loop should continue."""
     logger = FakeLogger()
@@ -264,6 +277,7 @@ def test_run_conversation_loop_rejects_blank_input_without_ai_call(
             openai_model="test-model",
         ),
         logger=logger,
+        memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
 
@@ -274,8 +288,9 @@ def test_run_conversation_loop_rejects_blank_input_without_ai_call(
 
 
 def test_run_conversation_loop_continues_after_ai_error(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """Temporary AI failures should not terminate the session."""
     logger = FakeLogger()
@@ -301,6 +316,7 @@ def test_run_conversation_loop_continues_after_ai_error(
             openai_model="test-model",
         ),
         logger=logger,
+        memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
 
@@ -312,8 +328,9 @@ def test_run_conversation_loop_continues_after_ai_error(
 
 
 def test_run_conversation_loop_processes_multiple_messages(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """The loop should handle several messages before exiting."""
     logger = FakeLogger()
@@ -343,6 +360,7 @@ def test_run_conversation_loop_processes_multiple_messages(
             openai_model="test-model",
         ),
         logger=logger,
+        memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
 
@@ -355,8 +373,9 @@ def test_run_conversation_loop_processes_multiple_messages(
 
 
 def test_run_conversation_loop_rejects_whitespace_only_input_without_ai_call(
-    monkeypatch,
-    capsys,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """Whitespace-only input should be rejected and the loop should continue."""
     logger = FakeLogger()
@@ -379,6 +398,7 @@ def test_run_conversation_loop_rejects_whitespace_only_input_without_ai_call(
             openai_model="test-model",
         ),
         logger=logger,
+        memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
 
@@ -389,7 +409,8 @@ def test_run_conversation_loop_rejects_whitespace_only_input_without_ai_call(
 
 
 def test_run_conversation_loop_exits_cleanly_on_eof(
-    capsys,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """EOF during input should print the shutdown message without a traceback."""
     logger = FakeLogger()
@@ -404,6 +425,7 @@ def test_run_conversation_loop_exits_cleanly_on_eof(
             openai_model="test-model",
         ),
         logger=logger,
+        memory_store=_memory_store(tmp_path),
         read_input=raise_eof,
     )
 
@@ -414,7 +436,8 @@ def test_run_conversation_loop_exits_cleanly_on_eof(
 
 
 def test_run_conversation_loop_exits_cleanly_on_keyboard_interrupt(
-    capsys,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     """KeyboardInterrupt during input should exit cleanly without a traceback."""
     logger = FakeLogger()
@@ -429,6 +452,7 @@ def test_run_conversation_loop_exits_cleanly_on_keyboard_interrupt(
             openai_model="test-model",
         ),
         logger=logger,
+        memory_store=_memory_store(tmp_path),
         read_input=raise_keyboard_interrupt,
     )
 
@@ -438,19 +462,22 @@ def test_run_conversation_loop_exits_cleanly_on_keyboard_interrupt(
     assert logger.info_messages == ["Conversation session ended by user."]
 
 
-def test_main_orchestrates_conversation_loop(monkeypatch) -> None:
-    """Main should initialize Cortana and start the conversation loop."""
+def test_main_orchestrates_conversation_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Main should initialize Cortana, inject memory storage, and start the loop."""
     logger = FakeLogger()
     fake_settings = Settings(
         openai_api_key="test-api-key",
         openai_model="test-model",
     )
     fake_client = cast(OpenAIClient, object())
-    received_arguments: tuple[
-        OpenAIClient,
-        Settings,
-        logging.Logger,
-    ] | None = None
+    memory_path = tmp_path / "memories.json"
+    received_client: OpenAIClient | None = None
+    received_settings: Settings | None = None
+    received_logger: logging.Logger | None = None
+    received_memory_store: MemoryStore | None = None
 
     monkeypatch.setattr(main_module, "setup_logging", lambda: logger)
     monkeypatch.setattr(
@@ -458,15 +485,24 @@ def test_main_orchestrates_conversation_loop(monkeypatch) -> None:
         "initialize_ai",
         lambda supplied_logger: (fake_settings, fake_client),
     )
+    monkeypatch.setattr(
+        main_module,
+        "get_default_memory_file_path",
+        lambda: memory_path,
+    )
 
     def fake_run_conversation_loop(
         *,
         client: OpenAIClient,
         settings: Settings,
         logger: logging.Logger,
+        memory_store: MemoryStore,
     ) -> None:
-        nonlocal received_arguments
-        received_arguments = (client, settings, logger)
+        nonlocal received_client, received_settings, received_logger, received_memory_store
+        received_client = client
+        received_settings = settings
+        received_logger = logger
+        received_memory_store = memory_store
 
     monkeypatch.setattr(
         main_module,
@@ -476,4 +512,8 @@ def test_main_orchestrates_conversation_loop(monkeypatch) -> None:
 
     main_module.main()
 
-    assert received_arguments == (fake_client, fake_settings, logger)
+    assert received_client is fake_client
+    assert received_settings is fake_settings
+    assert received_logger is logger
+    assert isinstance(received_memory_store, JsonMemoryStore)
+    assert received_memory_store.file_path == memory_path

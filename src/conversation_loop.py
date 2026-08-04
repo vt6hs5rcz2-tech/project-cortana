@@ -11,6 +11,7 @@ from src.conversation import (
     ConversationHistory,
     is_exit_command,
 )
+from src.memory_store import MemoryStore
 from src.settings import Settings
 
 BLANK_INPUT_MESSAGE = "Cortana: Please enter a message."
@@ -67,6 +68,7 @@ def run_conversation_loop(
     client: OpenAIClient,
     settings: Settings,
     logger: logging.Logger,
+    memory_store: MemoryStore,
     read_input: Callable[[], str] | None = None,
     conversation_history: ConversationHistory | None = None,
 ) -> None:
@@ -96,6 +98,7 @@ def run_conversation_loop(
                 user_message,
                 settings=settings,
                 conversation_history=history,
+                memory_store=memory_store,
             )
             if command_result.message:
                 print(command_result.message)
