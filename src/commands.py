@@ -14,13 +14,30 @@ from src.active_memory import (
 )
 from src.config import (
     ACTIVE_MEMORY_PERSISTENCE_ENABLED,
+    ALLOWED_DOCUMENT_EXTENSIONS,
+    DOCUMENT_CONTEXT_INJECTION_ENABLED,
     EXPLICIT_PERSISTENT_MEMORY_ENABLED,
     HISTORY_PERSISTENCE_ENABLED,
+    KNOWLEDGE_VAULT_ENABLED,
     MAX_ACTIVE_MEMORIES,
     MAX_ACTIVE_MEMORY_CHARS,
     MAX_MEMORY_TEXT_LENGTH,
+    MAX_STORED_DOCUMENTS,
 )
 from src.conversation import ConversationHistory
+from src.document import (
+    DocumentRecord,
+    DocumentValidationError,
+    validate_document_id,
+)
+from src.document_extractor import DocumentExtractionError, TextExtractor
+from src.document_ingestion import DocumentIngestionError, ingest_local_document
+from src.document_vault import (
+    DocumentCountLimitError,
+    DocumentStorageError,
+    DocumentVault,
+    DuplicateDocumentHashError,
+)
 from src.memory import MemoryRecord, MemoryTextTooLongError, MemoryValidationError
 from src.memory_store import MemoryStorageError, MemoryStore
 from src.settings import Settings
@@ -40,8 +57,14 @@ COMMAND_RECALL = "recall"
 COMMAND_ACTIVE_MEMORIES = "active-memories"
 COMMAND_RELEASE = "release"
 COMMAND_RELEASE_ALL = "release-all"
+COMMAND_ADD_DOCUMENT = "add-document"
+COMMAND_DOCUMENTS = "documents"
+COMMAND_DOCUMENT = "document"
+COMMAND_REMOVE_DOCUMENT = "remove-document"
+COMMAND_REMOVE_ALL_DOCUMENTS = "remove-all-documents"
 
 FORGET_ALL_CONFIRM_TOKEN = "confirm"
+REMOVE_ALL_DOCUMENTS_CONFIRM_TOKEN = "confirm"
 
 SUPPORTED_COMMANDS = frozenset(
     {
@@ -58,29 +81,40 @@ SUPPORTED_COMMANDS = frozenset(
         COMMAND_ACTIVE_MEMORIES,
         COMMAND_RELEASE,
         COMMAND_RELEASE_ALL,
+        COMMAND_ADD_DOCUMENT,
+        COMMAND_DOCUMENTS,
+        COMMAND_DOCUMENT,
+        COMMAND_REMOVE_DOCUMENT,
+        COMMAND_REMOVE_ALL_DOCUMENTS,
     }
 )
 
 HELP_TEXT = """Cortana: Available commands:
-  /help            - List available commands and brief descriptions
-  /status          - Show safe local session information
-  /clear           - Clear in-memory conversation history for this session
-  /remember        - Save one explicit persistent memory
-  /memories        - List saved persistent memories
-  /forget          - Delete one saved memory by ID
-  /forget-all      - Delete all saved memories after confirmation
-  /recall          - Activate one saved memory for temporary AI context
-  /active-memories - List memories currently active for AI context
-  /release         - Remove one memory from active AI context
-  /release-all     - Clear all active AI memory context for this session
-  /about           - Describe Project Cortana and this software milestone
-  /exit            - End the session cleanly"""
+  /help                 - List available commands and brief descriptions
+  /status               - Show safe local session information
+  /clear                - Clear in-memory conversation history for this session
+  /remember             - Save one explicit persistent memory
+  /memories             - List saved persistent memories
+  /forget               - Delete one saved memory by ID
+  /forget-all           - Delete all saved memories after confirmation
+  /recall               - Activate one saved memory for temporary AI context
+  /active-memories      - List memories currently active for AI context
+  /release              - Remove one memory from active AI context
+  /release-all          - Clear all active AI memory context for this session
+  /add-document         - Ingest one local document into the Knowledge Vault
+  /documents            - List stored Knowledge Vault documents
+  /document             - Inspect one stored document by ID
+  /remove-document      - Delete one stored document by ID
+  /remove-all-documents - Delete all stored documents after confirmation
+  /about                - Describe Project Cortana and this software milestone
+  /exit                 - End the session cleanly"""
 
 ABOUT_TEXT = (
     "Cortana: Project Cortana is an AI-powered authorized cybersecurity and "
     "defensive-operations assistant. This build is an early software milestone "
     "focused on identity, local commands, in-session conversation, explicit "
-    "user-controlled persistent memory, and temporary active memory context."
+    "user-controlled persistent memory, temporary active memory context, and a "
+    "local Knowledge Vault for explicit document ingestion."
 )
 
 CLEAR_CONFIRMATION = "Cortana: Conversation history cleared."
@@ -131,6 +165,45 @@ RELEASE_SUCCESS_TEMPLATE = (
 RELEASE_ALL_SUCCESS = "Cortana: All active memories have been released."
 RELEASE_ALL_ALREADY_EMPTY = "Cortana: No active memories to release."
 
+ADD_DOCUMENT_MISSING_PATH = (
+    "Cortana: Please provide a file path. Usage: /add-document <path>"
+)
+ADD_DOCUMENT_SUCCESS_TEMPLATE = (
+    "Cortana: Document ingested ({document_id}). "
+    "Filename: {filename}. Extracted characters: {character_count}."
+)
+DOCUMENTS_EMPTY = "Cortana: No documents are stored in the Knowledge Vault."
+DOCUMENT_MISSING_ID = (
+    "Cortana: Please provide a document ID. Usage: /document <document-id>"
+)
+DOCUMENT_NOT_FOUND_TEMPLATE = (
+    "Cortana: No stored document found with ID '{document_id}'."
+)
+REMOVE_DOCUMENT_MISSING_ID = (
+    "Cortana: Please provide a document ID. Usage: /remove-document <document-id>"
+)
+REMOVE_DOCUMENT_NOT_FOUND_TEMPLATE = (
+    "Cortana: No stored document found with ID '{document_id}'."
+)
+REMOVE_DOCUMENT_SUCCESS_TEMPLATE = (
+    "Cortana: Deleted document '{document_id}'."
+)
+REMOVE_ALL_DOCUMENTS_PROMPT = (
+    "Cortana: This will permanently delete all Knowledge Vault documents. "
+    "Type /remove-all-documents confirm to proceed."
+)
+REMOVE_ALL_DOCUMENTS_SUCCESS = (
+    "Cortana: All Knowledge Vault documents have been deleted."
+)
+REMOVE_ALL_DOCUMENTS_ALREADY_EMPTY = (
+    "Cortana: There are no Knowledge Vault documents to delete."
+)
+REMOVE_ALL_DOCUMENTS_NOT_CONFIRMED = (
+    "Cortana: Remove-all-documents was not confirmed. "
+    "Stored documents were left unchanged. "
+    "Type /remove-all-documents confirm to permanently delete all documents."
+)
+
 UNKNOWN_COMMAND_TEMPLATE = (
     "Cortana: Unknown command '{command}'. Type /help for available commands."
 )
@@ -160,6 +233,8 @@ class CommandContext:
     conversation_history: ConversationHistory
     memory_store: MemoryStore
     active_memory_context: ActiveMemoryContext
+    document_vault: DocumentVault
+    document_extractor: TextExtractor
 
 
 CommandHandler = Callable[[CommandContext], CommandResult]
@@ -210,6 +285,8 @@ def handle_slash_command(
     conversation_history: ConversationHistory,
     memory_store: MemoryStore,
     active_memory_context: ActiveMemoryContext,
+    document_vault: DocumentVault,
+    document_extractor: TextExtractor,
 ) -> CommandResult:
     """Handle a slash command locally without calling the AI service."""
     command_name = normalize_command_name(message)
@@ -227,6 +304,8 @@ def handle_slash_command(
         conversation_history=conversation_history,
         memory_store=memory_store,
         active_memory_context=active_memory_context,
+        document_vault=document_vault,
+        document_extractor=document_extractor,
     )
     return handler(context)
 
@@ -244,8 +323,11 @@ def _handle_status(context: CommandContext) -> CommandResult:
             context.conversation_history,
             context.memory_store,
             context.active_memory_context,
+            context.document_vault,
         )
     except MemoryStorageError as error:
+        return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
+    except DocumentStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
 
     return CommandResult(outcome=CommandOutcome.CONTINUE, message=status_text)
@@ -526,6 +608,213 @@ def _handle_release_all(context: CommandContext) -> CommandResult:
     )
 
 
+def _handle_add_document(context: CommandContext) -> CommandResult:
+    """Ingest one explicitly supplied local document without calling the AI."""
+    path_argument = extract_command_argument(context.message)
+    if not path_argument.strip():
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=ADD_DOCUMENT_MISSING_PATH,
+        )
+
+    try:
+        record = ingest_local_document(
+            path_argument,
+            vault=context.document_vault,
+            extractor=context.document_extractor,
+        )
+    except DuplicateDocumentHashError as error:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=error.user_message,
+        )
+    except DocumentCountLimitError as error:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=error.user_message,
+        )
+    except DocumentExtractionError as error:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=error.user_message,
+        )
+    except DocumentIngestionError as error:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=error.user_message,
+        )
+    except DocumentStorageError as error:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=error.user_message,
+        )
+
+    return CommandResult(
+        outcome=CommandOutcome.CONTINUE,
+        message=ADD_DOCUMENT_SUCCESS_TEMPLATE.format(
+            document_id=record.id,
+            filename=record.filename,
+            character_count=record.extracted_text_length,
+        ),
+    )
+
+
+def _handle_documents(context: CommandContext) -> CommandResult:
+    """List stored Knowledge Vault documents without extracted text bodies."""
+    try:
+        documents = context.document_vault.list_documents()
+    except DocumentStorageError as error:
+        return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
+
+    if not documents:
+        return CommandResult(outcome=CommandOutcome.CONTINUE, message=DOCUMENTS_EMPTY)
+
+    lines = ["Cortana: Stored documents:"]
+    for document in documents:
+        lines.append(
+            f"  [{document.id}] {document.filename} ({document.extension}) "
+            f"size={document.source_size_bytes} chars={document.extracted_text_length} "
+            f"ingested={document.ingested_at}"
+        )
+
+    return CommandResult(
+        outcome=CommandOutcome.CONTINUE,
+        message="\n".join(lines),
+    )
+
+
+def _handle_document(context: CommandContext) -> CommandResult:
+    """Display safe metadata and locally stored extracted text for one document."""
+    document_id_argument = extract_command_argument(context.message).strip()
+    if not document_id_argument:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=DOCUMENT_MISSING_ID,
+        )
+
+    try:
+        document = _find_stored_document(context.document_vault, document_id_argument)
+    except DocumentStorageError as error:
+        return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
+
+    if document is None:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=DOCUMENT_NOT_FOUND_TEMPLATE.format(
+                document_id=document_id_argument
+            ),
+        )
+
+    message = (
+        "Cortana: Locally stored Knowledge Vault source content\n"
+        f"  ID: {document.id}\n"
+        f"  Filename: {document.filename}\n"
+        f"  Extension: {document.extension}\n"
+        f"  Source size (bytes): {document.source_size_bytes}\n"
+        f"  Content hash: {document.content_hash}\n"
+        f"  Extracted characters: {document.extracted_text_length}\n"
+        f"  Ingested at: {document.ingested_at}\n"
+        "  Extracted text:\n"
+        f"{document.extracted_text}"
+    )
+    return CommandResult(outcome=CommandOutcome.CONTINUE, message=message)
+
+
+def _handle_remove_document(context: CommandContext) -> CommandResult:
+    """Delete one stored document by ID without affecting memories."""
+    document_id_argument = extract_command_argument(context.message).strip()
+    if not document_id_argument:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=REMOVE_DOCUMENT_MISSING_ID,
+        )
+
+    try:
+        document = _find_stored_document(context.document_vault, document_id_argument)
+        if document is None:
+            return CommandResult(
+                outcome=CommandOutcome.CONTINUE,
+                message=REMOVE_DOCUMENT_NOT_FOUND_TEMPLATE.format(
+                    document_id=document_id_argument
+                ),
+            )
+        deleted = context.document_vault.delete_document(document.id)
+    except DocumentStorageError as error:
+        return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
+
+    if not deleted:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=REMOVE_DOCUMENT_NOT_FOUND_TEMPLATE.format(
+                document_id=document_id_argument
+            ),
+        )
+
+    logger.info(
+        "Document deleted id=%s filename=%s extension=%s",
+        document.id,
+        document.filename,
+        document.extension,
+    )
+    return CommandResult(
+        outcome=CommandOutcome.CONTINUE,
+        message=REMOVE_DOCUMENT_SUCCESS_TEMPLATE.format(document_id=document.id),
+    )
+
+
+def _handle_remove_all_documents(context: CommandContext) -> CommandResult:
+    """Require exact confirmation before deleting all Knowledge Vault documents."""
+    confirmation = extract_command_argument(context.message).strip().lower()
+
+    if confirmation != REMOVE_ALL_DOCUMENTS_CONFIRM_TOKEN:
+        if confirmation == "":
+            return CommandResult(
+                outcome=CommandOutcome.CONTINUE,
+                message=REMOVE_ALL_DOCUMENTS_PROMPT,
+            )
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=REMOVE_ALL_DOCUMENTS_NOT_CONFIRMED,
+        )
+
+    try:
+        deleted_count = context.document_vault.delete_all_documents()
+    except DocumentStorageError as error:
+        return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
+
+    logger.info("Documents deleted count=%s", deleted_count)
+
+    if deleted_count == 0:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=REMOVE_ALL_DOCUMENTS_ALREADY_EMPTY,
+        )
+
+    return CommandResult(
+        outcome=CommandOutcome.CONTINUE,
+        message=REMOVE_ALL_DOCUMENTS_SUCCESS,
+    )
+
+
+def _find_stored_document(
+    document_vault: DocumentVault,
+    document_id: str,
+) -> DocumentRecord | None:
+    """Find one stored document using canonical UUID comparison when possible."""
+    try:
+        canonical_id = validate_document_id(document_id)
+    except DocumentValidationError:
+        canonical_id = document_id.strip()
+
+    if not canonical_id:
+        return None
+
+    for document in document_vault.list_documents():
+        if document.id == canonical_id:
+            return document
+    return None
+
+
 COMMAND_HANDLERS: dict[str, CommandHandler] = {
     COMMAND_HELP: _handle_help,
     COMMAND_STATUS: _handle_status,
@@ -540,6 +829,11 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     COMMAND_ACTIVE_MEMORIES: _handle_active_memories,
     COMMAND_RELEASE: _handle_release,
     COMMAND_RELEASE_ALL: _handle_release_all,
+    COMMAND_ADD_DOCUMENT: _handle_add_document,
+    COMMAND_DOCUMENTS: _handle_documents,
+    COMMAND_DOCUMENT: _handle_document,
+    COMMAND_REMOVE_DOCUMENT: _handle_remove_document,
+    COMMAND_REMOVE_ALL_DOCUMENTS: _handle_remove_all_documents,
 }
 
 
@@ -548,6 +842,7 @@ def format_status(
     conversation_history: ConversationHistory,
     memory_store: MemoryStore,
     active_memory_context: ActiveMemoryContext,
+    document_vault: DocumentVault,
 ) -> str:
     """Build safe local session status text for /status."""
     completed_turns = conversation_history.completed_turn_count
@@ -555,6 +850,8 @@ def format_status(
     saved_memory_count = len(memory_store.list_memories())
     active_count = active_memory_context.active_count
     active_characters = active_memory_context.total_character_usage
+    stored_document_count = document_vault.document_count()
+    supported_types = ", ".join(sorted(ALLOWED_DOCUMENT_EXTENSIONS))
 
     return (
         "Cortana: Session status\n"
@@ -572,7 +869,14 @@ def format_status(
         f"  Active memory characters: {active_characters}\n"
         f"  Maximum active memory characters: {MAX_ACTIVE_MEMORY_CHARS}\n"
         "  Active memory persistence: "
-        f"{'enabled' if ACTIVE_MEMORY_PERSISTENCE_ENABLED else 'disabled'}"
+        f"{'enabled' if ACTIVE_MEMORY_PERSISTENCE_ENABLED else 'disabled'}\n"
+        "  Knowledge Vault: "
+        f"{'enabled' if KNOWLEDGE_VAULT_ENABLED else 'disabled'}\n"
+        f"  Stored documents: {stored_document_count}\n"
+        f"  Maximum documents: {MAX_STORED_DOCUMENTS}\n"
+        f"  Supported document types: {supported_types}\n"
+        "  Document context injection: "
+        f"{'enabled' if DOCUMENT_CONTEXT_INJECTION_ENABLED else 'disabled'}"
     )
 
 

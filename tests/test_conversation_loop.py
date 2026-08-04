@@ -11,10 +11,21 @@ from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient
 from src.conversation import ConversationHistory, SHUTDOWN_MESSAGE, STARTUP_GREETING
 from src.conversation_loop import handle_message, run_conversation_loop
+from src.document_extractor import DefaultTextExtractor
+from src.document_vault import DocumentVault, JsonDocumentVault
 from src.memory_store import JsonMemoryStore, MemoryStore
 from src.settings import Settings
 
 FAKE_CLIENT = cast(OpenAIClient, object())
+
+
+
+def _document_vault(tmp_path: Path) -> JsonDocumentVault:
+    return JsonDocumentVault(tmp_path / "documents.json")
+
+
+def _document_extractor() -> DefaultTextExtractor:
+    return DefaultTextExtractor()
 
 
 def _memory_store(tmp_path: Path) -> JsonMemoryStore:
@@ -226,6 +237,8 @@ def test_run_conversation_loop_displays_startup_greeting(
         ),
         logger=logger,
         active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -252,6 +265,8 @@ def test_run_conversation_loop_exits_on_exit_command(
         ),
         logger=logger,
         active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -289,6 +304,8 @@ def test_run_conversation_loop_rejects_blank_input_without_ai_call(
         ),
         logger=logger,
         active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -329,6 +346,8 @@ def test_run_conversation_loop_continues_after_ai_error(
         ),
         logger=logger,
         active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -375,6 +394,8 @@ def test_run_conversation_loop_processes_multiple_messages(
         ),
         logger=logger,
         active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -414,6 +435,8 @@ def test_run_conversation_loop_rejects_whitespace_only_input_without_ai_call(
         ),
         logger=logger,
         active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
         memory_store=_memory_store(tmp_path),
         read_input=lambda: next(inputs),
     )
@@ -442,6 +465,8 @@ def test_run_conversation_loop_exits_cleanly_on_eof(
         ),
         logger=logger,
         active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
         memory_store=_memory_store(tmp_path),
         read_input=raise_eof,
     )
@@ -470,6 +495,8 @@ def test_run_conversation_loop_exits_cleanly_on_keyboard_interrupt(
         ),
         logger=logger,
         active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
         memory_store=_memory_store(tmp_path),
         read_input=raise_keyboard_interrupt,
     )
@@ -484,7 +511,7 @@ def test_main_orchestrates_conversation_loop(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Main should initialize Cortana, inject memory storage, and start the loop."""
+    """Main should initialize Cortana, inject storage dependencies, and start the loop."""
     logger = FakeLogger()
     fake_settings = Settings(
         openai_api_key="test-api-key",
@@ -492,11 +519,14 @@ def test_main_orchestrates_conversation_loop(
     )
     fake_client = cast(OpenAIClient, object())
     memory_path = tmp_path / "memories.json"
+    vault_path = tmp_path / "documents.json"
     received_client: OpenAIClient | None = None
     received_settings: Settings | None = None
     received_logger: logging.Logger | None = None
     received_memory_store: MemoryStore | None = None
     received_active_memory_context: ActiveMemoryContext | None = None
+    received_document_vault: DocumentVault | None = None
+    received_document_extractor: DefaultTextExtractor | None = None
 
     monkeypatch.setattr(main_module, "setup_logging", lambda: logger)
     monkeypatch.setattr(
@@ -509,6 +539,11 @@ def test_main_orchestrates_conversation_loop(
         "get_default_memory_file_path",
         lambda: memory_path,
     )
+    monkeypatch.setattr(
+        main_module,
+        "get_default_document_vault_file_path",
+        lambda: vault_path,
+    )
 
     def fake_run_conversation_loop(
         *,
@@ -517,14 +552,19 @@ def test_main_orchestrates_conversation_loop(
         logger: logging.Logger,
         memory_store: MemoryStore,
         active_memory_context: ActiveMemoryContext,
+        document_vault: DocumentVault,
+        document_extractor: DefaultTextExtractor,
     ) -> None:
         nonlocal received_client, received_settings, received_logger, received_memory_store
         nonlocal received_active_memory_context
+        nonlocal received_document_vault, received_document_extractor
         received_client = client
         received_settings = settings
         received_logger = logger
         received_memory_store = memory_store
         received_active_memory_context = active_memory_context
+        received_document_vault = document_vault
+        received_document_extractor = document_extractor
 
     monkeypatch.setattr(
         main_module,
@@ -541,3 +581,6 @@ def test_main_orchestrates_conversation_loop(
     assert received_memory_store.file_path == memory_path
     assert isinstance(received_active_memory_context, ActiveMemoryContext)
     assert received_active_memory_context.active_count == 0
+    assert isinstance(received_document_vault, JsonDocumentVault)
+    assert received_document_vault.file_path == vault_path
+    assert isinstance(received_document_extractor, DefaultTextExtractor)

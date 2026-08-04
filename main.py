@@ -5,8 +5,15 @@ from typing import cast
 
 from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient
-from src.config import APP_NAME, VERSION, get_default_memory_file_path
+from src.config import (
+    APP_NAME,
+    VERSION,
+    get_default_document_vault_file_path,
+    get_default_memory_file_path,
+)
 from src.conversation_loop import run_conversation_loop
+from src.document_extractor import DefaultTextExtractor
+from src.document_vault import JsonDocumentVault
 from src.logger import setup_logging
 from src.memory_store import JsonMemoryStore
 from src.openai_client import create_openai_client
@@ -50,6 +57,8 @@ def main() -> None:
 
     memory_store = JsonMemoryStore(get_default_memory_file_path())
     active_memory_context = ActiveMemoryContext()
+    document_vault = JsonDocumentVault(get_default_document_vault_file_path())
+    document_extractor = DefaultTextExtractor()
 
     run_conversation_loop(
         client=client,
@@ -57,6 +66,8 @@ def main() -> None:
         logger=logger,
         memory_store=memory_store,
         active_memory_context=active_memory_context,
+        document_vault=document_vault,
+        document_extractor=document_extractor,
     )
 
 

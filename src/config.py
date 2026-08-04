@@ -23,6 +23,8 @@ VERSION = "0.1.0"
 HISTORY_PERSISTENCE_ENABLED = False
 EXPLICIT_PERSISTENT_MEMORY_ENABLED = True
 ACTIVE_MEMORY_PERSISTENCE_ENABLED = False
+KNOWLEDGE_VAULT_ENABLED = True
+DOCUMENT_CONTEXT_INJECTION_ENABLED = False
 
 # Explicit persistent memory limits and storage
 MAX_MEMORY_TEXT_LENGTH = 2000
@@ -32,17 +34,34 @@ MEMORY_FILENAME = "memories.json"
 MAX_ACTIVE_MEMORIES = 10
 MAX_ACTIVE_MEMORY_CHARS = 8000
 
+# Knowledge Vault limits and storage
+MAX_DOCUMENT_SOURCE_BYTES = 10 * 1024 * 1024
+MAX_DOCUMENT_TEXT_LENGTH = 500_000
+MAX_STORED_DOCUMENTS = 100
+ALLOWED_DOCUMENT_EXTENSIONS = frozenset({".txt", ".md", ".pdf"})
+DOCUMENT_VAULT_FILENAME = "documents.json"
 
-def get_default_memory_file_path() -> Path:
-    """Return the default user-local path for explicit persistent memories."""
+
+def _default_app_data_dir() -> Path:
+    """Return the user-local application data directory for Project Cortana."""
     if os.name == "nt":
         local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
         if local_app_data:
-            return Path(local_app_data) / APP_DATA_DIR_NAME / MEMORY_FILENAME
-        return Path.home() / "AppData" / "Local" / APP_DATA_DIR_NAME / MEMORY_FILENAME
+            return Path(local_app_data) / APP_DATA_DIR_NAME
+        return Path.home() / "AppData" / "Local" / APP_DATA_DIR_NAME
 
     xdg_data_home = os.environ.get("XDG_DATA_HOME", "").strip()
     if xdg_data_home:
-        return Path(xdg_data_home) / APP_DATA_DIR_NAME / MEMORY_FILENAME
+        return Path(xdg_data_home) / APP_DATA_DIR_NAME
 
-    return Path.home() / ".local" / "share" / APP_DATA_DIR_NAME / MEMORY_FILENAME
+    return Path.home() / ".local" / "share" / APP_DATA_DIR_NAME
+
+
+def get_default_memory_file_path() -> Path:
+    """Return the default user-local path for explicit persistent memories."""
+    return _default_app_data_dir() / MEMORY_FILENAME
+
+
+def get_default_document_vault_file_path() -> Path:
+    """Return the default user-local path for Knowledge Vault documents."""
+    return _default_app_data_dir() / DOCUMENT_VAULT_FILENAME

@@ -26,6 +26,8 @@ from src.memory_context import (
     outer_boundary_end,
     outer_boundary_start,
 )
+from src.document_extractor import DefaultTextExtractor
+from src.document_vault import DocumentVault, JsonDocumentVault
 from src.memory_store import JsonMemoryStore, MemoryStore
 from src.settings import Settings
 
@@ -103,6 +105,15 @@ class FakeLogger(logging.Logger):
         """Record error log messages."""
         message = str(msg)
         self.error_messages.append(message % args if args else message)
+
+
+
+def _document_vault(tmp_path: Path) -> JsonDocumentVault:
+    return JsonDocumentVault(tmp_path / "documents.json")
+
+
+def _document_extractor() -> DefaultTextExtractor:
+    return DefaultTextExtractor()
 
 
 def _settings() -> Settings:
@@ -339,6 +350,8 @@ def test_boundary_token_absent_from_user_facing_commands(tmp_path: Path) -> None
             conversation_history=ConversationHistory(),
             memory_store=store,
             active_memory_context=active,
+            document_vault=_document_vault(tmp_path),
+            document_extractor=_document_extractor(),
         )
         assert result.message is not None
         assert DETERMINISTIC_BOUNDARY_TOKEN not in result.message
@@ -363,6 +376,8 @@ def test_boundary_token_is_not_logged(
         conversation_history=ConversationHistory(),
         memory_store=store,
         active_memory_context=active,
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
     )
     assert result.message is not None
 
@@ -461,6 +476,8 @@ def test_status_reports_active_memory_metrics(tmp_path: Path) -> None:
         conversation_history=ConversationHistory(),
         memory_store=store,
         active_memory_context=active,
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
     )
 
     assert result.message is not None
@@ -509,6 +526,8 @@ def test_main_initializes_active_memory_context_once(
         logger: logging.Logger,
         memory_store: MemoryStore,
         active_memory_context: ActiveMemoryContext,
+        document_vault: DocumentVault,
+        document_extractor: DefaultTextExtractor,
     ) -> None:
         received_contexts.append(active_memory_context)
 
@@ -583,6 +602,8 @@ def test_live_path_injects_active_memory_into_ai_request(
         logger=logger,
         memory_store=store,
         active_memory_context=active,
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
         read_input=lambda: next(inputs),
     )
 

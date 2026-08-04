@@ -30,6 +30,8 @@ from src.commands import (
 from src.config import MAX_ACTIVE_MEMORIES, MAX_ACTIVE_MEMORY_CHARS
 from src.conversation import ConversationHistory
 from src.conversation_loop import run_conversation_loop
+from src.document_extractor import DefaultTextExtractor
+from src.document_vault import JsonDocumentVault
 from src.memory_store import JsonMemoryStore
 from src.settings import Settings
 
@@ -72,6 +74,14 @@ def _settings() -> Settings:
     )
 
 
+def _document_vault(tmp_path: Path) -> JsonDocumentVault:
+    return JsonDocumentVault(tmp_path / "documents.json")
+
+
+def _document_extractor() -> DefaultTextExtractor:
+    return DefaultTextExtractor()
+
+
 def _memory_store(tmp_path: Path) -> JsonMemoryStore:
     return JsonMemoryStore(tmp_path / "memories.json")
 
@@ -93,6 +103,8 @@ def _run(
         conversation_history=conversation_history,
         memory_store=memory_store,
         active_memory_context=active_context,
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
     )
     return result, memory_store, active_context, conversation_history
 
@@ -436,6 +448,8 @@ def test_new_memory_commands_avoid_ai_calls(
         logger=logger,
         memory_store=store,
         active_memory_context=ActiveMemoryContext(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
         read_input=lambda: next(inputs),
     )
 

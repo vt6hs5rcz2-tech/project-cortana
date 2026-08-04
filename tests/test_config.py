@@ -2,20 +2,28 @@ import pytest
 
 from src.config import (
     ACTIVE_MEMORY_PERSISTENCE_ENABLED,
+    ALLOWED_DOCUMENT_EXTENSIONS,
     APP_NAME,
     APP_DATA_DIR_NAME,
     DATA_DIR,
     DOCS_DIR,
+    DOCUMENT_CONTEXT_INJECTION_ENABLED,
+    DOCUMENT_VAULT_FILENAME,
     EXPLICIT_PERSISTENT_MEMORY_ENABLED,
     HISTORY_PERSISTENCE_ENABLED,
+    KNOWLEDGE_VAULT_ENABLED,
     LOG_DIR,
     MAX_ACTIVE_MEMORIES,
     MAX_ACTIVE_MEMORY_CHARS,
+    MAX_DOCUMENT_SOURCE_BYTES,
+    MAX_DOCUMENT_TEXT_LENGTH,
     MAX_MEMORY_TEXT_LENGTH,
+    MAX_STORED_DOCUMENTS,
     MEMORY_FILENAME,
     PROJECT_ROOT,
     TESTS_DIR,
     VERSION,
+    get_default_document_vault_file_path,
     get_default_memory_file_path,
 )
 
@@ -57,6 +65,17 @@ def test_memory_limits_and_filename_are_centralized() -> None:
     assert ACTIVE_MEMORY_PERSISTENCE_ENABLED is False
 
 
+def test_knowledge_vault_limits_and_capabilities_are_centralized() -> None:
+    """Knowledge Vault configuration should use centralized constants."""
+    assert KNOWLEDGE_VAULT_ENABLED is True
+    assert DOCUMENT_CONTEXT_INJECTION_ENABLED is False
+    assert MAX_DOCUMENT_SOURCE_BYTES == 10 * 1024 * 1024
+    assert MAX_DOCUMENT_TEXT_LENGTH == 500_000
+    assert MAX_STORED_DOCUMENTS == 100
+    assert ALLOWED_DOCUMENT_EXTENSIONS == frozenset({".txt", ".md", ".pdf"})
+    assert DOCUMENT_VAULT_FILENAME == "documents.json"
+
+
 def test_default_memory_path_is_outside_project_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -66,6 +85,21 @@ def test_default_memory_path_is_outside_project_source(
     path = get_default_memory_file_path()
 
     assert path.name == MEMORY_FILENAME
+    assert "ProjectCortana" in path.parts
+    assert PROJECT_ROOT not in path.parents
+    assert "src" not in path.parts
+    assert "tests" not in path.parts
+
+
+def test_default_document_vault_path_is_outside_project_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default Knowledge Vault storage should use a user-local application data path."""
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Example\AppData\Local")
+
+    path = get_default_document_vault_file_path()
+
+    assert path.name == DOCUMENT_VAULT_FILENAME
     assert "ProjectCortana" in path.parts
     assert PROJECT_ROOT not in path.parents
     assert "src" not in path.parts

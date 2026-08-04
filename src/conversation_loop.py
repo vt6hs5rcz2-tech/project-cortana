@@ -12,6 +12,8 @@ from src.conversation import (
     ConversationHistory,
     is_exit_command,
 )
+from src.document_extractor import TextExtractor
+from src.document_vault import DocumentVault
 from src.memory_store import MemoryStore
 from src.settings import Settings
 
@@ -85,6 +87,8 @@ def run_conversation_loop(
     logger: logging.Logger,
     memory_store: MemoryStore,
     active_memory_context: ActiveMemoryContext,
+    document_vault: DocumentVault,
+    document_extractor: TextExtractor,
     read_input: Callable[[], str] | None = None,
     conversation_history: ConversationHistory | None = None,
 ) -> None:
@@ -116,6 +120,8 @@ def run_conversation_loop(
                 conversation_history=history,
                 memory_store=memory_store,
                 active_memory_context=active_memory_context,
+                document_vault=document_vault,
+                document_extractor=document_extractor,
             )
             if command_result.message:
                 print(command_result.message)
