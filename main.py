@@ -12,6 +12,7 @@ from src.config import (
     get_default_evidence_store_dir_path,
     get_default_incident_repository_file_path,
     get_default_memory_file_path,
+    get_default_tool_control_repository_file_path,
 )
 from src.conversation_loop import run_conversation_loop
 from src.document_chunker import DocumentChunker
@@ -25,6 +26,8 @@ from src.memory_store import JsonMemoryStore
 from src.openai_client import create_openai_client
 from src.retrieval_session import RetrievalSession
 from src.settings import Settings, load_settings
+from src.tool_commands import create_default_tool_services
+from src.tool_repository import JsonToolControlRepository
 
 
 def initialize_ai(
@@ -73,6 +76,13 @@ def main() -> None:
         get_default_incident_repository_file_path()
     )
     evidence_store = LocalEvidenceStore(get_default_evidence_store_dir_path())
+    tool_repository = JsonToolControlRepository(
+        get_default_tool_control_repository_file_path()
+    )
+    tool_registry, tool_executor = create_default_tool_services(
+        tool_repository=tool_repository,
+        incident_repository=incident_repository,
+    )
 
     run_conversation_loop(
         client=client,
@@ -87,6 +97,9 @@ def main() -> None:
         retrieval_session=retrieval_session,
         incident_repository=incident_repository,
         evidence_store=evidence_store,
+        tool_registry=tool_registry,
+        tool_repository=tool_repository,
+        tool_executor=tool_executor,
     )
 
 

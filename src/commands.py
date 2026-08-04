@@ -19,12 +19,16 @@ from src.citation_validation import validate_response_citations
 from src.config import (
     ACTIVE_MEMORY_PERSISTENCE_ENABLED,
     ALLOWED_DOCUMENT_EXTENSIONS,
+    ARBITRARY_SHELL_EXECUTION_ENABLED,
     AUTOMATED_RESPONSE_ENABLED,
+    AUTONOMOUS_REMEDIATION_ENABLED,
     CHAIN_OF_CUSTODY_ENABLED,
+    DEFENSIVE_TOOL_FRAMEWORK_ENABLED,
     DOCUMENT_CONTEXT_INJECTION_ENABLED,
     EVIDENCE_COPY_ENABLED,
     EXPLICIT_PERSISTENT_MEMORY_ENABLED,
     EXTERNAL_THREAT_INTELLIGENCE_LOOKUPS_ENABLED,
+    EXTERNAL_TOOL_EXECUTION_ENABLED,
     HISTORY_PERSISTENCE_ENABLED,
     INCIDENT_AI_CONTEXT_INJECTION_ENABLED,
     INCIDENT_REPOSITORY_ENABLED,
@@ -42,6 +46,11 @@ from src.config import (
     MAX_STORED_DOCUMENTS,
     SEMANTIC_RETRIEVAL_ENABLED,
     SOURCE_MANIFEST_PERSISTENCE_ENABLED,
+    TOOL_AUDIT_PERSISTENCE_ENABLED,
+    TOOL_DRY_RUN_ENFORCEMENT_ENABLED,
+    TOOL_HUMAN_APPROVAL_ENABLED,
+    TOOL_SCOPE_ENFORCEMENT_ENABLED,
+    TOOL_SINGLE_INSTANCE_COORDINATION_ENABLED,
 )
 from src.conversation import ConversationHistory
 from src.document import (
@@ -81,6 +90,19 @@ from src.security_commands import (
     handle_security_command,
 )
 from src.settings import Settings
+from src.tool_commands import (
+    TOOL_COMMAND_NAMES,
+    ToolCommandContext,
+    create_default_tool_services,
+    handle_tool_command,
+)
+from src.tool_executor import DefensiveToolExecutor
+from src.tool_registry import ToolRegistry, build_default_tool_registry
+from src.tool_repository import (
+    JsonToolControlRepository,
+    ToolControlRepository,
+    ToolStorageError,
+)
 
 logger = logging.getLogger("ProjectCortana")
 
@@ -133,6 +155,7 @@ SUPPORTED_COMMANDS = frozenset(
         COMMAND_ASK_DOCS,
         COMMAND_SOURCES,
         *SECURITY_COMMAND_NAMES,
+        *TOOL_COMMAND_NAMES,
     }
 )
 
@@ -176,6 +199,22 @@ HELP_TEXT = """Cortana: Available commands:
   /incident-add-note    - Add one analyst note to an incident
   /incident-notes       - List analyst notes for an incident
   /incident-timeline    - Show a derived incident timeline
+  /tools                - List enabled defensive tools
+  /tool                 - Show one defensive tool by ID
+  /scope-new            - Create one authorized tool scope
+  /scopes               - List authorized scopes
+  /scope                - Show one authorized scope by ID
+  /scope-disable        - Disable one authorized scope
+  /tool-request         - Create one tool execution request
+  /tool-requests        - List tool execution requests
+  /tool-request-show    - Show one tool execution request
+  /tool-dry-run         - Generate a dry-run plan for a request
+  /tool-approve         - Approve one tool execution request
+  /tool-reject          - Reject one tool execution request
+  /tool-cancel          - Cancel one tool execution request
+  /tool-run             - Execute one approved tool request
+  /tool-result          - Show one tool execution result
+  /tool-audit           - List tool-control audit entries
   /about                - Describe Project Cortana and this software milestone
   /exit                 - End the session cleanly"""
 
@@ -184,9 +223,10 @@ ABOUT_TEXT = (
     "defensive-operations assistant. This build is an early software milestone "
     "focused on identity, local commands, in-session conversation, explicit "
     "user-controlled persistent memory, temporary active memory context, a "
-    "local Knowledge Vault, source-grounded document questions, and a local "
+    "local Knowledge Vault, source-grounded document questions, a local "
     "human-controlled security event, incident, indicator, evidence, and "
-    "chain-of-custody foundation."
+    "chain-of-custody foundation, and a human-supervised defensive tool "
+    "framework with scope controls and approval."
 )
 
 CLEAR_CONFIRMATION = (
@@ -345,6 +385,9 @@ class CommandContext:
     retrieval_session: RetrievalSession
     incident_repository: IncidentRepository
     evidence_store: EvidenceStore
+    tool_registry: ToolRegistry
+    tool_repository: ToolControlRepository
+    tool_executor: DefensiveToolExecutor
     client: OpenAIClient | None = None
 
 
@@ -358,6 +401,19 @@ def _ephemeral_incident_services() -> tuple[IncidentRepository, EvidenceStore]:
         JsonIncidentRepository(root / "incidents.json"),
         LocalEvidenceStore(root / "evidence"),
     )
+
+
+def _ephemeral_tool_services(
+    incident_repository: IncidentRepository,
+) -> tuple[ToolRegistry, ToolControlRepository, DefensiveToolExecutor]:
+    """Create disposable tool services for tests that omit Milestone 9 injection."""
+    root = Path(tempfile.mkdtemp(prefix="cortana-tools-"))
+    repository = JsonToolControlRepository(root / "tool_control.json")
+    registry, executor = create_default_tool_services(
+        tool_repository=repository,
+        incident_repository=incident_repository,
+    )
+    return registry, repository, executor
 
 
 def parse_slash_input(message: str) -> str | None:
@@ -411,13 +467,16 @@ def handle_slash_command(
     retrieval_session: RetrievalSession | None = None,
     incident_repository: IncidentRepository | None = None,
     evidence_store: EvidenceStore | None = None,
+    tool_registry: ToolRegistry | None = None,
+    tool_repository: ToolControlRepository | None = None,
+    tool_executor: DefensiveToolExecutor | None = None,
     client: OpenAIClient | None = None,
 ) -> CommandResult:
     """Handle a slash command locally.
 
     Most commands never call the AI service. ``/ask-docs`` is the explicit
     exception and requires an injected client. Milestone 8 security commands
-    are always local and never call the AI service.
+    and Milestone 9 tool commands are always local and never call the AI service.
     """
     command_name = normalize_command_name(message)
 
@@ -425,6 +484,14 @@ def handle_slash_command(
         ephemeral_repository, ephemeral_store = _ephemeral_incident_services()
         incident_repository = incident_repository or ephemeral_repository
         evidence_store = evidence_store or ephemeral_store
+
+    if tool_registry is None or tool_repository is None or tool_executor is None:
+        ephemeral_registry, ephemeral_tools, ephemeral_executor = (
+            _ephemeral_tool_services(incident_repository)
+        )
+        tool_registry = tool_registry or ephemeral_registry
+        tool_repository = tool_repository or ephemeral_tools
+        tool_executor = tool_executor or ephemeral_executor
 
     if command_name in SECURITY_COMMAND_NAMES:
         security_result = handle_security_command(
@@ -439,6 +506,23 @@ def handle_slash_command(
             return CommandResult(
                 outcome=CommandOutcome.CONTINUE,
                 message=security_result.message,
+            )
+
+    if command_name in TOOL_COMMAND_NAMES:
+        tool_result = handle_tool_command(
+            command_name,
+            ToolCommandContext(
+                message=message,
+                tool_registry=tool_registry,
+                tool_repository=tool_repository,
+                tool_executor=tool_executor,
+                incident_repository=incident_repository,
+            ),
+        )
+        if tool_result is not None:
+            return CommandResult(
+                outcome=CommandOutcome.CONTINUE,
+                message=tool_result.message,
             )
 
     handler = COMMAND_HANDLERS.get(command_name)
@@ -461,6 +545,9 @@ def handle_slash_command(
         retrieval_session=retrieval_session or RetrievalSession(),
         incident_repository=incident_repository,
         evidence_store=evidence_store,
+        tool_registry=tool_registry,
+        tool_repository=tool_repository,
+        tool_executor=tool_executor,
         client=client,
     )
     return handler(context)
@@ -482,12 +569,16 @@ def _handle_status(context: CommandContext) -> CommandResult:
             context.document_vault,
             context.retrieval_session,
             context.incident_repository,
+            context.tool_registry,
+            context.tool_repository,
         )
     except MemoryStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
     except DocumentStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
     except IncidentStorageError as error:
+        return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
+    except ToolStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
 
     return CommandResult(outcome=CommandOutcome.CONTINUE, message=status_text)
@@ -1225,6 +1316,8 @@ def format_status(
     document_vault: DocumentVault,
     retrieval_session: RetrievalSession | None = None,
     incident_repository: IncidentRepository | None = None,
+    tool_registry: ToolRegistry | None = None,
+    tool_repository: ToolControlRepository | None = None,
 ) -> str:
     """Build safe local session status text for /status."""
     completed_turns = conversation_history.completed_turn_count
@@ -1251,6 +1344,16 @@ def format_status(
         saved_incident_count = incident_repository.incident_count()
         saved_indicator_count = incident_repository.indicator_count()
         saved_evidence_count = incident_repository.evidence_count()
+
+    registry = tool_registry or build_default_tool_registry()
+    registered_tool_count = registry.count()
+    enabled_tool_count = registry.enabled_count()
+    if tool_repository is None:
+        active_scope_count = 0
+        pending_approval_count = 0
+    else:
+        active_scope_count = tool_repository.active_scope_count()
+        pending_approval_count = tool_repository.pending_approval_count()
 
     return (
         "Cortana: Session status\n"
@@ -1305,7 +1408,29 @@ def format_status(
         "  Repository persistence: "
         f"{'enabled' if INCIDENT_REPOSITORY_PERSISTENCE_ENABLED else 'disabled'}\n"
         "  Single-instance coordination: "
-        f"{'enabled' if INCIDENT_SINGLE_INSTANCE_COORDINATION_ENABLED else 'disabled'}"
+        f"{'enabled' if INCIDENT_SINGLE_INSTANCE_COORDINATION_ENABLED else 'disabled'}\n"
+        "  Defensive tool framework: "
+        f"{'enabled' if DEFENSIVE_TOOL_FRAMEWORK_ENABLED else 'disabled'}\n"
+        f"  Registered tools: {registered_tool_count}\n"
+        f"  Enabled tools: {enabled_tool_count}\n"
+        "  Scope enforcement: "
+        f"{'enabled' if TOOL_SCOPE_ENFORCEMENT_ENABLED else 'disabled'}\n"
+        "  Human approval: "
+        f"{'enabled' if TOOL_HUMAN_APPROVAL_ENABLED else 'disabled'}\n"
+        "  Dry-run enforcement: "
+        f"{'enabled' if TOOL_DRY_RUN_ENFORCEMENT_ENABLED else 'disabled'}\n"
+        "  Arbitrary shell execution: "
+        f"{'enabled' if ARBITRARY_SHELL_EXECUTION_ENABLED else 'disabled'}\n"
+        "  External tool execution: "
+        f"{'enabled' if EXTERNAL_TOOL_EXECUTION_ENABLED else 'disabled'}\n"
+        "  Autonomous remediation: "
+        f"{'enabled' if AUTONOMOUS_REMEDIATION_ENABLED else 'disabled'}\n"
+        f"  Active scopes: {active_scope_count}\n"
+        f"  Pending approvals: {pending_approval_count}\n"
+        "  Tool audit persistence: "
+        f"{'enabled' if TOOL_AUDIT_PERSISTENCE_ENABLED else 'disabled'}\n"
+        "  Tool single-instance coordination: "
+        f"{'enabled' if TOOL_SINGLE_INSTANCE_COORDINATION_ENABLED else 'disabled'}"
     )
 
 

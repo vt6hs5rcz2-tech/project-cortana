@@ -21,6 +21,9 @@ from src.incident_repository import IncidentRepository
 from src.memory_store import MemoryStore
 from src.retrieval_session import RetrievalSession
 from src.settings import Settings
+from src.tool_executor import DefensiveToolExecutor
+from src.tool_registry import ToolRegistry
+from src.tool_repository import ToolControlRepository
 
 BLANK_INPUT_MESSAGE = "Cortana: Please enter a message."
 
@@ -99,6 +102,9 @@ def run_conversation_loop(
     retrieval_session: RetrievalSession | None = None,
     incident_repository: IncidentRepository | None = None,
     evidence_store: EvidenceStore | None = None,
+    tool_registry: ToolRegistry | None = None,
+    tool_repository: ToolControlRepository | None = None,
+    tool_executor: DefensiveToolExecutor | None = None,
     read_input: Callable[[], str] | None = None,
     conversation_history: ConversationHistory | None = None,
 ) -> None:
@@ -139,6 +145,9 @@ def run_conversation_loop(
                 retrieval_session=session,
                 incident_repository=incident_repository,
                 evidence_store=evidence_store,
+                tool_registry=tool_registry,
+                tool_repository=tool_repository,
+                tool_executor=tool_executor,
                 client=client,
             )
             if command_result.message:

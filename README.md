@@ -15,6 +15,7 @@ Project Cortana is an early software milestone focused on:
 - Deterministic local lexical document retrieval
 - Explicit source-grounded AI questions over retrieved document passages
 - Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
+- Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 
 ## Conversation history, persistent memory, active context, and documents
 
@@ -26,6 +27,7 @@ Project Cortana is an early software milestone focused on:
 | Knowledge Vault documents | Survives restarts | Ingested only through local `/add-document` | No by default |
 | Retrieved document passages | Current request/session only | Selected only by `/search-docs` (local) or `/ask-docs` (AI) | Only selected chunks through `/ask-docs` |
 | Security incidents and evidence | Survives restarts | Created only through explicit local Milestone 8 commands | Never in this milestone |
+| Defensive tool scopes, requests, approvals, results, and audits | Survives restarts | Created only through explicit local Milestone 9 commands | Never in this milestone |
 
 Persistent memories, Knowledge Vault documents, incident records, and evidence copies are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories.
 
@@ -34,6 +36,8 @@ Saved memories remain inactive by default. Nothing from persistent memory is sen
 Documents remain inactive by default. No document text is sent to the AI unless the user explicitly invokes `/ask-docs`. Ordinary conversation never reads the Knowledge Vault.
 
 Security incident records, analyst notes, indicators, evidence metadata, and evidence file bytes are never sent to the AI in this milestone. They are not injected into ordinary chat, active-memory requests, or `/ask-docs`.
+
+Defensive tool definitions, scope notes, request justifications, parameters, execution results, and audit details are never sent to the AI in this milestone. The AI cannot select or execute tools.
 
 Active memory selections:
 
@@ -198,6 +202,62 @@ Behavior and limits:
 - `/ask-docs` does not search incident records.
 - Recording an indicator does not mean the indicator is malicious.
 
+## Defensive tool framework
+
+Milestone 9 adds a secure, local framework for registering, planning, approving, and auditing defensive cybersecurity tools. The framework remains defensive, allowlisted, human-supervised, and non-destructive.
+
+Built-in tools:
+
+| Tool ID | Purpose |
+| --- | --- |
+| `system-summary` | Safe local platform/capability summary |
+| `file-sha256` | Streaming SHA-256 of an explicitly supplied regular file |
+| `text-search` | Literal string search in an explicitly supplied text file |
+| `compare-sha256` | Compare a file digest to an expected SHA-256 |
+| `incident-summary` | Deterministic local incident count summary |
+| `simulated-log-check` | Simulation-only mock log check |
+
+Risk levels:
+
+- `informational`
+- `low`
+- `moderate`
+- `high` (simulation-only in this milestone)
+- `prohibited` (cannot be enabled or executed)
+
+Workflow:
+
+1. Create an authorized scope with `/scope-new`
+2. Create a request with `/tool-request`
+3. Generate a dry-run plan with `/tool-dry-run`
+4. Approve or reject when required with `/tool-approve` or `/tool-reject`
+5. Execute with `/tool-run`
+6. Inspect results and audit entries with `/tool-result` and `/tool-audit`
+
+Behavior and limits:
+
+- Tools execute only when registered, allowlisted, scope-validated, and authorized for their risk level.
+- Arbitrary shell execution is disabled. There is no unrestricted PowerShell, cmd, Bash, Python, or subprocess command interface.
+- External tool execution and autonomous remediation are disabled.
+- The AI does not select tools and does not execute tools.
+- All file-based tools are read-only. They reject symlinks/reparse points and never delete, modify, or execute target files.
+- Built-in tools remain bounded and read-only. Execution timeouts stop the command caller from waiting after the configured limit. Python threads cannot be forcefully terminated safely, so a timed-out worker may still finish later, and a permanently hung worker may prevent interpreter shutdown. Timed-out workers cannot publish a late result or audit success. Hard cancellation via process isolation is intentionally out of scope for Milestone 9.
+- Evidence and incident systems remain separate unless a request explicitly links an existing incident ID as metadata.
+- Tool-control persistence uses atomic UTF-8 JSON outside the Git repository.
+- Atomic writes do not coordinate concurrent Cortana processes. Use one application instance per tool-control repository. Cross-process locking is not implemented yet.
+- Audit records support accountability and do not claim legal forensic certification.
+- Prohibited capabilities remain out of scope: penetration testing, exploit execution, credential dumping, persistence, evasion, malware execution, destructive remediation, firewall changes, account disabling, process termination, file deletion, registry modification, remote access, real network scanning, internet threat-intelligence lookups, and cloud SIEM integrations.
+
+Example (safe placeholders):
+
+```text
+/scope-new Lab review | file-sha256,text-search | C:\Cases\example-root | Hash review for case notes
+/tool-request file-sha256 | <scope-id> | {"path":"C:\\Cases\\example-root\\sample.txt"} | Verify sample integrity
+/tool-dry-run <request-id>
+/tool-approve <request-id> | Approved after dry-run review
+/tool-run <request-id>
+```
+
 Multi-field Milestone 8 commands use the delimiter ` | ` so paths and free text can contain spaces. Example:
 
 ```text
@@ -250,6 +310,22 @@ Multi-field Milestone 8 commands use the delimiter ` | ` so paths and free text 
 | `/incident-add-note <incident-id> \| <note-type> \| <text>` | Add one analyst note to an incident |
 | `/incident-notes <incident-id>` | List analyst notes for an incident |
 | `/incident-timeline <incident-id>` | Show a derived incident timeline |
+| `/tools` | List enabled defensive tools |
+| `/tool <tool-id>` | Show one defensive tool |
+| `/scope-new <name> \| <tool-id-list> \| <allowed-root-or-none> \| <justification>` | Create one authorized tool scope |
+| `/scopes` | List authorized scopes |
+| `/scope <scope-id>` | Show one authorized scope |
+| `/scope-disable <scope-id>` | Disable one authorized scope |
+| `/tool-request <tool-id> \| <scope-id> \| <parameter-json> \| <justification>` | Create one tool execution request |
+| `/tool-requests` | List tool execution requests |
+| `/tool-request-show <request-id>` | Show one tool execution request |
+| `/tool-dry-run <request-id>` | Generate a dry-run plan for a request |
+| `/tool-approve <request-id> \| <reason>` | Approve one tool execution request |
+| `/tool-reject <request-id> \| <reason>` | Reject one tool execution request |
+| `/tool-cancel <request-id>` | Cancel one tool execution request |
+| `/tool-run <request-id>` | Execute one authorized tool request |
+| `/tool-result <result-id>` | Show one tool execution result |
+| `/tool-audit` | List tool-control audit entries |
 | `/about` | Describe Project Cortana and this milestone |
 | `/exit` | End the session cleanly |
 
@@ -265,6 +341,7 @@ Notes:
 - `/search-docs` never calls the AI service.
 - `/ask-docs` sends only selected retrieved chunks, never the entire vault and never incident records.
 - Milestone 8 security commands never call the AI service.
+- Milestone 9 defensive tool commands never call the AI service.
 - Absolute path-like input such as `/etc/passwd` is treated as conversation content for the AI, not as a local command, unless it is explicitly provided as an `/add-document` or `/evidence-register` argument.
 
 ## Active memory limits

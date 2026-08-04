@@ -20,6 +20,9 @@ from src.incident_repository import IncidentRepository, JsonIncidentRepository
 from src.memory_store import JsonMemoryStore, MemoryStore
 from src.retrieval_session import RetrievalSession
 from src.settings import Settings
+from src.tool_executor import DefensiveToolExecutor
+from src.tool_registry import ToolRegistry
+from src.tool_repository import JsonToolControlRepository, ToolControlRepository
 
 FAKE_CLIENT = cast(OpenAIClient, object())
 
@@ -527,6 +530,7 @@ def test_main_orchestrates_conversation_loop(
     vault_path = tmp_path / "documents.json"
     incident_path = tmp_path / "incidents.json"
     evidence_dir = tmp_path / "evidence"
+    tool_path = tmp_path / "tool_control.json"
     received_client: OpenAIClient | None = None
     received_settings: Settings | None = None
     received_logger: logging.Logger | None = None
@@ -539,6 +543,9 @@ def test_main_orchestrates_conversation_loop(
     received_retrieval_session: RetrievalSession | None = None
     received_incident_repository: IncidentRepository | None = None
     received_evidence_store: EvidenceStore | None = None
+    received_tool_registry: ToolRegistry | None = None
+    received_tool_repository: ToolControlRepository | None = None
+    received_tool_executor: DefensiveToolExecutor | None = None
 
     monkeypatch.setattr(main_module, "setup_logging", lambda: logger)
     monkeypatch.setattr(
@@ -566,6 +573,11 @@ def test_main_orchestrates_conversation_loop(
         "get_default_evidence_store_dir_path",
         lambda: evidence_dir,
     )
+    monkeypatch.setattr(
+        main_module,
+        "get_default_tool_control_repository_file_path",
+        lambda: tool_path,
+    )
 
     def fake_run_conversation_loop(
         *,
@@ -581,6 +593,9 @@ def test_main_orchestrates_conversation_loop(
         retrieval_session: RetrievalSession,
         incident_repository: IncidentRepository,
         evidence_store: EvidenceStore,
+        tool_registry: ToolRegistry,
+        tool_repository: ToolControlRepository,
+        tool_executor: DefensiveToolExecutor,
     ) -> None:
         nonlocal received_client, received_settings, received_logger, received_memory_store
         nonlocal received_active_memory_context
@@ -588,6 +603,7 @@ def test_main_orchestrates_conversation_loop(
         nonlocal received_document_chunker, received_document_retriever
         nonlocal received_retrieval_session
         nonlocal received_incident_repository, received_evidence_store
+        nonlocal received_tool_registry, received_tool_repository, received_tool_executor
         received_client = client
         received_settings = settings
         received_logger = logger
@@ -600,6 +616,9 @@ def test_main_orchestrates_conversation_loop(
         received_retrieval_session = retrieval_session
         received_incident_repository = incident_repository
         received_evidence_store = evidence_store
+        received_tool_registry = tool_registry
+        received_tool_repository = tool_repository
+        received_tool_executor = tool_executor
 
     monkeypatch.setattr(
         main_module,
@@ -628,3 +647,7 @@ def test_main_orchestrates_conversation_loop(
     assert received_incident_repository.file_path == incident_path
     assert isinstance(received_evidence_store, LocalEvidenceStore)
     assert received_evidence_store.directory_path == evidence_dir
+    assert isinstance(received_tool_registry, ToolRegistry)
+    assert isinstance(received_tool_repository, JsonToolControlRepository)
+    assert received_tool_repository.file_path == tool_path
+    assert isinstance(received_tool_executor, DefensiveToolExecutor)

@@ -32,12 +32,21 @@ from src.config import (
     TARGET_CHUNK_SIZE,
     TESTS_DIR,
     VERSION,
+    ARBITRARY_SHELL_EXECUTION_ENABLED,
+    AUTONOMOUS_REMEDIATION_ENABLED,
+    DEFENSIVE_TOOL_FRAMEWORK_ENABLED,
     EVIDENCE_STORE_DIRNAME,
+    EXTERNAL_TOOL_EXECUTION_ENABLED,
     INCIDENT_REPOSITORY_FILENAME,
+    TOOL_CONTROL_REPOSITORY_FILENAME,
+    TOOL_DRY_RUN_ENFORCEMENT_ENABLED,
+    TOOL_HUMAN_APPROVAL_ENABLED,
+    TOOL_SCOPE_ENFORCEMENT_ENABLED,
     get_default_document_vault_file_path,
     get_default_evidence_store_dir_path,
     get_default_incident_repository_file_path,
     get_default_memory_file_path,
+    get_default_tool_control_repository_file_path,
 )
 
 
@@ -152,6 +161,33 @@ def test_default_evidence_store_path_is_outside_project_source(
     path = get_default_evidence_store_dir_path()
 
     assert path.name == EVIDENCE_STORE_DIRNAME
+    assert "ProjectCortana" in path.parts
+    assert PROJECT_ROOT not in path.parents
+    assert "src" not in path.parts
+    assert "tests" not in path.parts
+
+
+def test_defensive_tool_framework_capabilities_are_centralized() -> None:
+    """Milestone 9 capability flags should remain defensive and human-supervised."""
+    assert DEFENSIVE_TOOL_FRAMEWORK_ENABLED is True
+    assert TOOL_SCOPE_ENFORCEMENT_ENABLED is True
+    assert TOOL_HUMAN_APPROVAL_ENABLED is True
+    assert TOOL_DRY_RUN_ENFORCEMENT_ENABLED is True
+    assert ARBITRARY_SHELL_EXECUTION_ENABLED is False
+    assert EXTERNAL_TOOL_EXECUTION_ENABLED is False
+    assert AUTONOMOUS_REMEDIATION_ENABLED is False
+    assert TOOL_CONTROL_REPOSITORY_FILENAME == "tool_control.json"
+
+
+def test_default_tool_control_repository_path_is_outside_project_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default tool-control repository storage should use a user-local path."""
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Example\AppData\Local")
+
+    path = get_default_tool_control_repository_file_path()
+
+    assert path.name == TOOL_CONTROL_REPOSITORY_FILENAME
     assert "ProjectCortana" in path.parts
     assert PROJECT_ROOT not in path.parents
     assert "src" not in path.parts
