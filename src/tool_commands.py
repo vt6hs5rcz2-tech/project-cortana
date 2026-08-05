@@ -798,8 +798,15 @@ def create_default_tool_services(
     incident_repository: IncidentRepository,
 ) -> tuple[ToolRegistry, DefensiveToolExecutor]:
     """Create the default registry and executor for application wiring."""
+    from src.tool_process_adapter import ToolProcessAdapter, bind_audit_appender
+
     registry = build_default_tool_registry()
-    executor = DefensiveToolExecutor(incident_repository=incident_repository)
+    executor = DefensiveToolExecutor(
+        incident_repository=incident_repository,
+        process_adapter=ToolProcessAdapter(
+            audit_appender=bind_audit_appender(tool_repository),
+        ),
+    )
     return registry, executor
 
 

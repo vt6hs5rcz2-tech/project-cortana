@@ -16,6 +16,7 @@ Project Cortana is an early software milestone focused on:
 - Explicit source-grounded AI questions over retrieved document passages
 - Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
+- Optional process-isolated execution for a tiny allowlisted defensive tool subset
 - Trusted defensive playbook orchestration over allowlisted Milestone 9 tools
 - Durable workflow-run and workflow-audit history with optional authorized incident linkage
 - Optional controlled security analyst assistance over sanitized single-incident packets
@@ -246,12 +247,42 @@ Behavior and limits:
 - External tool execution and autonomous remediation are disabled.
 - The AI does not select tools and does not execute tools.
 - All file-based tools are read-only. They reject symlinks/reparse points and never delete, modify, or execute target files.
-- Built-in tools remain bounded and read-only. Execution timeouts stop the command caller from waiting after the configured limit. Python threads cannot be forcefully terminated safely, so a timed-out worker may still finish later, and a permanently hung worker may prevent interpreter shutdown. Timed-out workers cannot publish a late result or audit success. Hard cancellation via process isolation is intentionally out of scope for Milestone 9.
+- Built-in tools remain bounded and read-only. With process isolation disabled (default), execution uses in-process worker threads: timeouts stop the caller from waiting, but workers are not forcibly terminated, and late completion is never published.
+- Milestone 13 optionally enables process-isolated execution for a tiny allowlisted subset (`system-summary`, `simulated-log-check`) via `subprocess.Popen` and schema-validated JSON IPC. File-touching tools remain process-isolation prohibited. See the process-isolation section below.
 - Evidence and incident systems remain separate unless a request explicitly links an existing incident ID as metadata.
 - Tool-control persistence uses atomic UTF-8 JSON outside the Git repository.
 - Atomic writes do not coordinate concurrent Cortana processes. Use one application instance per tool-control repository. Cross-process locking is not implemented yet.
 - Audit records support accountability and do not claim legal forensic certification.
 - Prohibited capabilities remain out of scope: penetration testing, exploit execution, credential dumping, persistence, evasion, malware execution, destructive remediation, firewall changes, account disabling, process termination, file deletion, registry modification, remote access, real network scanning, internet threat-intelligence lookups, and cloud SIEM integrations.
+
+### Process-isolated tool execution (Milestone 13)
+
+Milestone 13 adds an optional process-isolated execution path for a tiny trusted subset of existing defensive tools. `DefensiveToolExecutor` remains the sole public execution boundary. Workflows and Milestone 12 AI analysis do not gain a new execution path.
+
+Flags (both default disabled):
+
+- `PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED`
+- `PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED` (cannot independently enable process execution)
+
+When execution is disabled, behavior matches Milestones 9–12. Eligible tools fall back to the in-process route. Required tools fail closed if isolation is unavailable.
+
+Initial process-isolation eligible tools:
+
+- `system-summary`
+- `simulated-log-check`
+
+File-touching tools (`file-sha256`, `compare-sha256`, `text-search`), repository-backed tools (`incident-summary`), and all other tools remain `process_isolation=prohibited`.
+
+Architecture notes:
+
+- Parent and child communicate with bounded, exact-key, schema-validated JSON only.
+- The child entry point is `python -m src.tool_process_runner`.
+- Authoritative results use a dedicated parent-created result file channel. stdout and stderr are diagnostic-only and are never parsed as results.
+- Every `Popen` call passes an explicit environment allowlist (no full parent env inheritance; no API keys or repository paths).
+- On timeout, the first state observed by the parent wins. Late results after termination are never accepted.
+- Cancellation is narrow: pre-launch cancelled request status, plus KeyboardInterrupt termination of an active child. No mid-flight cancellation service or worker pool.
+- Memory limiting is not implemented. Windows job-object support is deferred. Process termination limits runtime but does not guarantee a hard memory ceiling.
+- Antivirus/EDR may delay or block child Python processes. Startup timing is calibrated for Windows process creation. A child could become orphaned if the parent process itself crashes. Process isolation improves terminability; it is not a sandbox against malicious trusted tool code.
 
 Example (safe placeholders):
 

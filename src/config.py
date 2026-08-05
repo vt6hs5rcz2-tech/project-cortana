@@ -102,8 +102,16 @@ TOOL_AUDIT_PERSISTENCE_ENABLED = True
 TOOL_SINGLE_INSTANCE_COORDINATION_ENABLED = False
 TOOL_AI_CONTEXT_INJECTION_ENABLED = False
 
+# Process-isolated defensive tool execution foundation (Milestone 13)
+# Both default False. Termination cannot independently enable process execution.
+PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED = False
+PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED = False
+# Memory limiting (Windows job objects / POSIX rlimits) is not implemented.
+# Process isolation improves terminability for a tiny trusted subset only.
+
 TOOL_CONTROL_REPOSITORY_SCHEMA_VERSION = 1
 TOOL_CONTROL_REPOSITORY_FILENAME = "tool_control.json"
+TOOL_PROCESS_SCRATCH_DIRNAME = "tool_process_scratch"
 
 MAX_TOOL_NAME_LENGTH = 100
 MAX_TOOL_DESCRIPTION_LENGTH = 1_000
@@ -122,6 +130,19 @@ MAX_TOOL_TIMEOUT_SECONDS = 30
 DEFAULT_TOOL_TIMEOUT_SECONDS = 10
 MAX_TOOL_LIST_PREVIEW_CHARS = 120
 FINGERPRINT_DISPLAY_PREFIX_CHARS = 12
+
+# Milestone 13 process-isolation IPC and termination bounds
+PROCESS_CHILD_STARTUP_TIMEOUT_SECONDS = 10
+PROCESS_TERMINATION_CONFIRMATION_TIMEOUT_SECONDS = 5
+MAX_PROCESS_IPC_REQUEST_BYTES = 8_192
+MAX_PROCESS_IPC_RESPONSE_BYTES = 16_384
+MAX_PROCESS_DIAGNOSTIC_STDOUT_BYTES = 4_096
+MAX_PROCESS_DIAGNOSTIC_STDERR_BYTES = 4_096
+MAX_PROCESS_PARAMETER_COUNT = 16
+MAX_PROCESS_PARAMETER_NAME_CHARS = 64
+MAX_PROCESS_PARAMETER_STRING_CHARS = 2_000
+MAX_PROCESS_PARAMETER_NESTING_DEPTH = 2
+PROCESS_IPC_SCHEMA_VERSION = 1
 
 # Defensive workflow orchestration (Milestone 10)
 DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED = True
@@ -223,3 +244,13 @@ def get_default_tool_control_repository_file_path() -> Path:
 def get_default_workflow_repository_file_path() -> Path:
     """Return the default user-local path for the workflow repository JSON file."""
     return _default_app_data_dir() / WORKFLOW_REPOSITORY_FILENAME
+
+
+def get_default_tool_process_scratch_dir_path() -> Path:
+    """Return the dedicated scratch directory for process-isolated tool IPC.
+
+    Created only by trusted application code. Not an incident, tool-control, or
+    workflow repository path. Eligible v1 tools do not depend on this directory
+    for tool logic; it holds parent-created result files only.
+    """
+    return _default_app_data_dir() / TOOL_PROCESS_SCRATCH_DIRNAME

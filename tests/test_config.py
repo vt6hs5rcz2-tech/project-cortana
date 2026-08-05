@@ -39,6 +39,8 @@ from src.config import (
     EXTERNAL_TOOL_EXECUTION_ENABLED,
     INCIDENT_REPOSITORY_FILENAME,
     TOOL_CONTROL_REPOSITORY_FILENAME,
+    PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED,
+    PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED,
     TOOL_DRY_RUN_ENFORCEMENT_ENABLED,
     TOOL_HUMAN_APPROVAL_ENABLED,
     TOOL_SCOPE_ENFORCEMENT_ENABLED,
@@ -277,3 +279,9 @@ def test_incident_ai_analysis_capabilities_default_disabled() -> None:
     assert 20_000 <= MAX_INCIDENT_ANALYSIS_PACKET_CHARS <= 40_000
     assert MAX_INCIDENT_ANALYSIS_OUTPUT_CHARS == 4_000
     assert MAX_RETAINED_INCIDENT_ANALYSES == 50
+
+
+def test_process_isolated_tool_execution_defaults_disabled() -> None:
+    """Milestone 13 process isolation must remain opt-in and dual-flagged."""
+    assert PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED is False
+    assert PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED is False

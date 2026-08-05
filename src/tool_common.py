@@ -81,6 +81,13 @@ ToolExecutionOutcome = Literal[
     "denied",
     "expired",
     "cancelled",
+    "timed_out_terminated",
+    "termination_unconfirmed",
+]
+ToolProcessIsolation = Literal[
+    "prohibited",
+    "eligible",
+    "required",
 ]
 ToolAuditAction = Literal[
     "scope-created",
@@ -92,6 +99,15 @@ ToolAuditAction = Literal[
     "execution-failed",
     "execution-denied",
     "request-cancelled",
+    "process_execution_started",
+    "process_execution_completed",
+    "process_launch_failed",
+    "process_timeout_observed",
+    "process_timeout_terminated",
+    "process_cancellation_requested",
+    "process_cancellation_terminated",
+    "process_termination_unconfirmed",
+    "process_result_rejected",
 ]
 
 TOOL_CATEGORIES: frozenset[str] = frozenset(
@@ -144,7 +160,19 @@ TOOL_REQUEST_STATUSES: frozenset[str] = frozenset(
 )
 TOOL_APPROVAL_DECISIONS: frozenset[str] = frozenset({"approved", "rejected"})
 TOOL_EXECUTION_OUTCOMES: frozenset[str] = frozenset(
-    {"planned", "succeeded", "failed", "denied", "expired", "cancelled"}
+    {
+        "planned",
+        "succeeded",
+        "failed",
+        "denied",
+        "expired",
+        "cancelled",
+        "timed_out_terminated",
+        "termination_unconfirmed",
+    }
+)
+TOOL_PROCESS_ISOLATION_VALUES: frozenset[str] = frozenset(
+    {"prohibited", "eligible", "required"}
 )
 TOOL_AUDIT_ACTIONS: frozenset[str] = frozenset(
     {
@@ -157,6 +185,15 @@ TOOL_AUDIT_ACTIONS: frozenset[str] = frozenset(
         "execution-failed",
         "execution-denied",
         "request-cancelled",
+        "process_execution_started",
+        "process_execution_completed",
+        "process_launch_failed",
+        "process_timeout_observed",
+        "process_timeout_terminated",
+        "process_cancellation_requested",
+        "process_cancellation_terminated",
+        "process_termination_unconfirmed",
+        "process_result_rejected",
     }
 )
 

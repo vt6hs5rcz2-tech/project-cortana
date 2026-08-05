@@ -122,7 +122,24 @@ def build_default_tool_registry() -> ToolRegistry:
     registry = ToolRegistry()
     for definition in _builtin_tool_definitions():
         registry.register(definition)
+    assert_default_process_isolation_consistency(registry)
     return registry
+
+
+def assert_default_process_isolation_consistency(registry: ToolRegistry) -> None:
+    """Assert registry eligible/required IDs match the child dispatch table exactly."""
+    from src.tool_process_common import (
+        assert_process_isolation_tables_match,
+        registry_process_isolation_implementation_ids,
+    )
+    from src.tool_process_runner import CHILD_DISPATCH_IMPLEMENTATION_IDS
+
+    assert_process_isolation_tables_match(
+        registry_implementation_ids=registry_process_isolation_implementation_ids(
+            registry.list_all()
+        ),
+        child_dispatch_ids=CHILD_DISPATCH_IMPLEMENTATION_IDS,
+    )
 
 
 def _builtin_tool_definitions() -> list[DefensiveToolDefinition]:
@@ -148,6 +165,7 @@ def _builtin_tool_definitions() -> list[DefensiveToolDefinition]:
             supports_dry_run=True,
             enabled=True,
             implementation_identifier="impl_system_summary",
+            process_isolation="eligible",
         ),
         create_tool_definition(
             tool_id="file-sha256",
@@ -324,6 +342,7 @@ def _builtin_tool_definitions() -> list[DefensiveToolDefinition]:
             supports_dry_run=True,
             enabled=True,
             implementation_identifier="impl_simulated_log_check",
+            process_isolation="eligible",
         ),
     ]
 

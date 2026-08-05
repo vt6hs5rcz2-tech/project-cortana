@@ -19,7 +19,14 @@ TOOL_EXECUTION_MODULES = [
     Path("src/tool_safe_files.py"),
     Path("src/tool_commands.py"),
     Path("src/tool_policy.py"),
+    Path("src/tool_process_common.py"),
+    Path("src/tool_process_envelope.py"),
+    Path("src/tool_process_callables.py"),
+    Path("src/tool_process_runner.py"),
 ]
+
+# Milestone 13: only the process adapter may import/use subprocess for tools.
+PROCESS_ADAPTER_MODULE = Path("src/tool_process_adapter.py")
 
 
 def _module_source(path: Path) -> str:
@@ -60,6 +67,25 @@ def test_no_subprocess_shell_eval_exec_in_tool_path() -> None:
                         keyword.value, ast.Constant
                     ) and keyword.value.value is True:
                         pytest.fail(f"{path} contains shell=True")
+
+
+def test_process_adapter_is_only_subprocess_tool_module() -> None:
+    adapter_source = _module_source(PROCESS_ADAPTER_MODULE)
+    assert "import subprocess" in adapter_source
+    tree = ast.parse(adapter_source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                if keyword.arg == "shell" and isinstance(
+                    keyword.value, ast.Constant
+                ) and keyword.value.value is True:
+                    pytest.fail("tool_process_adapter contains shell=True")
+            if isinstance(node.func, ast.Name) and node.func.id in {
+                "eval",
+                "exec",
+                "__import__",
+            }:
+                pytest.fail(f"tool_process_adapter contains {node.func.id}()")
 
 
 def test_no_raw_command_field_in_parameter_schemas() -> None:

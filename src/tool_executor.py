@@ -9,6 +9,9 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
+from src.config import (
+    PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED,
+)
 from src.incident_repository import IncidentRepository
 from src.tool_approval import ToolApprovalRecord, assert_approval_allows_execution
 from src.tool_common import (
@@ -33,6 +36,7 @@ from src.tool_policy import (
     assert_ready_for_execution,
     dry_run_required,
 )
+from src.tool_process_adapter import ToolProcessAdapter, bind_audit_appender
 from src.tool_request import ToolExecutionRequest
 from src.tool_result import ToolExecutionResult, create_tool_execution_result
 from src.tool_scope import (
@@ -48,10 +52,9 @@ logger = logging.getLogger("ProjectCortana")
 # Timed-out workers are abandoned, not killed. Keep a small pool so one abandoned
 # hang does not permanently serialize every later tool call.
 #
-# Milestone 9 intentionally uses in-process threads (no subprocess/process isolation).
-# shutdown(wait=False) returns to the caller promptly, but the Python interpreter can
-# still wait for running ThreadPoolExecutor workers before process exit. Hard
-# cancellation of a hung worker would require process isolation, which is out of scope.
+# Milestone 9 uses in-process threads when process isolation is disabled.
+# Milestone 13 optionally routes eligible/required tools through ToolProcessAdapter
+# (subprocess.Popen + JSON IPC) for hard timeout termination.
 _TOOL_POOL_WORKERS = 4
 
 
@@ -79,15 +82,13 @@ def _discard_abandoned_future(future: Future[Any]) -> None:
 class DefensiveToolExecutor:
     """Execute allowlisted defensive tools through trusted internal callables only.
 
-    Timeouts stop the command caller from waiting after ``timeout_seconds``.
-    Python threads cannot be forcibly terminated safely, so a timed-out worker may
-    still finish later (or hang). Late completion is discarded and must never
-    publish a result, change request status, mutate approvals/scopes/registry
-    state, or append additional audit records.
+    ``DefensiveToolExecutor`` remains the sole public tool-execution boundary.
+    When process isolation is disabled, behavior matches Milestones 9–12
+    (in-process threads; timed-out workers are not forcibly terminated).
 
-    ``shutdown(wait=False)`` returns promptly to the caller, but a permanently
-    hung worker may still prevent interpreter shutdown. Process-isolated hard
-    cancellation is intentionally out of scope for Milestone 9.
+    When process isolation is enabled, eligible tools may run in a child process
+    and required tools must. Parent-side authorization, scope, approval, and
+    policy checks always run before any child launch.
     """
 
     def __init__(
@@ -95,6 +96,8 @@ class DefensiveToolExecutor:
         *,
         implementations: dict[str, ToolCallable] | None = None,
         incident_repository: IncidentRepository | None = None,
+        process_adapter: ToolProcessAdapter | None = None,
+        audit_appender: Any | None = None,
     ) -> None:
         self._implementations = (
             implementations
@@ -110,6 +113,9 @@ class DefensiveToolExecutor:
         self._abandon_lock = threading.Lock()
         self._abandoned_futures: set[Future[Any]] = set()
         self._finalize = weakref.finalize(self, _shutdown_pool, self._pool)
+        self._process_adapter = process_adapter or ToolProcessAdapter(
+            audit_appender=audit_appender,
+        )
 
     def shutdown(self) -> None:
         """Request pool shutdown without joining running workers.
@@ -135,7 +141,8 @@ class DefensiveToolExecutor:
         assert_incident_authorized(scope, request.incident_id)
         _assert_path_params_in_scope(definition, request, scope)
 
-        # Dry run must not read the target file or perform the primary operation.
+        # Dry run must not read the target file, launch a child, or perform the
+        # primary operation.
         redacted = redact_parameters_for_display(
             request.normalized_parameters,
             definition.parameter_schema,
@@ -155,6 +162,7 @@ class DefensiveToolExecutor:
             "request_fingerprint_prefix": fingerprint_display_prefix(
                 request.fingerprint
             ),
+            "process_isolation": definition.process_isolation,
         }
         if filename_hint is not None:
             structured["target_filename"] = filename_hint
@@ -193,6 +201,18 @@ class DefensiveToolExecutor:
                 assert_approval_allows_execution(approval, request)
 
             assert_executable(definition)
+            route = _select_execution_route(definition)
+            if route == "process":
+                return self._process_adapter.execute(
+                    definition=definition,
+                    request=request,
+                    started_timestamp=started,
+                )
+            if route == "unavailable":
+                raise ToolPolicyError(
+                    "Process isolation is required for this tool but is disabled."
+                )
+
             callable_impl = self._implementations.get(
                 definition.implementation_identifier
             )
@@ -320,6 +340,22 @@ class DefensiveToolExecutor:
         with self._abandon_lock:
             self._abandoned_futures.discard(future)
         _discard_abandoned_future(future)
+
+
+def _select_execution_route(definition: DefensiveToolDefinition) -> str:
+    """Return ``in_process``, ``process``, or ``unavailable`` for one definition."""
+    isolation = definition.process_isolation
+    if isolation == "prohibited":
+        return "in_process"
+    if isolation == "eligible":
+        if PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED:
+            return "process"
+        return "in_process"
+    if isolation == "required":
+        if PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED:
+            return "process"
+        return "unavailable"
+    return "in_process"
 
 
 def _primary_target_type(definition: DefensiveToolDefinition) -> str:

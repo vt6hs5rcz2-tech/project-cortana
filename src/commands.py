@@ -54,6 +54,8 @@ from src.config import (
     DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED,
     MAX_WORKFLOW_AUDIT_ENTRIES_RETAINED,
     MAX_WORKFLOW_RUNS_RETAINED,
+    PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED,
+    PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED,
     TOOL_AUDIT_PERSISTENCE_ENABLED,
     TOOL_DRY_RUN_ENFORCEMENT_ENABLED,
     TOOL_HUMAN_APPROVAL_ENABLED,
@@ -269,11 +271,12 @@ ABOUT_TEXT = (
     "local Knowledge Vault, source-grounded document questions, a local "
     "human-controlled security event, incident, indicator, evidence, and "
     "chain-of-custody foundation, a human-supervised defensive tool "
-    "framework with scope controls and approval, trusted defensive playbook "
-    "orchestration over allowlisted tools, durable workflow-run history, "
-    "optional authorized incident linkage for completed playbook runs, and "
-    "optional controlled security analyst assistance over sanitized "
-    "single-incident packets."
+    "framework with scope controls and approval, optional process-isolated "
+    "execution for a tiny allowlisted tool subset, trusted defensive "
+    "playbook orchestration over allowlisted tools, durable workflow-run "
+    "history, optional authorized incident linkage for completed playbook "
+    "runs, and optional controlled security analyst assistance over "
+    "sanitized single-incident packets."
 )
 
 CLEAR_CONFIRMATION = (
@@ -1603,6 +1606,10 @@ def format_status(
         f"{'enabled' if TOOL_AUDIT_PERSISTENCE_ENABLED else 'disabled'}\n"
         "  Tool single-instance coordination: "
         f"{'enabled' if TOOL_SINGLE_INSTANCE_COORDINATION_ENABLED else 'disabled'}\n"
+        "  Process-isolated tool execution: "
+        f"{'enabled' if PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED else 'disabled'}\n"
+        "  Process-isolated tool termination: "
+        f"{'enabled' if PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED else 'disabled'}\n"
         "  Defensive workflow orchestration: "
         f"{'enabled' if DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED else 'disabled'}\n"
         f"  Registered playbooks: {registered_playbook_count}\n"

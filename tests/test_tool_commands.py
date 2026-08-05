@@ -251,6 +251,8 @@ def test_status_flags_and_privacy(tmp_path: Path) -> None:
     assert "Arbitrary shell execution: disabled" in status
     assert "External tool execution: disabled" in status
     assert "Autonomous remediation: disabled" in status
+    assert "Process-isolated tool execution: disabled" in status
+    assert "Process-isolated tool termination: disabled" in status
     assert "Scope enforcement: enabled" in status
     assert "Human approval: enabled" in status
     assert "Dry-run enforcement: enabled" in status

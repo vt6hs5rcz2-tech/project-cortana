@@ -282,10 +282,16 @@ class JsonToolControlRepository:
         if action is None:
             if validated.outcome == "succeeded":
                 action = "execution-succeeded"
-            elif validated.outcome == "failed":
+            elif validated.outcome in {
+                "failed",
+                "timed_out_terminated",
+                "termination_unconfirmed",
+            }:
                 action = "execution-failed"
             elif validated.outcome == "denied":
                 action = "execution-denied"
+            elif validated.outcome == "cancelled":
+                action = "request-cancelled"
             else:
                 action = "execution-started"
         state.audit_entries.append(

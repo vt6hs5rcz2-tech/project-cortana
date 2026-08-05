@@ -18,6 +18,7 @@ from src.tool_common import (
     TOOL_EXECUTION_MODES,
     TOOL_OBJECTIVE_TYPES,
     TOOL_PARAMETER_TYPES,
+    TOOL_PROCESS_ISOLATION_VALUES,
     TOOL_RISK_LEVELS,
     TOOL_TARGET_TYPES,
     BlankToolFieldError,
@@ -27,6 +28,7 @@ from src.tool_common import (
     ToolObjectiveType,
     ToolParameterError,
     ToolParameterType,
+    ToolProcessIsolation,
     ToolRiskLevel,
     ToolTargetType,
     ToolValidationError,
@@ -90,6 +92,7 @@ class DefensiveToolDefinition:
     supports_dry_run: bool
     enabled: bool
     implementation_identifier: str
+    process_isolation: ToolProcessIsolation
 
 
 def create_parameter_definition(
@@ -192,6 +195,7 @@ def create_tool_definition(
     supports_dry_run: bool = True,
     enabled: bool = True,
     implementation_identifier: str,
+    process_isolation: str = "prohibited",
 ) -> DefensiveToolDefinition:
     """Create one validated immutable defensive tool definition."""
     cleaned_tool_id = validate_tool_id(tool_id)
@@ -270,6 +274,25 @@ def create_tool_definition(
             "Future-external tools cannot be enabled in this milestone."
         )
 
+    cleaned_isolation = validate_controlled_value(
+        process_isolation,
+        field_name="process isolation",
+        allowed=TOOL_PROCESS_ISOLATION_VALUES,
+    )
+    if cleaned_isolation in {"eligible", "required"}:
+        from src.tool_process_common import PROCESS_SAFE_IMPLEMENTATION_IDS
+
+        if implementation not in PROCESS_SAFE_IMPLEMENTATION_IDS:
+            raise ToolValidationError(
+                "Only approved process-safe implementations may be "
+                "process-isolation eligible or required."
+            )
+        # File-path tools are not eligible in v1 (parent-validation/child-open TOCTOU).
+        if any(item.parameter_type == "file-path" for item in parameter_schema):
+            raise ToolValidationError(
+                "File-touching tools cannot be process-isolation eligible."
+            )
+
     schema = tuple(parameter_schema)
     seen_names: set[str] = set()
     for parameter in schema:
@@ -300,6 +323,7 @@ def create_tool_definition(
         supports_dry_run=True,
         enabled=bool(enabled),
         implementation_identifier=implementation,
+        process_isolation=cleaned_isolation,  # type: ignore[arg-type]
     )
 
 
