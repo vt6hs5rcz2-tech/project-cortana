@@ -28,6 +28,7 @@ from src.retrieval_session import RetrievalSession
 from src.settings import Settings, load_settings
 from src.tool_commands import create_default_tool_services
 from src.tool_repository import JsonToolControlRepository
+from src.workflow_commands import create_default_workflow_services
 
 
 def initialize_ai(
@@ -83,6 +84,13 @@ def main() -> None:
         tool_repository=tool_repository,
         incident_repository=incident_repository,
     )
+    workflow_registry, workflow_run_repository, workflow_executor = (
+        create_default_workflow_services(
+            tool_registry=tool_registry,
+            tool_repository=tool_repository,
+            tool_executor=tool_executor,
+        )
+    )
 
     run_conversation_loop(
         client=client,
@@ -100,6 +108,9 @@ def main() -> None:
         tool_registry=tool_registry,
         tool_repository=tool_repository,
         tool_executor=tool_executor,
+        workflow_registry=workflow_registry,
+        workflow_run_repository=workflow_run_repository,
+        workflow_executor=workflow_executor,
     )
 
 

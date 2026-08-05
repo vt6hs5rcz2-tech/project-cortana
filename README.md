@@ -16,6 +16,7 @@ Project Cortana is an early software milestone focused on:
 - Explicit source-grounded AI questions over retrieved document passages
 - Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
+- Trusted defensive playbook orchestration over allowlisted Milestone 9 tools
 
 ## Conversation history, persistent memory, active context, and documents
 
@@ -28,6 +29,7 @@ Project Cortana is an early software milestone focused on:
 | Retrieved document passages | Current request/session only | Selected only by `/search-docs` (local) or `/ask-docs` (AI) | Only selected chunks through `/ask-docs` |
 | Security incidents and evidence | Survives restarts | Created only through explicit local Milestone 8 commands | Never in this milestone |
 | Defensive tool scopes, requests, approvals, results, and audits | Survives restarts | Created only through explicit local Milestone 9 commands | Never in this milestone |
+| Workflow/playbook run state and workflow audits | Current process only | Created only through explicit local Milestone 10 commands | Never in this milestone |
 
 Persistent memories, Knowledge Vault documents, incident records, and evidence copies are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories.
 
@@ -265,6 +267,36 @@ Multi-field Milestone 8 commands use the delimiter ` | ` so paths and free text 
 /event-new high | Phishing report | User clicked a suspicious link
 ```
 
+## Defensive workflow orchestration
+
+Milestone 10 adds a bounded, deterministic workflow layer that coordinates multiple existing approved defensive tools through trusted, predefined playbooks.
+
+Built-in playbooks:
+
+| Playbook | Steps |
+| --- | --- |
+| `platform-baseline` | `system-summary` → `simulated-log-check` (`auth-noise`) |
+| `mock-log-triage` | `simulated-log-check` across `auth-noise`, `malware-keyword`, and `empty` fixtures |
+
+Behavior and limits:
+
+- Playbooks are defined only in trusted Python source. They are not loaded from JSON, YAML, user files, AI output, or external sources.
+- Every step references an existing registered Milestone 9 `tool_id` with static predeclared parameters.
+- `DefensiveToolExecutor` remains the sole tool execution boundary.
+- Dry-run is the default. `/playbook-run <name> | <scope-id>` calls `plan_dry_run` for each reached step and never calls `execute`.
+- Explicit execution uses `/playbook-run <name> --execute | <scope-id>` and still requires scope, policy, and step-specific fingerprint-bound approvals where Milestone 9 requires them.
+- Execution is strictly sequential and stop-on-failure. There is no parallel execution, silent retry, nested playbook, dynamic output piping, background worker, or arbitrary scripting interface.
+- Workflow run state is retained in memory only for the current process.
+- Workflow commands never call the AI service.
+
+Example:
+
+```text
+/scope-new Baseline lab | system-summary,simulated-log-check | none | Local baseline review
+/playbook-run platform-baseline | <scope-id>
+/playbook-status <run-id>
+```
+
 ## Local commands
 
 | Command | Description |
@@ -326,6 +358,11 @@ Multi-field Milestone 8 commands use the delimiter ` | ` so paths and free text 
 | `/tool-run <request-id>` | Execute one authorized tool request |
 | `/tool-result <result-id>` | Show one tool execution result |
 | `/tool-audit` | List tool-control audit entries |
+| `/playbooks` | List enabled defensive playbooks |
+| `/playbook-show <name>` | Show one defensive playbook |
+| `/playbook-run <name> \| <scope-id>` | Dry-run one trusted playbook |
+| `/playbook-run <name> --execute \| <scope-id>` | Execute one trusted playbook after validations |
+| `/playbook-status <run-id>` | Show one workflow run |
 | `/about` | Describe Project Cortana and this milestone |
 | `/exit` | End the session cleanly |
 
@@ -342,6 +379,7 @@ Notes:
 - `/ask-docs` sends only selected retrieved chunks, never the entire vault and never incident records.
 - Milestone 8 security commands never call the AI service.
 - Milestone 9 defensive tool commands never call the AI service.
+- Milestone 10 workflow/playbook commands never call the AI service.
 - Absolute path-like input such as `/etc/passwd` is treated as conversation content for the AI, not as a local command, unless it is explicitly provided as an `/add-document` or `/evidence-register` argument.
 
 ## Active memory limits

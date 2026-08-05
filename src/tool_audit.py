@@ -112,7 +112,7 @@ def validate_tool_audit_entry(entry: ToolAuditEntry) -> ToolAuditEntry:
     )
 
 
-_FORBIDDEN_DETAIL_KEYS: frozenset[str] = frozenset(
+FORBIDDEN_AUDIT_DETAIL_KEYS: frozenset[str] = frozenset(
     {
         "path",
         "full_path",
@@ -138,16 +138,28 @@ _FORBIDDEN_DETAIL_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# Backward-compatible private alias for existing Milestone 9 call sites/tests.
+_FORBIDDEN_DETAIL_KEYS = FORBIDDEN_AUDIT_DETAIL_KEYS
 
-def _assert_details_are_safe(details: dict[str, Any]) -> None:
-    """Reject obviously sensitive audit detail keys."""
+
+def assert_audit_details_are_safe(
+    details: dict[str, Any],
+    *,
+    max_value_length: int = MAX_TOOL_AUDIT_DETAILS_LENGTH,
+) -> None:
+    """Reject obviously sensitive audit detail keys and oversized values."""
     for key, value in details.items():
         lowered = str(key).strip().lower()
-        if lowered in _FORBIDDEN_DETAIL_KEYS:
+        if lowered in FORBIDDEN_AUDIT_DETAIL_KEYS:
             raise ToolValidationError(
                 f"Audit detail key '{lowered}' is not allowed."
             )
-        if isinstance(value, str) and len(value) > MAX_TOOL_AUDIT_DETAILS_LENGTH:
+        if isinstance(value, str) and len(value) > max_value_length:
             raise ToolValidationError(
                 "Audit detail value exceeds the maximum length."
             )
+
+
+def _assert_details_are_safe(details: dict[str, Any]) -> None:
+    """Reject obviously sensitive audit detail keys."""
+    assert_audit_details_are_safe(details)

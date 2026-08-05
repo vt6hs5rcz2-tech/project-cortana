@@ -23,6 +23,12 @@ from src.settings import Settings
 from src.tool_executor import DefensiveToolExecutor
 from src.tool_registry import ToolRegistry
 from src.tool_repository import JsonToolControlRepository, ToolControlRepository
+from src.workflow_executor import WorkflowExecutor
+from src.workflow_registry import WorkflowRegistry
+from src.workflow_repository import (
+    InMemoryWorkflowRunRepository,
+    WorkflowRunRepository,
+)
 
 FAKE_CLIENT = cast(OpenAIClient, object())
 
@@ -546,6 +552,9 @@ def test_main_orchestrates_conversation_loop(
     received_tool_registry: ToolRegistry | None = None
     received_tool_repository: ToolControlRepository | None = None
     received_tool_executor: DefensiveToolExecutor | None = None
+    received_workflow_registry: WorkflowRegistry | None = None
+    received_workflow_run_repository: WorkflowRunRepository | None = None
+    received_workflow_executor: WorkflowExecutor | None = None
 
     monkeypatch.setattr(main_module, "setup_logging", lambda: logger)
     monkeypatch.setattr(
@@ -596,6 +605,9 @@ def test_main_orchestrates_conversation_loop(
         tool_registry: ToolRegistry,
         tool_repository: ToolControlRepository,
         tool_executor: DefensiveToolExecutor,
+        workflow_registry: WorkflowRegistry,
+        workflow_run_repository: WorkflowRunRepository,
+        workflow_executor: WorkflowExecutor,
     ) -> None:
         nonlocal received_client, received_settings, received_logger, received_memory_store
         nonlocal received_active_memory_context
@@ -604,6 +616,8 @@ def test_main_orchestrates_conversation_loop(
         nonlocal received_retrieval_session
         nonlocal received_incident_repository, received_evidence_store
         nonlocal received_tool_registry, received_tool_repository, received_tool_executor
+        nonlocal received_workflow_registry, received_workflow_run_repository
+        nonlocal received_workflow_executor
         received_client = client
         received_settings = settings
         received_logger = logger
@@ -619,6 +633,9 @@ def test_main_orchestrates_conversation_loop(
         received_tool_registry = tool_registry
         received_tool_repository = tool_repository
         received_tool_executor = tool_executor
+        received_workflow_registry = workflow_registry
+        received_workflow_run_repository = workflow_run_repository
+        received_workflow_executor = workflow_executor
 
     monkeypatch.setattr(
         main_module,
@@ -651,3 +668,7 @@ def test_main_orchestrates_conversation_loop(
     assert isinstance(received_tool_repository, JsonToolControlRepository)
     assert received_tool_repository.file_path == tool_path
     assert isinstance(received_tool_executor, DefensiveToolExecutor)
+    assert isinstance(received_workflow_registry, WorkflowRegistry)
+    assert isinstance(received_workflow_run_repository, InMemoryWorkflowRunRepository)
+    assert isinstance(received_workflow_executor, WorkflowExecutor)
+    assert received_workflow_registry.count() >= 2

@@ -42,6 +42,15 @@ from src.config import (
     TOOL_DRY_RUN_ENFORCEMENT_ENABLED,
     TOOL_HUMAN_APPROVAL_ENABLED,
     TOOL_SCOPE_ENFORCEMENT_ENABLED,
+    DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED,
+    MAX_WORKFLOW_RUNTIME_SECONDS,
+    MAX_WORKFLOW_STEPS,
+    WORKFLOW_AI_CONTEXT_INJECTION_ENABLED,
+    WORKFLOW_BACKGROUND_EXECUTION_ENABLED,
+    WORKFLOW_DYNAMIC_STEP_BINDING_ENABLED,
+    WORKFLOW_EXTERNAL_PLAYBOOK_LOADING_ENABLED,
+    WORKFLOW_NESTED_PLAYBOOKS_ENABLED,
+    WORKFLOW_PARALLEL_EXECUTION_ENABLED,
     get_default_document_vault_file_path,
     get_default_evidence_store_dir_path,
     get_default_incident_repository_file_path,
@@ -192,3 +201,16 @@ def test_default_tool_control_repository_path_is_outside_project_source(
     assert PROJECT_ROOT not in path.parents
     assert "src" not in path.parts
     assert "tests" not in path.parts
+
+
+def test_defensive_workflow_orchestration_capabilities_are_centralized() -> None:
+    """Milestone 10 workflow flags should remain bounded and non-autonomous."""
+    assert DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED is True
+    assert WORKFLOW_EXTERNAL_PLAYBOOK_LOADING_ENABLED is False
+    assert WORKFLOW_DYNAMIC_STEP_BINDING_ENABLED is False
+    assert WORKFLOW_PARALLEL_EXECUTION_ENABLED is False
+    assert WORKFLOW_BACKGROUND_EXECUTION_ENABLED is False
+    assert WORKFLOW_NESTED_PLAYBOOKS_ENABLED is False
+    assert WORKFLOW_AI_CONTEXT_INJECTION_ENABLED is False
+    assert MAX_WORKFLOW_STEPS == 8
+    assert MAX_WORKFLOW_RUNTIME_SECONDS == 60

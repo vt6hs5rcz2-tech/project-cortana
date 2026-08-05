@@ -46,11 +46,18 @@ from src.config import (
     MAX_STORED_DOCUMENTS,
     SEMANTIC_RETRIEVAL_ENABLED,
     SOURCE_MANIFEST_PERSISTENCE_ENABLED,
+    DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED,
     TOOL_AUDIT_PERSISTENCE_ENABLED,
     TOOL_DRY_RUN_ENFORCEMENT_ENABLED,
     TOOL_HUMAN_APPROVAL_ENABLED,
     TOOL_SCOPE_ENFORCEMENT_ENABLED,
     TOOL_SINGLE_INSTANCE_COORDINATION_ENABLED,
+    WORKFLOW_AI_CONTEXT_INJECTION_ENABLED,
+    WORKFLOW_BACKGROUND_EXECUTION_ENABLED,
+    WORKFLOW_DYNAMIC_STEP_BINDING_ENABLED,
+    WORKFLOW_EXTERNAL_PLAYBOOK_LOADING_ENABLED,
+    WORKFLOW_NESTED_PLAYBOOKS_ENABLED,
+    WORKFLOW_PARALLEL_EXECUTION_ENABLED,
 )
 from src.conversation import ConversationHistory
 from src.document import (
@@ -103,6 +110,15 @@ from src.tool_repository import (
     ToolControlRepository,
     ToolStorageError,
 )
+from src.workflow_commands import (
+    WORKFLOW_COMMAND_NAMES,
+    WorkflowCommandContext,
+    create_default_workflow_services,
+    handle_workflow_command,
+)
+from src.workflow_executor import WorkflowExecutor
+from src.workflow_registry import WorkflowRegistry
+from src.workflow_repository import WorkflowRunRepository
 
 logger = logging.getLogger("ProjectCortana")
 
@@ -156,6 +172,7 @@ SUPPORTED_COMMANDS = frozenset(
         COMMAND_SOURCES,
         *SECURITY_COMMAND_NAMES,
         *TOOL_COMMAND_NAMES,
+        *WORKFLOW_COMMAND_NAMES,
     }
 )
 
@@ -215,6 +232,10 @@ HELP_TEXT = """Cortana: Available commands:
   /tool-run             - Execute one approved tool request
   /tool-result          - Show one tool execution result
   /tool-audit           - List tool-control audit entries
+  /playbooks            - List enabled defensive playbooks
+  /playbook-show        - Show one defensive playbook by name
+  /playbook-run         - Dry-run or execute one trusted playbook
+  /playbook-status      - Show one workflow run by ID
   /about                - Describe Project Cortana and this software milestone
   /exit                 - End the session cleanly"""
 
@@ -225,8 +246,9 @@ ABOUT_TEXT = (
     "user-controlled persistent memory, temporary active memory context, a "
     "local Knowledge Vault, source-grounded document questions, a local "
     "human-controlled security event, incident, indicator, evidence, and "
-    "chain-of-custody foundation, and a human-supervised defensive tool "
-    "framework with scope controls and approval."
+    "chain-of-custody foundation, a human-supervised defensive tool "
+    "framework with scope controls and approval, and trusted defensive "
+    "playbook orchestration over allowlisted tools."
 )
 
 CLEAR_CONFIRMATION = (
@@ -388,6 +410,9 @@ class CommandContext:
     tool_registry: ToolRegistry
     tool_repository: ToolControlRepository
     tool_executor: DefensiveToolExecutor
+    workflow_registry: WorkflowRegistry
+    workflow_run_repository: WorkflowRunRepository
+    workflow_executor: WorkflowExecutor
     client: OpenAIClient | None = None
 
 
@@ -414,6 +439,20 @@ def _ephemeral_tool_services(
         incident_repository=incident_repository,
     )
     return registry, repository, executor
+
+
+def _ephemeral_workflow_services(
+    *,
+    tool_registry: ToolRegistry,
+    tool_repository: ToolControlRepository,
+    tool_executor: DefensiveToolExecutor,
+) -> tuple[WorkflowRegistry, WorkflowRunRepository, WorkflowExecutor]:
+    """Create disposable workflow services for tests that omit Milestone 10 injection."""
+    return create_default_workflow_services(
+        tool_registry=tool_registry,
+        tool_repository=tool_repository,
+        tool_executor=tool_executor,
+    )
 
 
 def parse_slash_input(message: str) -> str | None:
@@ -470,13 +509,17 @@ def handle_slash_command(
     tool_registry: ToolRegistry | None = None,
     tool_repository: ToolControlRepository | None = None,
     tool_executor: DefensiveToolExecutor | None = None,
+    workflow_registry: WorkflowRegistry | None = None,
+    workflow_run_repository: WorkflowRunRepository | None = None,
+    workflow_executor: WorkflowExecutor | None = None,
     client: OpenAIClient | None = None,
 ) -> CommandResult:
     """Handle a slash command locally.
 
     Most commands never call the AI service. ``/ask-docs`` is the explicit
-    exception and requires an injected client. Milestone 8 security commands
-    and Milestone 9 tool commands are always local and never call the AI service.
+    exception and requires an injected client. Milestone 8 security commands,
+    Milestone 9 tool commands, and Milestone 10 workflow commands are always
+    local and never call the AI service.
     """
     command_name = normalize_command_name(message)
 
@@ -492,6 +535,23 @@ def handle_slash_command(
         tool_registry = tool_registry or ephemeral_registry
         tool_repository = tool_repository or ephemeral_tools
         tool_executor = tool_executor or ephemeral_executor
+
+    # Workflow services are all-or-nothing: a partial injection can otherwise
+    # pair an executor with a different run repository than /playbook-status.
+    if (
+        workflow_registry is None
+        or workflow_run_repository is None
+        or workflow_executor is None
+    ):
+        (
+            workflow_registry,
+            workflow_run_repository,
+            workflow_executor,
+        ) = _ephemeral_workflow_services(
+            tool_registry=tool_registry,
+            tool_repository=tool_repository,
+            tool_executor=tool_executor,
+        )
 
     if command_name in SECURITY_COMMAND_NAMES:
         security_result = handle_security_command(
@@ -525,6 +585,26 @@ def handle_slash_command(
                 message=tool_result.message,
             )
 
+    if command_name in WORKFLOW_COMMAND_NAMES:
+        workflow_result = handle_workflow_command(
+            command_name,
+            WorkflowCommandContext(
+                message=message,
+                tool_registry=tool_registry,
+                tool_repository=tool_repository,
+                tool_executor=tool_executor,
+                incident_repository=incident_repository,
+                workflow_registry=workflow_registry,
+                workflow_run_repository=workflow_run_repository,
+                workflow_executor=workflow_executor,
+            ),
+        )
+        if workflow_result is not None:
+            return CommandResult(
+                outcome=CommandOutcome.CONTINUE,
+                message=workflow_result.message,
+            )
+
     handler = COMMAND_HANDLERS.get(command_name)
 
     if handler is None:
@@ -548,6 +628,9 @@ def handle_slash_command(
         tool_registry=tool_registry,
         tool_repository=tool_repository,
         tool_executor=tool_executor,
+        workflow_registry=workflow_registry,
+        workflow_run_repository=workflow_run_repository,
+        workflow_executor=workflow_executor,
         client=client,
     )
     return handler(context)
@@ -571,6 +654,8 @@ def _handle_status(context: CommandContext) -> CommandResult:
             context.incident_repository,
             context.tool_registry,
             context.tool_repository,
+            context.workflow_registry,
+            context.workflow_run_repository,
         )
     except MemoryStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
@@ -1318,6 +1403,8 @@ def format_status(
     incident_repository: IncidentRepository | None = None,
     tool_registry: ToolRegistry | None = None,
     tool_repository: ToolControlRepository | None = None,
+    workflow_registry: WorkflowRegistry | None = None,
+    workflow_run_repository: WorkflowRunRepository | None = None,
 ) -> str:
     """Build safe local session status text for /status."""
     completed_turns = conversation_history.completed_turn_count
@@ -1354,6 +1441,17 @@ def format_status(
     else:
         active_scope_count = tool_repository.active_scope_count()
         pending_approval_count = tool_repository.pending_approval_count()
+
+    if workflow_registry is None:
+        registered_playbook_count = 0
+        enabled_playbook_count = 0
+    else:
+        registered_playbook_count = workflow_registry.count()
+        enabled_playbook_count = workflow_registry.enabled_count()
+    if workflow_run_repository is None:
+        retained_workflow_run_count = 0
+    else:
+        retained_workflow_run_count = len(workflow_run_repository.list_runs())
 
     return (
         "Cortana: Session status\n"
@@ -1430,7 +1528,24 @@ def format_status(
         "  Tool audit persistence: "
         f"{'enabled' if TOOL_AUDIT_PERSISTENCE_ENABLED else 'disabled'}\n"
         "  Tool single-instance coordination: "
-        f"{'enabled' if TOOL_SINGLE_INSTANCE_COORDINATION_ENABLED else 'disabled'}"
+        f"{'enabled' if TOOL_SINGLE_INSTANCE_COORDINATION_ENABLED else 'disabled'}\n"
+        "  Defensive workflow orchestration: "
+        f"{'enabled' if DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED else 'disabled'}\n"
+        f"  Registered playbooks: {registered_playbook_count}\n"
+        f"  Enabled playbooks: {enabled_playbook_count}\n"
+        f"  Retained workflow runs: {retained_workflow_run_count}\n"
+        "  External playbook loading: "
+        f"{'enabled' if WORKFLOW_EXTERNAL_PLAYBOOK_LOADING_ENABLED else 'disabled'}\n"
+        "  Dynamic step binding: "
+        f"{'enabled' if WORKFLOW_DYNAMIC_STEP_BINDING_ENABLED else 'disabled'}\n"
+        "  Parallel workflow execution: "
+        f"{'enabled' if WORKFLOW_PARALLEL_EXECUTION_ENABLED else 'disabled'}\n"
+        "  Background workflow execution: "
+        f"{'enabled' if WORKFLOW_BACKGROUND_EXECUTION_ENABLED else 'disabled'}\n"
+        "  Nested playbooks: "
+        f"{'enabled' if WORKFLOW_NESTED_PLAYBOOKS_ENABLED else 'disabled'}\n"
+        "  Workflow AI-context injection: "
+        f"{'enabled' if WORKFLOW_AI_CONTEXT_INJECTION_ENABLED else 'disabled'}"
     )
 
 

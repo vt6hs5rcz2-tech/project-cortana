@@ -24,6 +24,9 @@ from src.settings import Settings
 from src.tool_executor import DefensiveToolExecutor
 from src.tool_registry import ToolRegistry
 from src.tool_repository import ToolControlRepository
+from src.workflow_executor import WorkflowExecutor
+from src.workflow_registry import WorkflowRegistry
+from src.workflow_repository import WorkflowRunRepository
 
 BLANK_INPUT_MESSAGE = "Cortana: Please enter a message."
 
@@ -105,6 +108,9 @@ def run_conversation_loop(
     tool_registry: ToolRegistry | None = None,
     tool_repository: ToolControlRepository | None = None,
     tool_executor: DefensiveToolExecutor | None = None,
+    workflow_registry: WorkflowRegistry | None = None,
+    workflow_run_repository: WorkflowRunRepository | None = None,
+    workflow_executor: WorkflowExecutor | None = None,
     read_input: Callable[[], str] | None = None,
     conversation_history: ConversationHistory | None = None,
 ) -> None:
@@ -148,6 +154,9 @@ def run_conversation_loop(
                 tool_registry=tool_registry,
                 tool_repository=tool_repository,
                 tool_executor=tool_executor,
+                workflow_registry=workflow_registry,
+                workflow_run_repository=workflow_run_repository,
+                workflow_executor=workflow_executor,
                 client=client,
             )
             if command_result.message:
