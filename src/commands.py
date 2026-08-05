@@ -54,8 +54,10 @@ from src.config import (
     DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED,
     MAX_WORKFLOW_AUDIT_ENTRIES_RETAINED,
     MAX_WORKFLOW_RUNS_RETAINED,
+    PROCESS_FILE_TOOL_ISOLATION_ENABLED,
     PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED,
     PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED,
+    PROCESS_RESOURCE_LIMITS_ENABLED,
     TOOL_AUDIT_PERSISTENCE_ENABLED,
     TOOL_DRY_RUN_ENFORCEMENT_ENABLED,
     TOOL_HUMAN_APPROVAL_ENABLED,
@@ -272,11 +274,13 @@ ABOUT_TEXT = (
     "human-controlled security event, incident, indicator, evidence, and "
     "chain-of-custody foundation, a human-supervised defensive tool "
     "framework with scope controls and approval, optional process-isolated "
-    "execution for a tiny allowlisted tool subset, trusted defensive "
-    "playbook orchestration over allowlisted tools, durable workflow-run "
-    "history, optional authorized incident linkage for completed playbook "
-    "runs, and optional controlled security analyst assistance over "
-    "sanitized single-incident packets."
+    "execution for a tiny allowlisted tool subset, optional Windows Job "
+    "Object resource governance for isolated tools, a Windows safe "
+    "file-opening foundation that is not yet wired to file-tool "
+    "eligibility, trusted defensive playbook orchestration over "
+    "allowlisted tools, durable workflow-run history, optional authorized "
+    "incident linkage for completed playbook runs, and optional controlled "
+    "security analyst assistance over sanitized single-incident packets."
 )
 
 CLEAR_CONFIRMATION = (
@@ -1610,6 +1614,10 @@ def format_status(
         f"{'enabled' if PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED else 'disabled'}\n"
         "  Process-isolated tool termination: "
         f"{'enabled' if PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED else 'disabled'}\n"
+        "  Process resource limits: "
+        f"{'enabled' if PROCESS_RESOURCE_LIMITS_ENABLED else 'disabled'}\n"
+        "  Process file-tool isolation: "
+        f"{'enabled' if PROCESS_FILE_TOOL_ISOLATION_ENABLED else 'disabled'}\n"
         "  Defensive workflow orchestration: "
         f"{'enabled' if DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED else 'disabled'}\n"
         f"  Registered playbooks: {registered_playbook_count}\n"

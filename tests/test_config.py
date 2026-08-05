@@ -39,8 +39,12 @@ from src.config import (
     EXTERNAL_TOOL_EXECUTION_ENABLED,
     INCIDENT_REPOSITORY_FILENAME,
     TOOL_CONTROL_REPOSITORY_FILENAME,
+    MAX_PROCESS_ISOLATED_JOB_MEMORY_BYTES,
+    PROCESS_FILE_TOOL_ISOLATION_ENABLED,
     PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED,
     PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED,
+    PROCESS_JOB_ACTIVE_PROCESS_LIMIT,
+    PROCESS_RESOURCE_LIMITS_ENABLED,
     TOOL_DRY_RUN_ENFORCEMENT_ENABLED,
     TOOL_HUMAN_APPROVAL_ENABLED,
     TOOL_SCOPE_ENFORCEMENT_ENABLED,
@@ -285,3 +289,11 @@ def test_process_isolated_tool_execution_defaults_disabled() -> None:
     """Milestone 13 process isolation must remain opt-in and dual-flagged."""
     assert PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED is False
     assert PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED is False
+
+
+def test_process_resource_governance_defaults_disabled() -> None:
+    """Milestone 14 resource limits and file-tool isolation must remain opt-in."""
+    assert PROCESS_RESOURCE_LIMITS_ENABLED is False
+    assert PROCESS_FILE_TOOL_ISOLATION_ENABLED is False
+    assert PROCESS_JOB_ACTIVE_PROCESS_LIMIT == 1
+    assert MAX_PROCESS_ISOLATED_JOB_MEMORY_BYTES == 256 * 1024 * 1024

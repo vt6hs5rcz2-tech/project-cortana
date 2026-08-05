@@ -17,6 +17,8 @@ Project Cortana is an early software milestone focused on:
 - Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 - Optional process-isolated execution for a tiny allowlisted defensive tool subset
+- Optional Windows Job Object resource governance for process-isolated tools
+- Windows safe file-opening foundation (not yet wired to file-tool eligibility)
 - Trusted defensive playbook orchestration over allowlisted Milestone 9 tools
 - Durable workflow-run and workflow-audit history with optional authorized incident linkage
 - Optional controlled security analyst assistance over sanitized single-incident packets
@@ -281,8 +283,65 @@ Architecture notes:
 - Every `Popen` call passes an explicit environment allowlist (no full parent env inheritance; no API keys or repository paths).
 - On timeout, the first state observed by the parent wins. Late results after termination are never accepted.
 - Cancellation is narrow: pre-launch cancelled request status, plus KeyboardInterrupt termination of an active child. No mid-flight cancellation service or worker pool.
-- Memory limiting is not implemented. Windows job-object support is deferred. Process termination limits runtime but does not guarantee a hard memory ceiling.
 - Antivirus/EDR may delay or block child Python processes. Startup timing is calibrated for Windows process creation. A child could become orphaned if the parent process itself crashes. Process isolation improves terminability; it is not a sandbox against malicious trusted tool code.
+
+### Process resource governance and safe file-opening (Milestone 14)
+
+Milestone 14 adds optional Windows Job Object governance on top of Milestone 13 process isolation, plus a Windows-native safe file-opening foundation that is **not** wired into tool eligibility.
+
+Flags (both default disabled):
+
+- `PROCESS_RESOURCE_LIMITS_ENABLED` — Job Object governance for process-isolated tools only
+- `PROCESS_FILE_TOOL_ISOLATION_ENABLED` — readiness/foundation gate only; does **not** make any file tool process-isolation eligible
+
+When resource limits are disabled, Milestone 13 isolation behavior is unchanged. When enabled on Windows with `pywin32`, each isolated execution:
+
+1. launches the child with `subprocess.Popen`
+2. creates/configures one Job Object and assigns the child
+3. verifies limits with `QueryInformationJobObject`
+4. only then sends the JSON request through `communicate()`
+
+Job Object settings:
+
+- `ActiveProcessLimit = 1`
+- `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`
+- Job memory limit: `MAX_PROCESS_ISOLATED_JOB_MEMORY_BYTES` = 256 MiB (chosen to cover Python 3.13 startup, `system-summary`, `simulated-log-check`, and typical Windows/AV overhead while remaining a meaningful containment bound)
+- one Job Object per child execution; no process pool; no reusable Job Object
+- CPU-rate and handle-count limits are deferred
+
+Termination:
+
+- Prefer `TerminateJobObject` for entire-tree termination when a Job Object is active
+- Fall back to direct child kill only if Job Object setup/assignment failed or the Job Object is unavailable
+- Windows termination is hard; graceful shutdown is not claimed
+- Parent crash closes the Job Object; with kill-on-job-close, members are terminated where the OS guarantee applies
+
+Outcomes:
+
+- `resource_limit_exceeded` is a distinct parent-decided outcome and is not classified as `failed`, `timed_out_terminated`, or `cancelled`
+- The child cannot claim `resource_limit_exceeded`
+
+Conditional dependency:
+
+- `pywin32` is required only on Windows (`requirements.txt` platform marker)
+- It is imported only when resource limits or safe-open Windows APIs are actually used
+- Non-Windows, or Windows without `pywin32`, fails safely when limits are enabled; there is no silent unlimited fallback
+
+Safe file-opening foundation (`src/tool_process_safe_open.py`):
+
+- Uses Windows reparse-aware open (`CreateFile` with `FILE_FLAG_OPEN_REPARSE_POINT`)
+- Rejects device paths, UNC, reserved device names (every path segment, including trailing spaces/dots and extensions), ADS, symlinks/junctions/reparse points, and non-regular files
+- Captures and verifies Windows file identity (volume serial + file indexes), not path strings alone
+- When an authorized root is supplied, containment is checked before open on the caller path and again after open using a path independently derived from the handle via `GetFinalPathNameByHandle`
+- Plain `open()` / `os.open()` are not the secure boundary
+- File tools (`file-sha256`, `compare-sha256`, `text-search`, etc.) remain `process_isolation=prohibited`
+- Future eligibility requires a separate reviewed code change
+
+Limitations:
+
+- Job Objects improve containment but are not a complete sandbox
+- The 256 MiB memory limit is not complete memory safety and does not prevent all resource exhaustion
+- EDR/antivirus may interfere with child processes or Job Object behavior
 
 Example (safe placeholders):
 

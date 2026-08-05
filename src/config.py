@@ -106,8 +106,14 @@ TOOL_AI_CONTEXT_INJECTION_ENABLED = False
 # Both default False. Termination cannot independently enable process execution.
 PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED = False
 PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED = False
-# Memory limiting (Windows job objects / POSIX rlimits) is not implemented.
 # Process isolation improves terminability for a tiny trusted subset only.
+
+# Process resource governance and safe file-opening foundation (Milestone 14)
+# Resource limits apply only to process-isolated tools when explicitly enabled.
+# File-tool isolation flag does not change registry eligibility in this milestone.
+PROCESS_RESOURCE_LIMITS_ENABLED = False
+PROCESS_FILE_TOOL_ISOLATION_ENABLED = False
+# CPU-rate and handle-count Job Object limits are deferred.
 
 TOOL_CONTROL_REPOSITORY_SCHEMA_VERSION = 1
 TOOL_CONTROL_REPOSITORY_FILENAME = "tool_control.json"
@@ -143,6 +149,15 @@ MAX_PROCESS_PARAMETER_NAME_CHARS = 64
 MAX_PROCESS_PARAMETER_STRING_CHARS = 2_000
 MAX_PROCESS_PARAMETER_NESTING_DEPTH = 2
 PROCESS_IPC_SCHEMA_VERSION = 1
+
+# Milestone 14 Job Object bounds (Windows-only when resource limits are enabled).
+# 256 MiB covers Python 3.13 startup, system-summary, simulated-log-check, and
+# typical Windows/AV overhead while still providing meaningful containment.
+# This is not a complete memory sandbox.
+MAX_PROCESS_ISOLATED_JOB_MEMORY_BYTES = 256 * 1024 * 1024
+PROCESS_JOB_ACTIVE_PROCESS_LIMIT = 1
+MIN_PROCESS_ISOLATED_JOB_MEMORY_BYTES = 64 * 1024 * 1024
+MAX_PROCESS_ISOLATED_JOB_MEMORY_BYTES_CAP = 1024 * 1024 * 1024
 
 # Defensive workflow orchestration (Milestone 10)
 DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED = True

@@ -286,6 +286,7 @@ class JsonToolControlRepository:
                 "failed",
                 "timed_out_terminated",
                 "termination_unconfirmed",
+                "resource_limit_exceeded",
             }:
                 action = "execution-failed"
             elif validated.outcome == "denied":

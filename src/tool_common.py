@@ -83,6 +83,7 @@ ToolExecutionOutcome = Literal[
     "cancelled",
     "timed_out_terminated",
     "termination_unconfirmed",
+    "resource_limit_exceeded",
 ]
 ToolProcessIsolation = Literal[
     "prohibited",
@@ -108,6 +109,14 @@ ToolAuditAction = Literal[
     "process_cancellation_terminated",
     "process_termination_unconfirmed",
     "process_result_rejected",
+    "process_job_object_created",
+    "process_job_object_configured",
+    "process_job_object_assigned",
+    "process_job_object_setup_failed",
+    "process_resource_limit_exceeded",
+    "process_tree_termination_requested",
+    "process_tree_terminated",
+    "process_tree_termination_unconfirmed",
 ]
 
 TOOL_CATEGORIES: frozenset[str] = frozenset(
@@ -169,6 +178,7 @@ TOOL_EXECUTION_OUTCOMES: frozenset[str] = frozenset(
         "cancelled",
         "timed_out_terminated",
         "termination_unconfirmed",
+        "resource_limit_exceeded",
     }
 )
 TOOL_PROCESS_ISOLATION_VALUES: frozenset[str] = frozenset(
@@ -194,6 +204,14 @@ TOOL_AUDIT_ACTIONS: frozenset[str] = frozenset(
         "process_cancellation_terminated",
         "process_termination_unconfirmed",
         "process_result_rejected",
+        "process_job_object_created",
+        "process_job_object_configured",
+        "process_job_object_assigned",
+        "process_job_object_setup_failed",
+        "process_resource_limit_exceeded",
+        "process_tree_termination_requested",
+        "process_tree_terminated",
+        "process_tree_termination_unconfirmed",
     }
 )
 

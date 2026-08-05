@@ -19,6 +19,8 @@ from src.config import (
     MAX_PROCESS_DIAGNOSTIC_STDOUT_BYTES,
     PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED,
     PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED,
+    PROCESS_JOB_ACTIVE_PROCESS_LIMIT,
+    PROCESS_RESOURCE_LIMITS_ENABLED,
     PROCESS_TERMINATION_CONFIRMATION_TIMEOUT_SECONDS,
     get_default_tool_process_scratch_dir_path,
 )
@@ -38,12 +40,21 @@ from src.tool_process_envelope import (
     decode_process_response,
     encode_process_request,
 )
+from src.tool_process_job import (
+    ProcessJobController,
+    ProcessJobSession,
+    ToolProcessJobError,
+    ToolProcessJobUnavailableError,
+    create_default_job_controller,
+    default_job_memory_limit_bytes,
+)
 from src.tool_request import ToolExecutionRequest
 from src.tool_result import ToolExecutionResult, create_tool_execution_result
 
 logger = logging.getLogger("ProjectCortana")
 
 AuditAppender = Callable[[ToolAuditEntry], object]
+JobControllerFactory = Callable[[], ProcessJobController]
 
 
 class SupportsAppendAudit(Protocol):
@@ -65,9 +76,9 @@ class _DiagnosticCapture:
 
 @dataclass
 class _TerminationDecision:
-    """First-observed parent state for timeout/cancellation races."""
+    """First-observed parent state for timeout/cancellation/resource races."""
 
-    kind: str  # "completed" | "timeout" | "cancelled"
+    kind: str
     termination_confirmed: bool | None = None
     exit_code: int | None = None
     response: ProcessExecutionResponse | None = None
@@ -85,11 +96,15 @@ class ToolProcessAdapter:
         python_executable_path: str | None = None,
         audit_appender: AuditAppender | None = None,
         popen_factory: Callable[..., Any] | None = None,
+        job_controller_factory: JobControllerFactory | None = None,
     ) -> None:
         self._scratch_dir = scratch_dir
         self._python = python_executable_path or python_executable()
         self._audit_appender = audit_appender
         self._popen_factory = popen_factory or subprocess.Popen
+        self._job_controller_factory = (
+            job_controller_factory or create_default_job_controller
+        )
 
     def execute(
         self,
@@ -131,6 +146,41 @@ class ToolProcessAdapter:
                 incident_id=request.incident_id,
             )
 
+        resource_limits_enabled = bool(PROCESS_RESOURCE_LIMITS_ENABLED)
+        job_controller: ProcessJobController | None = None
+        memory_limit = default_job_memory_limit_bytes()
+        if resource_limits_enabled:
+            job_controller = self._job_controller_factory()
+            if not job_controller.available:
+                self._audit(
+                    action="process_job_object_setup_failed",
+                    request=request,
+                    definition=definition,
+                    safe_details={
+                        "error_class": "ToolProcessJobUnavailableError",
+                        "status": job_controller.unavailable_reason
+                        or "unavailable",
+                    },
+                )
+                return create_tool_execution_result(
+                    request_id=request.request_id,
+                    tool_id=request.tool_id,
+                    started_timestamp=started,
+                    outcome="failed",
+                    safe_summary=(
+                        "Process resource governance is unavailable. "
+                        "The tool request was not sent."
+                    ),
+                    structured_data={
+                        "failed": True,
+                        "process_isolated": True,
+                        "resource_governance_unavailable": True,
+                    },
+                    error_class="ToolProcessJobUnavailableError",
+                    dry_run=False,
+                    incident_id=request.incident_id,
+                )
+
         correlation_id = str(uuid4())
         envelope = create_process_execution_request(
             correlation_id=correlation_id,
@@ -145,7 +195,6 @@ class ToolProcessAdapter:
             self._scratch_dir or get_default_tool_process_scratch_dir_path()
         )
         result_path = scratch / f"result-{correlation_id}.json"
-        # Ensure the result channel starts empty and parent-owned.
         result_path.write_bytes(b"")
 
         env = build_child_environment()
@@ -156,10 +205,12 @@ class ToolProcessAdapter:
             str(result_path),
         ]
         process: Any | None = None
+        job_session: ProcessJobSession | None = None
         decision: _TerminationDecision | None = None
         diagnostics = _DiagnosticCapture(False, False, False, False, 0, 0)
         pid: int | None = None
         began = time.monotonic()
+        request_sent = False
 
         self._audit(
             action="process_execution_started",
@@ -168,112 +219,247 @@ class ToolProcessAdapter:
             safe_details={
                 "correlation_id": correlation_id,
                 "implementation_identifier": definition.implementation_identifier,
+                "limits_requested": resource_limits_enabled,
             },
         )
 
         try:
-            process = self._popen_factory(
-                command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=env,
-                cwd=str(scratch),
-                close_fds=True,
-                shell=False,
-            )
-            pid = int(getattr(process, "pid", 0) or 0) or None
-        except Exception as error:  # noqa: BLE001 - launch failures stay contained
-            self._audit(
-                action="process_launch_failed",
-                request=request,
-                definition=definition,
-                safe_details={
-                    "correlation_id": correlation_id,
-                    "error_class": type(error).__name__,
-                },
-            )
-            return create_tool_execution_result(
-                request_id=request.request_id,
-                tool_id=request.tool_id,
-                started_timestamp=started,
-                outcome="failed",
-                safe_summary="Process-isolated tool launch failed.",
-                structured_data={
-                    "failed": True,
-                    "process_isolated": True,
-                    "launch_failed": True,
-                },
-                error_class=type(error).__name__,
-                dry_run=False,
-                incident_id=request.incident_id,
-            )
-
-        try:
             try:
-                stdout_raw, stderr_raw = process.communicate(
-                    input=request_bytes,
-                    timeout=definition.timeout_seconds,
+                process = self._popen_factory(
+                    command,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=env,
+                    cwd=str(scratch),
+                    close_fds=True,
+                    shell=False,
                 )
-                diagnostics = _capture_diagnostics(stdout_raw, stderr_raw)
-                exit_code = (
-                    int(process.returncode) if process.returncode is not None else -1
+                pid = int(getattr(process, "pid", 0) or 0) or None
+            except Exception as error:  # noqa: BLE001 - launch failures stay contained
+                self._audit(
+                    action="process_launch_failed",
+                    request=request,
+                    definition=definition,
+                    safe_details={
+                        "correlation_id": correlation_id,
+                        "error_class": type(error).__name__,
+                    },
                 )
+                return create_tool_execution_result(
+                    request_id=request.request_id,
+                    tool_id=request.tool_id,
+                    started_timestamp=started,
+                    outcome="failed",
+                    safe_summary="Process-isolated tool launch failed.",
+                    structured_data={
+                        "failed": True,
+                        "process_isolated": True,
+                        "launch_failed": True,
+                    },
+                    error_class=type(error).__name__,
+                    dry_run=False,
+                    incident_id=request.incident_id,
+                )
+
+            if resource_limits_enabled:
+                assert job_controller is not None
                 try:
-                    response = self._read_result_channel(
-                        result_path,
-                        expected_correlation_id=correlation_id,
+                    job_session = job_controller.create_session(
+                        memory_limit_bytes=memory_limit,
+                        active_process_limit=PROCESS_JOB_ACTIVE_PROCESS_LIMIT,
                     )
-                    decision = _TerminationDecision(
-                        kind="completed",
-                        termination_confirmed=True,
-                        exit_code=exit_code,
-                        response=response,
-                    )
-                except (ToolProcessError, ToolProcessResultRejectedError) as error:
                     self._audit(
-                        action="process_result_rejected",
+                        action="process_job_object_created",
                         request=request,
                         definition=definition,
                         safe_details={
                             "correlation_id": correlation_id,
                             "pid": pid,
-                            "exit_code": exit_code,
+                            "process_limit": PROCESS_JOB_ACTIVE_PROCESS_LIMIT,
+                            "configured_memory_limit_bytes": memory_limit,
+                            "limits_requested": True,
+                        },
+                    )
+                    snapshot = job_session.verified_limits()
+                    self._audit(
+                        action="process_job_object_configured",
+                        request=request,
+                        definition=definition,
+                        safe_details={
+                            "correlation_id": correlation_id,
+                            "pid": pid,
+                            "process_limit": snapshot.active_process_limit,
+                            "configured_memory_limit_bytes": (
+                                snapshot.memory_limit_bytes
+                            ),
+                            "limits_verified": snapshot.limits_verified,
+                        },
+                    )
+                    if pid is None:
+                        raise ToolProcessJobError("Child PID is unavailable.")
+                    job_session.assign(pid)
+                    snapshot = job_session.verified_limits()
+                    if not snapshot.assignment_confirmed:
+                        raise ToolProcessJobError("Job Object assignment unconfirmed.")
+                    self._audit(
+                        action="process_job_object_assigned",
+                        request=request,
+                        definition=definition,
+                        safe_details={
+                            "correlation_id": correlation_id,
+                            "pid": pid,
+                            "assignment_confirmed": True,
+                            "job_active_process_count": snapshot.active_process_count,
+                            "limits_verified": True,
+                        },
+                    )
+                except (ToolProcessJobError, ToolProcessJobUnavailableError) as error:
+                    self._audit(
+                        action="process_job_object_setup_failed",
+                        request=request,
+                        definition=definition,
+                        safe_details={
+                            "correlation_id": correlation_id,
+                            "pid": pid,
                             "error_class": type(error).__name__,
                         },
                     )
-                    decision = _TerminationDecision(
-                        kind="rejected",
-                        termination_confirmed=True,
-                        exit_code=exit_code,
-                        error_class=type(error).__name__,
-                        safe_summary="Process-isolated tool result was rejected.",
+                    confirmed = self._terminate_child(
+                        process,
+                        job_session=job_session,
+                        request=request,
+                        definition=definition,
+                        correlation_id=correlation_id,
+                        pid=pid,
+                        reason="setup_failed",
                     )
-            except subprocess.TimeoutExpired:
-                decision = self._handle_timeout(
-                    process=process,
-                    request=request,
-                    definition=definition,
-                    correlation_id=correlation_id,
-                    pid=pid,
-                )
-                stdout_raw, stderr_raw = self._collect_after_terminate(process)
-                diagnostics = _capture_diagnostics(stdout_raw, stderr_raw)
-            except KeyboardInterrupt:
-                decision = self._handle_cancellation(
-                    process=process,
-                    request=request,
-                    definition=definition,
-                    correlation_id=correlation_id,
-                    pid=pid,
-                )
-                stdout_raw, stderr_raw = self._collect_after_terminate(process)
-                diagnostics = _capture_diagnostics(stdout_raw, stderr_raw)
+                    decision = _TerminationDecision(
+                        kind="setup_failed",
+                        termination_confirmed=confirmed,
+                        exit_code=getattr(process, "returncode", None),
+                        error_class=type(error).__name__,
+                        safe_summary=(
+                            "Process resource governance setup failed. "
+                            "The tool request was not sent."
+                        ),
+                    )
+                    stdout_raw, stderr_raw = self._collect_after_terminate(process)
+                    diagnostics = _capture_diagnostics(stdout_raw, stderr_raw)
+
+            if decision is None:
+                try:
+                    request_sent = True
+                    stdout_raw, stderr_raw = process.communicate(
+                        input=request_bytes,
+                        timeout=definition.timeout_seconds,
+                    )
+                    diagnostics = _capture_diagnostics(stdout_raw, stderr_raw)
+                    exit_code = (
+                        int(process.returncode)
+                        if process.returncode is not None
+                        else -1
+                    )
+                    try:
+                        response = self._read_result_channel(
+                            result_path,
+                            expected_correlation_id=correlation_id,
+                        )
+                        if (
+                            response.outcome != "succeeded"
+                            and job_session is not None
+                            and job_session.likely_resource_limit_exceeded(
+                                configured_memory_bytes=memory_limit
+                            )
+                        ):
+                            decision = _TerminationDecision(
+                                kind="resource_limit",
+                                termination_confirmed=True,
+                                exit_code=exit_code,
+                                error_class="ResourceLimitExceeded",
+                                safe_summary=(
+                                    "Process-isolated tool exceeded configured "
+                                    "resource limits."
+                                ),
+                            )
+                        else:
+                            decision = _TerminationDecision(
+                                kind="completed",
+                                termination_confirmed=True,
+                                exit_code=exit_code,
+                                response=response,
+                            )
+                    except (ToolProcessError, ToolProcessResultRejectedError) as error:
+                        if (
+                            job_session is not None
+                            and job_session.likely_resource_limit_exceeded(
+                                configured_memory_bytes=memory_limit
+                            )
+                        ):
+                            decision = _TerminationDecision(
+                                kind="resource_limit",
+                                termination_confirmed=True,
+                                exit_code=exit_code,
+                                error_class="ResourceLimitExceeded",
+                                safe_summary=(
+                                    "Process-isolated tool exceeded configured "
+                                    "resource limits."
+                                ),
+                            )
+                        else:
+                            self._audit(
+                                action="process_result_rejected",
+                                request=request,
+                                definition=definition,
+                                safe_details={
+                                    "correlation_id": correlation_id,
+                                    "pid": pid,
+                                    "exit_code": exit_code,
+                                    "error_class": type(error).__name__,
+                                },
+                            )
+                            decision = _TerminationDecision(
+                                kind="rejected",
+                                termination_confirmed=True,
+                                exit_code=exit_code,
+                                error_class=type(error).__name__,
+                                safe_summary=(
+                                    "Process-isolated tool result was rejected."
+                                ),
+                            )
+                except subprocess.TimeoutExpired:
+                    decision = self._handle_timeout(
+                        process=process,
+                        request=request,
+                        definition=definition,
+                        correlation_id=correlation_id,
+                        pid=pid,
+                        job_session=job_session,
+                    )
+                    stdout_raw, stderr_raw = self._collect_after_terminate(process)
+                    diagnostics = _capture_diagnostics(stdout_raw, stderr_raw)
+                except KeyboardInterrupt:
+                    decision = self._handle_cancellation(
+                        process=process,
+                        request=request,
+                        definition=definition,
+                        correlation_id=correlation_id,
+                        pid=pid,
+                        job_session=job_session,
+                    )
+                    stdout_raw, stderr_raw = self._collect_after_terminate(process)
+                    diagnostics = _capture_diagnostics(stdout_raw, stderr_raw)
         finally:
             self._close_process_streams(process)
             self._unlink_quietly(result_path)
+            if job_session is not None:
+                try:
+                    job_session.close()
+                except Exception:
+                    pass
 
         assert decision is not None
+        del request_sent  # tracked for clarity; decision paths encode state
         elapsed = max(0.0, time.monotonic() - began)
         return self._result_from_decision(
             decision=decision,
@@ -284,6 +470,7 @@ class ToolProcessAdapter:
             pid=pid,
             elapsed_seconds=elapsed,
             diagnostics=diagnostics,
+            memory_limit_bytes=memory_limit if resource_limits_enabled else None,
         )
 
     def _handle_timeout(
@@ -294,6 +481,7 @@ class ToolProcessAdapter:
         definition: DefensiveToolDefinition,
         correlation_id: str,
         pid: int | None,
+        job_session: ProcessJobSession | None,
     ) -> _TerminationDecision:
         """Timeout observed first: terminate and never accept a late result."""
         self._audit(
@@ -305,7 +493,15 @@ class ToolProcessAdapter:
                 "pid": pid,
             },
         )
-        confirmed = self._terminate_child(process)
+        confirmed = self._terminate_child(
+            process,
+            job_session=job_session,
+            request=request,
+            definition=definition,
+            correlation_id=correlation_id,
+            pid=pid,
+            reason="timeout",
+        )
         if confirmed:
             self._audit(
                 action="process_timeout_terminated",
@@ -328,18 +524,6 @@ class ToolProcessAdapter:
                     "process was terminated."
                 ),
             )
-
-        self._audit(
-            action="process_termination_unconfirmed",
-            request=request,
-            definition=definition,
-            safe_details={
-                "correlation_id": correlation_id,
-                "pid": pid,
-                "termination_confirmed": False,
-                "reason": "timeout",
-            },
-        )
         return _TerminationDecision(
             kind="timeout",
             termination_confirmed=False,
@@ -359,6 +543,7 @@ class ToolProcessAdapter:
         definition: DefensiveToolDefinition,
         correlation_id: str,
         pid: int | None,
+        job_session: ProcessJobSession | None,
     ) -> _TerminationDecision:
         """KeyboardInterrupt while a child is active."""
         self._audit(
@@ -371,7 +556,15 @@ class ToolProcessAdapter:
                 "status": "keyboard_interrupt",
             },
         )
-        confirmed = self._terminate_child(process)
+        confirmed = self._terminate_child(
+            process,
+            job_session=job_session,
+            request=request,
+            definition=definition,
+            correlation_id=correlation_id,
+            pid=pid,
+            reason="cancellation",
+        )
         if confirmed:
             self._audit(
                 action="process_cancellation_terminated",
@@ -394,17 +587,6 @@ class ToolProcessAdapter:
                     "process was terminated."
                 ),
             )
-        self._audit(
-            action="process_termination_unconfirmed",
-            request=request,
-            definition=definition,
-            safe_details={
-                "correlation_id": correlation_id,
-                "pid": pid,
-                "termination_confirmed": False,
-                "reason": "cancellation",
-            },
-        )
         return _TerminationDecision(
             kind="cancelled",
             termination_confirmed=False,
@@ -416,31 +598,94 @@ class ToolProcessAdapter:
             ),
         )
 
-    def _terminate_child(self, process: Any) -> bool:
-        """Hard-terminate the child and wait for confirmation.
-
-        On Windows, ``kill()`` uses TerminateProcess. On POSIX, ``kill()`` sends
-        SIGKILL. There is no graceful shutdown protocol for v1 tools.
-        Termination is only attempted when the termination feature flag is enabled
-        or when execution isolation is enabled (execution implies termination for
-        timeout correctness). The termination flag cannot independently enable
-        process execution.
-        """
+    def _terminate_child(
+        self,
+        process: Any,
+        *,
+        job_session: ProcessJobSession | None,
+        request: ToolExecutionRequest,
+        definition: DefensiveToolDefinition,
+        correlation_id: str,
+        pid: int | None,
+        reason: str,
+    ) -> bool:
+        """Terminate via Job Object tree kill when available; else direct child kill."""
         if (
             not PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED
             and not PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED
         ):
             return False
+
+        confirmed = False
+        if job_session is not None:
+            self._audit(
+                action="process_tree_termination_requested",
+                request=request,
+                definition=definition,
+                safe_details={
+                    "correlation_id": correlation_id,
+                    "pid": pid,
+                    "status": reason,
+                },
+            )
+            try:
+                job_session.terminate_tree(exit_code=1)
+            except ToolProcessJobError:
+                pass
+            try:
+                process.wait(timeout=PROCESS_TERMINATION_CONFIRMATION_TIMEOUT_SECONDS)
+            except Exception:
+                pass
+            child_exited = process.poll() is not None
+            active = -1
+            try:
+                active = job_session.active_process_count()
+            except Exception:
+                active = -1
+            confirmed = child_exited and active == 0
+            self._audit(
+                action=(
+                    "process_tree_terminated"
+                    if confirmed
+                    else "process_tree_termination_unconfirmed"
+                ),
+                request=request,
+                definition=definition,
+                safe_details={
+                    "correlation_id": correlation_id,
+                    "pid": pid,
+                    "exit_code": process.returncode,
+                    "termination_confirmed": confirmed,
+                    "job_active_process_count": active if active >= 0 else None,
+                },
+            )
+            if confirmed:
+                return True
+
+        # Fallback: direct child kill when Job Object path is unavailable/incomplete.
         try:
             if process.poll() is None:
                 process.kill()
             process.wait(timeout=PROCESS_TERMINATION_CONFIRMATION_TIMEOUT_SECONDS)
-            return process.poll() is not None
+            confirmed = process.poll() is not None
         except Exception:
             try:
-                return process.poll() is not None
+                confirmed = process.poll() is not None
             except Exception:
-                return False
+                confirmed = False
+        if not confirmed:
+            self._audit(
+                action="process_termination_unconfirmed",
+                request=request,
+                definition=definition,
+                safe_details={
+                    "correlation_id": correlation_id,
+                    "pid": pid,
+                    "termination_confirmed": False,
+                    "reason": reason,
+                },
+            )
+        return confirmed
 
     def _collect_after_terminate(self, process: Any) -> tuple[bytes, bytes]:
         try:
@@ -477,6 +722,7 @@ class ToolProcessAdapter:
         pid: int | None,
         elapsed_seconds: float,
         diagnostics: _DiagnosticCapture,
+        memory_limit_bytes: int | None,
     ) -> ToolExecutionResult:
         diagnostic_details = {
             "diagnostic_stdout_present": diagnostics.stdout_present,
@@ -491,14 +737,12 @@ class ToolProcessAdapter:
             "elapsed_seconds": round(elapsed_seconds, 3),
             "exit_code": decision.exit_code,
             "termination_confirmed": decision.termination_confirmed,
+            "configured_memory_limit_bytes": memory_limit_bytes,
         }
 
         if decision.kind == "completed":
             assert decision.response is not None
-            try:
-                response = decision.response
-            except ToolProcessResultRejectedError:
-                raise
+            response = decision.response
             self._audit(
                 action="process_execution_completed",
                 request=request,
@@ -520,6 +764,7 @@ class ToolProcessAdapter:
                     structured_data={
                         **response.structured_data,
                         "process_isolated": True,
+                        "resource_limits_enabled": memory_limit_bytes is not None,
                     },
                     output_truncated=response.output_truncated,
                     dry_run=False,
@@ -540,6 +785,25 @@ class ToolProcessAdapter:
                 incident_id=request.incident_id,
             )
 
+        if decision.kind == "setup_failed":
+            return create_tool_execution_result(
+                request_id=request.request_id,
+                tool_id=request.tool_id,
+                started_timestamp=started,
+                outcome="failed",
+                safe_summary=decision.safe_summary
+                or "Process resource governance setup failed.",
+                structured_data={
+                    "failed": True,
+                    "process_isolated": True,
+                    "resource_governance_setup_failed": True,
+                    "request_sent": False,
+                },
+                error_class=decision.error_class or "ToolProcessJobError",
+                dry_run=False,
+                incident_id=request.incident_id,
+            )
+
         if decision.kind == "rejected":
             return create_tool_execution_result(
                 request_id=request.request_id,
@@ -554,6 +818,35 @@ class ToolProcessAdapter:
                     "result_rejected": True,
                 },
                 error_class=decision.error_class or "ToolProcessResultRejectedError",
+                dry_run=False,
+                incident_id=request.incident_id,
+            )
+
+        if decision.kind == "resource_limit":
+            self._audit(
+                action="process_resource_limit_exceeded",
+                request=request,
+                definition=definition,
+                safe_details={
+                    **diagnostic_details,
+                    "status": "resource_limit_exceeded",
+                },
+            )
+            return create_tool_execution_result(
+                request_id=request.request_id,
+                tool_id=request.tool_id,
+                started_timestamp=started,
+                outcome="resource_limit_exceeded",
+                safe_summary=decision.safe_summary
+                or "Process-isolated tool exceeded configured resource limits.",
+                structured_data={
+                    "resource_limit_exceeded": True,
+                    "process_isolated": True,
+                    "timeout": False,
+                    "configured_memory_limit_bytes": memory_limit_bytes,
+                    "termination_confirmed": bool(decision.termination_confirmed),
+                },
+                error_class=decision.error_class or "ResourceLimitExceeded",
                 dry_run=False,
                 incident_id=request.incident_id,
             )
@@ -581,7 +874,6 @@ class ToolProcessAdapter:
                 incident_id=request.incident_id,
             )
 
-        # cancelled
         confirmed = bool(decision.termination_confirmed)
         return create_tool_execution_result(
             request_id=request.request_id,
@@ -610,7 +902,6 @@ class ToolProcessAdapter:
     ) -> None:
         if self._audit_appender is None:
             return
-        # Never include parameter values, env, stdout/stderr content, or JSON bodies.
         cleaned = {
             key: value
             for key, value in safe_details.items()
@@ -660,7 +951,6 @@ def _capture_diagnostics(stdout_raw: bytes | None, stderr_raw: bytes | None) -> 
     stderr_truncated = len(stderr) > MAX_PROCESS_DIAGNOSTIC_STDERR_BYTES
     stdout = stdout[:MAX_PROCESS_DIAGNOSTIC_STDOUT_BYTES]
     stderr = stderr[:MAX_PROCESS_DIAGNOSTIC_STDERR_BYTES]
-    # Content is intentionally discarded after measuring presence/size.
     return _DiagnosticCapture(
         stdout_present=bool(stdout),
         stderr_present=bool(stderr),

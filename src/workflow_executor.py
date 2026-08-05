@@ -515,12 +515,30 @@ class WorkflowExecutor:
                 completed_timestamp=self._clock.utc_now_iso(),
                 error_code=(
                     tool_result.error_class
-                    if tool_result.outcome in {"failed", "denied", "expired", "cancelled"}
+                    if tool_result.outcome
+                    in {
+                        "failed",
+                        "denied",
+                        "expired",
+                        "cancelled",
+                        "timed_out_terminated",
+                        "termination_unconfirmed",
+                        "resource_limit_exceeded",
+                    }
                     else None
                 ),
                 error_message=(
                     tool_result.safe_summary
-                    if tool_result.outcome in {"failed", "denied", "expired", "cancelled"}
+                    if tool_result.outcome
+                    in {
+                        "failed",
+                        "denied",
+                        "expired",
+                        "cancelled",
+                        "timed_out_terminated",
+                        "termination_unconfirmed",
+                        "resource_limit_exceeded",
+                    }
                     else None
                 ),
                 dry_run=request.dry_run,
@@ -912,6 +930,10 @@ def _map_execute_step_status(result: ToolExecutionResult) -> str:
         return "cancelled"
     if result.outcome == "expired":
         return "denied"
+    if result.outcome in {"timed_out_terminated", "termination_unconfirmed"}:
+        return "timed_out"
+    if result.outcome == "resource_limit_exceeded":
+        return "failed"
     if result.outcome == "failed":
         if result.error_class == "TimeoutError":
             return "timed_out"

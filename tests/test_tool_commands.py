@@ -253,6 +253,8 @@ def test_status_flags_and_privacy(tmp_path: Path) -> None:
     assert "Autonomous remediation: disabled" in status
     assert "Process-isolated tool execution: disabled" in status
     assert "Process-isolated tool termination: disabled" in status
+    assert "Process resource limits: disabled" in status
+    assert "Process file-tool isolation: disabled" in status
     assert "Scope enforcement: enabled" in status
     assert "Human approval: enabled" in status
     assert "Dry-run enforcement: enabled" in status

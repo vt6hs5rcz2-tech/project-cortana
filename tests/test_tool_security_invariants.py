@@ -23,6 +23,8 @@ TOOL_EXECUTION_MODULES = [
     Path("src/tool_process_envelope.py"),
     Path("src/tool_process_callables.py"),
     Path("src/tool_process_runner.py"),
+    Path("src/tool_process_job.py"),
+    Path("src/tool_process_safe_open.py"),
 ]
 
 # Milestone 13: only the process adapter may import/use subprocess for tools.

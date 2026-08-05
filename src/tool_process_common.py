@@ -36,6 +36,7 @@ PARENT_ONLY_OUTCOMES: frozenset[str] = frozenset(
         "denied",
         "timed_out_terminated",
         "termination_unconfirmed",
+        "resource_limit_exceeded",
         "cancelled",
         "planned",
         "expired",
