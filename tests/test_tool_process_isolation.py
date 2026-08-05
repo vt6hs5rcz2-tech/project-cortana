@@ -160,7 +160,9 @@ def test_registry_and_child_dispatch_match_both_directions() -> None:
         child_dispatch_ids=CHILD_DISPATCH_IMPLEMENTATION_IDS,
     )
     for definition in registry.list_all():
-        if definition.tool_id in {"file-sha256", "compare-sha256", "text-search"}:
+        if definition.tool_id in {"file-sha256", "compare-sha256"}:
+            assert definition.process_isolation == "eligible"
+        if definition.tool_id == "text-search":
             assert definition.process_isolation == "prohibited"
 
 
@@ -197,6 +199,15 @@ def test_envelope_exact_keys_and_bounds() -> None:
         create_process_execution_request(
             correlation_id=correlation,
             implementation_identifier="impl_file_sha256",
+            normalized_parameters={},
+            execution_timeout_seconds=5,
+            max_output_characters=1000,
+        )
+
+    with pytest.raises(ToolProcessError):
+        create_process_execution_request(
+            correlation_id=correlation,
+            implementation_identifier="impl_text_search",
             normalized_parameters={},
             execution_timeout_seconds=5,
             max_output_characters=1000,

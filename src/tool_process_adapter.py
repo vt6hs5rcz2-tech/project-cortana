@@ -17,6 +17,7 @@ from uuid import uuid4
 from src.config import (
     MAX_PROCESS_DIAGNOSTIC_STDERR_BYTES,
     MAX_PROCESS_DIAGNOSTIC_STDOUT_BYTES,
+    PROCESS_FILE_TOOL_ISOLATION_ENABLED,
     PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED,
     PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED,
     PROCESS_JOB_ACTIVE_PROCESS_LIMIT,
@@ -25,15 +26,19 @@ from src.config import (
     get_default_tool_process_scratch_dir_path,
 )
 from src.tool_audit import ToolAuditEntry, create_tool_audit_entry
-from src.tool_common import ToolPolicyError, utc_timestamp
+from src.tool_common import ToolPolicyError, ToolValidationError, utc_timestamp
 from src.tool_definition import DefensiveToolDefinition
 from src.tool_process_common import (
+    PROCESS_SAFE_FILE_IMPLEMENTATION_IDS,
     ToolProcessError,
     ToolProcessResultRejectedError,
     build_child_environment,
     ensure_tool_process_scratch_dir,
     python_executable,
 )
+from src.tool_process_file_auth import build_isolated_file_tool_parameters
+from src.tool_process_safe_open import SafeOpenError, SafeOpenUnavailableError
+from src.tool_scope import AuthorizedScope
 from src.tool_process_envelope import (
     ProcessExecutionResponse,
     create_process_execution_request,
@@ -112,6 +117,7 @@ class ToolProcessAdapter:
         definition: DefensiveToolDefinition,
         request: ToolExecutionRequest,
         started_timestamp: str | None = None,
+        scope: AuthorizedScope | None = None,
     ) -> ToolExecutionResult:
         """Execute one already-authorized tool in a child process."""
         started = started_timestamp or utc_timestamp()
@@ -144,6 +150,15 @@ class ToolProcessAdapter:
                 error_class="CancelledError",
                 dry_run=False,
                 incident_id=request.incident_id,
+            )
+
+        is_file_tool = (
+            definition.implementation_identifier
+            in PROCESS_SAFE_FILE_IMPLEMENTATION_IDS
+        )
+        if is_file_tool and not PROCESS_FILE_TOOL_ISOLATION_ENABLED:
+            raise ToolPolicyError(
+                "Process file-tool isolation is disabled."
             )
 
         resource_limits_enabled = bool(PROCESS_RESOURCE_LIMITS_ENABLED)
@@ -181,11 +196,27 @@ class ToolProcessAdapter:
                     incident_id=request.incident_id,
                 )
 
+        child_parameters = dict(request.normalized_parameters)
+        if is_file_tool:
+            if scope is None:
+                raise ToolPolicyError(
+                    "Authorized scope is required for process-isolated file tools."
+                )
+            prepared = self._prepare_file_tool_parameters(
+                definition=definition,
+                request=request,
+                scope=scope,
+                started=started,
+            )
+            if isinstance(prepared, ToolExecutionResult):
+                return prepared
+            child_parameters = prepared
+
         correlation_id = str(uuid4())
         envelope = create_process_execution_request(
             correlation_id=correlation_id,
             implementation_identifier=definition.implementation_identifier,
-            normalized_parameters=dict(request.normalized_parameters),
+            normalized_parameters=child_parameters,
             execution_timeout_seconds=definition.timeout_seconds,
             max_output_characters=definition.maximum_output_characters,
         )
@@ -891,6 +922,75 @@ class ToolProcessAdapter:
             dry_run=False,
             incident_id=request.incident_id,
         )
+
+    def _prepare_file_tool_parameters(
+        self,
+        *,
+        definition: DefensiveToolDefinition,
+        request: ToolExecutionRequest,
+        scope: AuthorizedScope,
+        started: str,
+    ) -> dict[str, Any] | ToolExecutionResult:
+        """Capture parent file authorization or fail closed before child launch."""
+        try:
+            return build_isolated_file_tool_parameters(
+                definition=definition,
+                request=request,
+                scope=scope,
+            )
+        except SafeOpenUnavailableError:
+            self._audit(
+                action="process_launch_failed",
+                request=request,
+                definition=definition,
+                safe_details={
+                    "error_class": "SafeOpenUnavailableError",
+                    "status": "file_safe_open_unavailable",
+                },
+            )
+            return create_tool_execution_result(
+                request_id=request.request_id,
+                tool_id=request.tool_id,
+                started_timestamp=started,
+                outcome="failed",
+                safe_summary=(
+                    "Windows safe file-opening is unavailable. "
+                    "The tool request was not sent."
+                ),
+                structured_data={
+                    "failed": True,
+                    "process_isolated": True,
+                    "file_safe_open_unavailable": True,
+                },
+                error_class="SafeOpenUnavailableError",
+                dry_run=False,
+                incident_id=request.incident_id,
+            )
+        except (SafeOpenError, ToolValidationError, ToolProcessError) as error:
+            self._audit(
+                action="process_launch_failed",
+                request=request,
+                definition=definition,
+                safe_details={
+                    "error_class": type(error).__name__,
+                    "status": "file_authorization_failed",
+                },
+            )
+            return create_tool_execution_result(
+                request_id=request.request_id,
+                tool_id=request.tool_id,
+                started_timestamp=started,
+                outcome="failed",
+                safe_summary="Secure file authorization failed before process launch.",
+                structured_data={
+                    "failed": True,
+                    "process_isolated": True,
+                    "file_authorization_failed": True,
+                },
+                error_class=type(error).__name__,
+                dry_run=False,
+                incident_id=request.incident_id,
+            )
 
     def _audit(
         self,

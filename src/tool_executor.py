@@ -10,6 +10,7 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from src.config import (
+    PROCESS_FILE_TOOL_ISOLATION_ENABLED,
     PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED,
 )
 from src.incident_repository import IncidentRepository
@@ -37,6 +38,7 @@ from src.tool_policy import (
     dry_run_required,
 )
 from src.tool_process_adapter import ToolProcessAdapter, bind_audit_appender
+from src.tool_process_common import PROCESS_SAFE_FILE_IMPLEMENTATION_IDS
 from src.tool_request import ToolExecutionRequest
 from src.tool_result import ToolExecutionResult, create_tool_execution_result
 from src.tool_scope import (
@@ -207,6 +209,7 @@ class DefensiveToolExecutor:
                     definition=definition,
                     request=request,
                     started_timestamp=started,
+                    scope=scope,
                 )
             if route == "unavailable":
                 raise ToolPolicyError(
@@ -345,16 +348,24 @@ class DefensiveToolExecutor:
 def _select_execution_route(definition: DefensiveToolDefinition) -> str:
     """Return ``in_process``, ``process``, or ``unavailable`` for one definition."""
     isolation = definition.process_isolation
+    is_file_tool = (
+        definition.implementation_identifier in PROCESS_SAFE_FILE_IMPLEMENTATION_IDS
+    )
     if isolation == "prohibited":
         return "in_process"
     if isolation == "eligible":
-        if PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED:
-            return "process"
-        return "in_process"
+        if not PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED:
+            return "in_process"
+        if is_file_tool and not PROCESS_FILE_TOOL_ISOLATION_ENABLED:
+            # Dual-gate: file tools stay in-process unless both flags are on.
+            return "in_process"
+        return "process"
     if isolation == "required":
-        if PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED:
-            return "process"
-        return "unavailable"
+        if not PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED:
+            return "unavailable"
+        if is_file_tool and not PROCESS_FILE_TOOL_ISOLATION_ENABLED:
+            return "unavailable"
+        return "process"
     return "in_process"
 
 

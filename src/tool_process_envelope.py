@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from src.config import (
+    MAX_PROCESS_FILE_AUTHORIZATION_PATH_CHARS,
     MAX_PROCESS_IPC_REQUEST_BYTES,
     MAX_PROCESS_IPC_RESPONSE_BYTES,
     MAX_PROCESS_PARAMETER_COUNT,
@@ -20,10 +21,12 @@ from src.config import (
 )
 from src.tool_process_common import (
     CHILD_ALLOWED_OUTCOMES,
+    PROCESS_SAFE_FILE_IMPLEMENTATION_IDS,
     ToolProcessError,
     ToolProcessResultRejectedError,
     assert_implementation_process_safe,
 )
+from src.tool_process_file_auth import validate_file_tool_process_parameters
 
 REQUEST_KEYS: frozenset[str] = frozenset(
     {
@@ -112,6 +115,15 @@ def validate_process_execution_request(
         str(payload["implementation_identifier"])
     )
     parameters = _validate_parameters(payload["normalized_parameters"])
+    if implementation in PROCESS_SAFE_FILE_IMPLEMENTATION_IDS:
+        parameters = validate_file_tool_process_parameters(
+            implementation,
+            parameters,
+        )
+    elif "file_authorization" in parameters:
+        raise ToolProcessError(
+            "file_authorization is not permitted for this implementation."
+        )
     timeout = _require_bounded_int(
         payload["execution_timeout_seconds"],
         field_name="execution_timeout_seconds",
@@ -348,11 +360,25 @@ def _validate_parameters(value: Any) -> dict[str, Any]:
         name = key.strip()
         if len(name) > MAX_PROCESS_PARAMETER_NAME_CHARS:
             raise ToolProcessError("Parameter name exceeds the maximum length.")
-        cleaned[name] = _assert_json_primitives(item, depth=0)
+        if name == "file_authorization":
+            cleaned[name] = _assert_json_primitives(
+                item,
+                depth=0,
+                string_limit=MAX_PROCESS_PARAMETER_STRING_CHARS,
+                allow_long_path_strings=True,
+            )
+        else:
+            cleaned[name] = _assert_json_primitives(item, depth=0)
     return cleaned
 
 
-def _assert_json_primitives(value: Any, *, depth: int) -> Any:
+def _assert_json_primitives(
+    value: Any,
+    *,
+    depth: int,
+    string_limit: int = MAX_PROCESS_PARAMETER_STRING_CHARS,
+    allow_long_path_strings: bool = False,
+) -> Any:
     if depth > MAX_PROCESS_PARAMETER_NESTING_DEPTH:
         raise ToolProcessError("Parameter nesting exceeds the maximum depth.")
     if value is None or isinstance(value, bool):
@@ -362,16 +388,39 @@ def _assert_json_primitives(value: Any, *, depth: int) -> Any:
     if isinstance(value, float):
         return value
     if isinstance(value, str):
-        if len(value) > MAX_PROCESS_PARAMETER_STRING_CHARS:
+        limit = (
+            MAX_PROCESS_FILE_AUTHORIZATION_PATH_CHARS
+            if allow_long_path_strings
+            else string_limit
+        )
+        if len(value) > limit:
             raise ToolProcessError("Parameter string exceeds the maximum length.")
         return value
     if isinstance(value, list):
-        return [_assert_json_primitives(item, depth=depth + 1) for item in value]
+        return [
+            _assert_json_primitives(
+                item,
+                depth=depth + 1,
+                string_limit=string_limit,
+                allow_long_path_strings=False,
+            )
+            for item in value
+        ]
     if isinstance(value, dict):
         result: dict[str, Any] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ToolProcessError("Object keys must be strings.")
-            result[key] = _assert_json_primitives(item, depth=depth + 1)
+            # Only canonical_path / authorized_root may use the path bound.
+            nested_long = allow_long_path_strings and key in {
+                "canonical_path",
+                "authorized_root",
+            }
+            result[key] = _assert_json_primitives(
+                item,
+                depth=depth + 1,
+                string_limit=string_limit,
+                allow_long_path_strings=nested_long,
+            )
         return result
     raise ToolProcessError("Parameters must use JSON-primitive values only.")

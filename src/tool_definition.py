@@ -280,17 +280,31 @@ def create_tool_definition(
         allowed=TOOL_PROCESS_ISOLATION_VALUES,
     )
     if cleaned_isolation in {"eligible", "required"}:
-        from src.tool_process_common import PROCESS_SAFE_IMPLEMENTATION_IDS
+        from src.tool_process_common import (
+            PROCESS_SAFE_FILE_IMPLEMENTATION_IDS,
+            PROCESS_SAFE_IMPLEMENTATION_IDS,
+        )
 
         if implementation not in PROCESS_SAFE_IMPLEMENTATION_IDS:
             raise ToolValidationError(
                 "Only approved process-safe implementations may be "
                 "process-isolation eligible or required."
             )
-        # File-path tools are not eligible in v1 (parent-validation/child-open TOCTOU).
-        if any(item.parameter_type == "file-path" for item in parameter_schema):
+        # Only the reviewed Milestone 15 file-integrity implementations may
+        # combine file-path parameters with process isolation.
+        has_file_path = any(
+            item.parameter_type == "file-path" for item in parameter_schema
+        )
+        if has_file_path and implementation not in PROCESS_SAFE_FILE_IMPLEMENTATION_IDS:
             raise ToolValidationError(
                 "File-touching tools cannot be process-isolation eligible."
+            )
+        if (
+            implementation in PROCESS_SAFE_FILE_IMPLEMENTATION_IDS
+            and not has_file_path
+        ):
+            raise ToolValidationError(
+                "Process-isolated file tools require a file-path parameter."
             )
 
     schema = tuple(parameter_schema)

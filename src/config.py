@@ -108,9 +108,10 @@ PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED = False
 PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED = False
 # Process isolation improves terminability for a tiny trusted subset only.
 
-# Process resource governance and safe file-opening foundation (Milestone 14)
+# Process resource governance and safe file-opening foundation (Milestone 14/15)
 # Resource limits apply only to process-isolated tools when explicitly enabled.
-# File-tool isolation flag does not change registry eligibility in this milestone.
+# File-tool isolation requires PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED as well.
+# Alone, PROCESS_FILE_TOOL_ISOLATION_ENABLED does not make any tool eligible.
 PROCESS_RESOURCE_LIMITS_ENABLED = False
 PROCESS_FILE_TOOL_ISOLATION_ENABLED = False
 # CPU-rate and handle-count Job Object limits are deferred.
@@ -140,7 +141,8 @@ FINGERPRINT_DISPLAY_PREFIX_CHARS = 12
 # Milestone 13 process-isolation IPC and termination bounds
 PROCESS_CHILD_STARTUP_TIMEOUT_SECONDS = 10
 PROCESS_TERMINATION_CONFIRMATION_TIMEOUT_SECONDS = 5
-MAX_PROCESS_IPC_REQUEST_BYTES = 8_192
+# Raised for Milestone 15 nested file-authorization payloads (path bounds).
+MAX_PROCESS_IPC_REQUEST_BYTES = 24_576
 MAX_PROCESS_IPC_RESPONSE_BYTES = 16_384
 MAX_PROCESS_DIAGNOSTIC_STDOUT_BYTES = 4_096
 MAX_PROCESS_DIAGNOSTIC_STDERR_BYTES = 4_096
@@ -148,6 +150,7 @@ MAX_PROCESS_PARAMETER_COUNT = 16
 MAX_PROCESS_PARAMETER_NAME_CHARS = 64
 MAX_PROCESS_PARAMETER_STRING_CHARS = 2_000
 MAX_PROCESS_PARAMETER_NESTING_DEPTH = 2
+MAX_PROCESS_FILE_AUTHORIZATION_PATH_CHARS = 4_096
 PROCESS_IPC_SCHEMA_VERSION = 1
 
 # Milestone 14 Job Object bounds (Windows-only when resource limits are enabled).

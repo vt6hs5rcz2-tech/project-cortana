@@ -196,6 +196,7 @@ def _builtin_tool_definitions() -> list[DefensiveToolDefinition]:
             supports_dry_run=True,
             enabled=True,
             implementation_identifier="impl_file_sha256",
+            process_isolation="eligible",
         ),
         create_tool_definition(
             tool_id="text-search",
@@ -277,6 +278,7 @@ def _builtin_tool_definitions() -> list[DefensiveToolDefinition]:
             supports_dry_run=True,
             enabled=True,
             implementation_identifier="impl_compare_sha256",
+            process_isolation="eligible",
         ),
         create_tool_definition(
             tool_id="incident-summary",

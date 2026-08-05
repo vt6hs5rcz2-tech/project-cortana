@@ -81,9 +81,11 @@ def test_file_tool_isolation_flag_defaults_false() -> None:
     assert PROCESS_FILE_TOOL_ISOLATION_ENABLED is False
 
 
-def test_file_tools_remain_ineligible() -> None:
+def test_non_hash_file_tools_remain_ineligible() -> None:
     registry = build_default_tool_registry()
-    for tool_id in ("file-sha256", "compare-sha256", "text-search", "incident-summary"):
+    assert registry.require("file-sha256").process_isolation == "eligible"
+    assert registry.require("compare-sha256").process_isolation == "eligible"
+    for tool_id in ("text-search", "incident-summary"):
         assert registry.require(tool_id).process_isolation == "prohibited"
 
 
@@ -381,13 +383,18 @@ def test_no_tool_dispatch_in_safe_open_module() -> None:
     assert "subprocess" not in source
 
 
-def test_no_production_module_calls_safe_open_foundation() -> None:
-    """Safe-open remains foundation-only: no production caller yet."""
-    callers: list[str] = []
+def test_safe_open_callers_are_allowlisted() -> None:
+    """Only reviewed Milestone 15 modules may import the safe-open foundation."""
+    allowed = {
+        Path("src") / "tool_process_file_auth.py",
+        Path("src") / "tool_process_file_tools.py",
+        Path("src") / "tool_process_adapter.py",
+    }
+    callers: list[Path] = []
     for path in Path("src").rglob("*.py"):
         if path.name == "tool_process_safe_open.py":
             continue
         text = path.read_text(encoding="utf-8")
         if "tool_process_safe_open" in text or "safe_open_for_read" in text:
-            callers.append(str(path))
-    assert callers == []
+            callers.append(path)
+    assert set(callers) == allowed

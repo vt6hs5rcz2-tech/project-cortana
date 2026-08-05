@@ -292,8 +292,15 @@ def test_process_isolated_tool_execution_defaults_disabled() -> None:
 
 
 def test_process_resource_governance_defaults_disabled() -> None:
-    """Milestone 14 resource limits and file-tool isolation must remain opt-in."""
+    """Milestone 14/15 resource limits and file-tool isolation must remain opt-in."""
     assert PROCESS_RESOURCE_LIMITS_ENABLED is False
     assert PROCESS_FILE_TOOL_ISOLATION_ENABLED is False
     assert PROCESS_JOB_ACTIVE_PROCESS_LIMIT == 1
     assert MAX_PROCESS_ISOLATED_JOB_MEMORY_BYTES == 256 * 1024 * 1024
+    from src.config import (
+        MAX_PROCESS_FILE_AUTHORIZATION_PATH_CHARS,
+        MAX_PROCESS_IPC_REQUEST_BYTES,
+    )
+
+    assert MAX_PROCESS_FILE_AUTHORIZATION_PATH_CHARS == 4_096
+    assert MAX_PROCESS_IPC_REQUEST_BYTES == 24_576

@@ -1,19 +1,22 @@
-"""Windows-native safe file-opening foundation for future process-isolated file tools.
+"""Windows-native safe file-opening foundation for process-isolated file tools.
 
-This module is foundation-only in Milestone 14. It is not wired into tool
-eligibility for file-sha256, compare-sha256, or any other file-touching tool.
-Plain ``open()`` / ``os.open()`` are not treated as the secure boundary here.
+Milestone 14 established the reparse-aware open and identity model. Milestone 15
+uses this module from the process-isolated child path for ``file-sha256`` and
+``compare-sha256`` only. Plain ``open()`` / ``os.open()`` are not the secure
+boundary here. In-process file tools continue to use ``tool_safe_files``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from src.config import PROCESS_FILE_TOOL_ISOLATION_ENABLED
+from src.config import MAX_TOOL_FILE_BYTES, PROCESS_FILE_TOOL_ISOLATION_ENABLED
 from src.tool_common import ToolValidationError
+from src.tool_safe_files import HASH_CHUNK_SIZE
 
 # Windows FILE_ATTRIBUTE_REPARSE_POINT / FILE_FLAG_OPEN_REPARSE_POINT
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
@@ -43,6 +46,18 @@ class SafeOpenUnavailableError(SafeOpenError):
     """Raised when the Windows safe-open path cannot be used."""
 
 
+class IdentityMismatch(SafeOpenError):
+    """Opened handle identity does not match parent authorization."""
+
+
+class FileChangedDuringRead(SafeOpenError):
+    """File size, identity, or last-write time changed during a verified read."""
+
+
+class FileTooLarge(SafeOpenError):
+    """File exceeds the centralized maximum permitted size."""
+
+
 @dataclass(frozen=True)
 class WindowsFileIdentity:
     """Immutable parent-authorized Windows file identity."""
@@ -65,6 +80,18 @@ class SafeOpenHandle:
     def close(self) -> None:
         """Close the underlying Windows handle."""
         close_windows_handle(self.handle)
+
+
+@dataclass(frozen=True)
+class FileHashResult:
+    """Immutable streaming SHA-256 result from a verified safe handle."""
+
+    sha256_hex: str
+    size_bytes: int
+    baseline_size_bytes: int
+    final_size_bytes: int
+    baseline_last_write_time_filetime: int
+    final_last_write_time_filetime: int
 
 
 def assert_file_tool_isolation_readiness() -> None:
@@ -231,7 +258,9 @@ def safe_open_for_read(
             identity,
             expected_identity,
         ):
-            raise SafeOpenError("Opened file identity does not match authorization.")
+            raise IdentityMismatch(
+                "Opened file identity does not match authorization."
+            )
         if root is not None and not _path_is_under_root(handle_path, root):
             raise SafeOpenError("Path is outside the authorized root.")
         result = SafeOpenHandle(handle=handle, identity=identity)
@@ -246,12 +275,105 @@ def safe_open_for_read(
             close_windows_handle(handle)
 
 
+def hash_sha256_from_safe_handle(
+    opened: SafeOpenHandle,
+    *,
+    max_bytes: int = MAX_TOOL_FILE_BYTES,
+    chunk_size: int = HASH_CHUNK_SIZE,
+) -> FileHashResult:
+    """Stream SHA-256 through a verified handle without buffering the file.
+
+    Reads via ``win32file.ReadFile`` only. Each chunk is fed to
+    ``hashlib.sha256().update`` and discarded. After EOF, re-queries file
+    information on the same handle and fails closed on size, identity, or
+    last-write-time changes. Does not close the handle.
+    """
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 1:
+        raise SafeOpenError("max_bytes must be a positive integer.")
+    if max_bytes > MAX_TOOL_FILE_BYTES:
+        raise SafeOpenError("max_bytes cannot exceed MAX_TOOL_FILE_BYTES.")
+    if (
+        isinstance(chunk_size, bool)
+        or not isinstance(chunk_size, int)
+        or chunk_size < 1
+    ):
+        raise SafeOpenError("chunk_size must be a positive integer.")
+    if chunk_size != HASH_CHUNK_SIZE:
+        raise SafeOpenError("chunk_size must equal the centralized HASH_CHUNK_SIZE.")
+
+    baseline = opened.identity
+    if baseline.size_bytes > max_bytes:
+        raise FileTooLarge("File exceeds the maximum permitted size.")
+
+    win32file, _win32con, _win32api = _require_win32_modules()
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        while True:
+            _error_code, data = win32file.ReadFile(opened.handle, chunk_size)
+            if not data:
+                break
+            total += len(data)
+            if total > max_bytes:
+                raise FileTooLarge("File exceeds the maximum permitted size.")
+            digest.update(data)
+        final_info = win32file.GetFileInformationByHandle(opened.handle)
+    except (FileTooLarge, FileChangedDuringRead, IdentityMismatch):
+        raise
+    except SafeOpenError:
+        raise
+    except Exception as error:
+        raise SafeOpenError("Secure file hash failed.") from error
+
+    (
+        _attrs,
+        _created,
+        _accessed,
+        written,
+        volume,
+        size_high,
+        size_low,
+        _links,
+        index_high,
+        index_low,
+    ) = final_info
+    final_size = (int(size_high) << 32) | int(size_low)
+    final_write = _filetime_to_int(written)
+    if (
+        int(volume) != baseline.volume_serial_number
+        or int(index_high) != baseline.file_index_high
+        or int(index_low) != baseline.file_index_low
+    ):
+        raise FileChangedDuringRead("File identity changed during read.")
+    if final_size != baseline.size_bytes:
+        raise FileChangedDuringRead("File size changed during read.")
+    if total != baseline.size_bytes:
+        raise FileChangedDuringRead("Bytes read do not match open-time size.")
+    if final_write != baseline.last_write_time_filetime:
+        raise FileChangedDuringRead("File last-write time changed during read.")
+    if final_size > max_bytes:
+        raise FileTooLarge("File exceeds the maximum permitted size.")
+
+    return FileHashResult(
+        sha256_hex=digest.hexdigest(),
+        size_bytes=total,
+        baseline_size_bytes=baseline.size_bytes,
+        final_size_bytes=final_size,
+        baseline_last_write_time_filetime=baseline.last_write_time_filetime,
+        final_last_write_time_filetime=final_write,
+    )
+
+
 def read_bytes_from_safe_handle(
     opened: SafeOpenHandle,
     *,
     max_bytes: int,
 ) -> bytes:
-    """Read bytes through a verified handle only."""
+    """Read bytes through a verified handle only.
+
+    This helper buffers the full content and must not be used for hashing.
+    Use :func:`hash_sha256_from_safe_handle` for streaming SHA-256.
+    """
     if max_bytes < 1:
         raise SafeOpenError("max_bytes must be positive.")
     win32file, _win32con, _win32api = _require_win32_modules()
@@ -259,12 +381,12 @@ def read_bytes_from_safe_handle(
     total = 0
     try:
         while True:
-            _error_code, data = win32file.ReadFile(opened.handle, 1024 * 1024)
+            _error_code, data = win32file.ReadFile(opened.handle, HASH_CHUNK_SIZE)
             if not data:
                 break
             total += len(data)
             if total > max_bytes:
-                raise SafeOpenError("File exceeds the maximum permitted size.")
+                raise FileTooLarge("File exceeds the maximum permitted size.")
             chunks.append(bytes(data))
     except SafeOpenError:
         raise

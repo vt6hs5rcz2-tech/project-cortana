@@ -18,7 +18,7 @@ Project Cortana is an early software milestone focused on:
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 - Optional process-isolated execution for a tiny allowlisted defensive tool subset
 - Optional Windows Job Object resource governance for process-isolated tools
-- Windows safe file-opening foundation (not yet wired to file-tool eligibility)
+- Optional process-isolated file integrity tools (`file-sha256`, `compare-sha256`) using the Windows safe-open foundation
 - Trusted defensive playbook orchestration over allowlisted Milestone 9 tools
 - Durable workflow-run and workflow-audit history with optional authorized incident linkage
 - Optional controlled security analyst assistance over sanitized single-incident packets
@@ -292,7 +292,7 @@ Milestone 14 adds optional Windows Job Object governance on top of Milestone 13 
 Flags (both default disabled):
 
 - `PROCESS_RESOURCE_LIMITS_ENABLED` — Job Object governance for process-isolated tools only
-- `PROCESS_FILE_TOOL_ISOLATION_ENABLED` — readiness/foundation gate only; does **not** make any file tool process-isolation eligible
+- `PROCESS_FILE_TOOL_ISOLATION_ENABLED` — dual-gate with process isolation for reviewed file integrity tools (Milestone 15); alone it does not make tools eligible
 
 When resource limits are disabled, Milestone 13 isolation behavior is unchanged. When enabled on Windows with `pywin32`, each isolated execution:
 
@@ -334,10 +334,56 @@ Safe file-opening foundation (`src/tool_process_safe_open.py`):
 - Captures and verifies Windows file identity (volume serial + file indexes), not path strings alone
 - When an authorized root is supplied, containment is checked before open on the caller path and again after open using a path independently derived from the handle via `GetFinalPathNameByHandle`
 - Plain `open()` / `os.open()` are not the secure boundary
-- File tools (`file-sha256`, `compare-sha256`, `text-search`, etc.) remain `process_isolation=prohibited`
-- Future eligibility requires a separate reviewed code change
+- Milestone 15 wires this foundation into process-isolated `file-sha256` and `compare-sha256` only
 
-Limitations:
+### Controlled process-isolated file integrity tools (Milestone 15)
+
+Milestone 15 allows a tiny reviewed subset of existing read-only file-integrity tools to use the process-isolated path with the Milestone 14 safe-open foundation.
+
+Dual feature gates (both default disabled):
+
+- `PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED`
+- `PROCESS_FILE_TOOL_ISOLATION_ENABLED`
+
+Routing:
+
+- process isolation off → existing in-process file-tool behavior
+- process isolation on, file-tool isolation off → existing in-process behavior for eligible file tools
+- both on → parent captures Windows file identity, child opens with `safe_open_for_read`, streams SHA-256 through the verified handle
+- file safe-open unavailable while file-tool isolation is enabled → fail closed in the parent before the child request is sent
+- `PROCESS_RESOURCE_LIMITS_ENABLED` remains an independent optional Job Object protection
+
+Eligible tools:
+
+- `file-sha256` → `process_isolation=eligible`
+- `compare-sha256` → `process_isolation=eligible` (still one authorized file path + one expected SHA-256 digest; not a two-file tool)
+
+All other file-touching tools (including `text-search`) remain `process_isolation=prohibited`.
+
+Security properties:
+
+- Parent validates schema/scope, then captures immutable file authorization (canonical path, authorized root, volume serial, file indexes, size, baseline last-write time)
+- Child receives exact-key nested `file_authorization` only; never scope/repository/approval/AI objects
+- Child hashes via streaming `hash_sha256_from_safe_handle` (`ReadFile` + `hashlib.update`); full-file buffering is not used for hashing
+- After EOF, the same handle is re-queried; size/identity/last-write changes fail closed as `failed` / `FileChangedDuringRead`
+- Identity mismatch fails closed as `failed` / `IdentityMismatch`
+- Oversized files fail closed as `failed` / `FileTooLarge`
+- Results expose basename-only filename fields (`filename_only`); canonical paths, roots, and identity fields never appear in results, audits, workflow records, or incident notes
+- In-process open remains in `tool_safe_files.py`; isolated open remains in `tool_process_safe_open.py`
+
+Documented limitations:
+
+- File tools remain read-only
+- Only `file-sha256` and `compare-sha256` are process-isolation eligible
+- `compare-sha256` remains one file plus an expected digest
+- Full paths are internal authorization data only
+- Hard links cannot be distinguished from another name for the same underlying file identity
+- Sparse files report logical size
+- Concurrent modification is detected using post-read size and last-write-time re-checks; this cannot guarantee protection against every filesystem or endpoint-security behavior
+- Process isolation and Job Objects improve containment but are not a complete sandbox
+- Non-Windows environments use existing in-process behavior when file-tool isolation is off; enabling file-tool isolation off Windows fails safely
+
+Limitations (Job Objects):
 
 - Job Objects improve containment but are not a complete sandbox
 - The 256 MiB memory limit is not complete memory safety and does not prevent all resource exhaustion

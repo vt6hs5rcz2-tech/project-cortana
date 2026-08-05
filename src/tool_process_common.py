@@ -16,10 +16,25 @@ from src.tool_common import ToolValidationError, validate_implementation_id
 
 # Exact set of implementation identifiers approved for the child dispatch table.
 # Must match registry process_isolation eligible/required tools in both directions.
+PROCESS_SAFE_FILE_IMPLEMENTATION_IDS: frozenset[str] = frozenset(
+    {
+        "impl_file_sha256",
+        "impl_compare_sha256",
+    }
+)
+
+PROCESS_SAFE_FILE_TOOL_IDS: frozenset[str] = frozenset(
+    {
+        "file-sha256",
+        "compare-sha256",
+    }
+)
+
 PROCESS_SAFE_IMPLEMENTATION_IDS: frozenset[str] = frozenset(
     {
         "impl_system_summary",
         "impl_simulated_log_check",
+        *PROCESS_SAFE_FILE_IMPLEMENTATION_IDS,
     }
 )
 
@@ -27,6 +42,7 @@ PROCESS_SAFE_TOOL_IDS: frozenset[str] = frozenset(
     {
         "system-summary",
         "simulated-log-check",
+        *PROCESS_SAFE_FILE_TOOL_IDS,
     }
 )
 

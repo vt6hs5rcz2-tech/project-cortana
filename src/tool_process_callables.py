@@ -1,7 +1,7 @@
-"""Trusted process-safe tool callables shared by in-process and child paths.
+"""Trusted process-safe tool callables for the child dispatch table.
 
-These callables require no repository objects, file access, network access, or
-secrets. They are the only implementations eligible for process isolation in v1.
+Non-file callables require no repository objects, network access, or secrets.
+Milestone 15 file-integrity callables use parent-authorized safe-open data only.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from src.config import (
     VERSION,
 )
 from src.tool_common import ToolValidationError
+from src.tool_process_file_tools import run_compare_sha256, run_file_sha256
 
 
 class ProcessSafeToolError(ToolValidationError):
@@ -91,4 +92,6 @@ def run_simulated_log_check(
 PROCESS_SAFE_CALLABLES: dict[str, Any] = {
     "impl_system_summary": run_system_summary,
     "impl_simulated_log_check": run_simulated_log_check,
+    "impl_file_sha256": run_file_sha256,
+    "impl_compare_sha256": run_compare_sha256,
 }

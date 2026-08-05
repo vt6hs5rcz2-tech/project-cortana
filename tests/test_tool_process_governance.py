@@ -260,8 +260,9 @@ def test_resource_limit_exceeded_is_distinct_outcome() -> None:
 
 def test_file_tools_remain_prohibited() -> None:
     registry = build_default_tool_registry()
-    for tool_id in ("file-sha256", "compare-sha256", "text-search"):
-        assert registry.require(tool_id).process_isolation == "prohibited"
+    assert registry.require("file-sha256").process_isolation == "eligible"
+    assert registry.require("compare-sha256").process_isolation == "eligible"
+    assert registry.require("text-search").process_isolation == "prohibited"
 
 
 def test_assign_before_communicate(
