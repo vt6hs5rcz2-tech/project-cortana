@@ -21,6 +21,8 @@ from src.document_extractor import DefaultTextExtractor
 from src.document_retrieval import LexicalDocumentRetriever
 from src.document_vault import JsonDocumentVault
 from src.evidence_store import LocalEvidenceStore
+from src.incident_analysis_audit import InMemoryIncidentAnalysisAuditLog
+from src.incident_analysis_repository import InMemoryIncidentAnalysisRepository
 from src.incident_repository import JsonIncidentRepository
 from src.logger import setup_logging
 from src.memory_store import JsonMemoryStore
@@ -94,6 +96,8 @@ def main() -> None:
             workflow_repository_file_path=get_default_workflow_repository_file_path(),
         )
     )
+    analysis_repository = InMemoryIncidentAnalysisRepository()
+    analysis_audit_log = InMemoryIncidentAnalysisAuditLog()
 
     run_conversation_loop(
         client=client,
@@ -114,6 +118,8 @@ def main() -> None:
         workflow_registry=workflow_registry,
         workflow_run_repository=workflow_run_repository,
         workflow_executor=workflow_executor,
+        analysis_repository=analysis_repository,
+        analysis_audit_log=analysis_audit_log,
     )
 
 

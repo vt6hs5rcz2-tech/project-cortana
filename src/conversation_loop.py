@@ -17,6 +17,8 @@ from src.document_extractor import TextExtractor
 from src.document_retrieval import LexicalDocumentRetriever
 from src.document_vault import DocumentVault
 from src.evidence_store import EvidenceStore
+from src.incident_analysis_audit import InMemoryIncidentAnalysisAuditLog
+from src.incident_analysis_repository import InMemoryIncidentAnalysisRepository
 from src.incident_repository import IncidentRepository
 from src.memory_store import MemoryStore
 from src.retrieval_session import RetrievalSession
@@ -111,6 +113,8 @@ def run_conversation_loop(
     workflow_registry: WorkflowRegistry | None = None,
     workflow_run_repository: WorkflowRunRepository | None = None,
     workflow_executor: WorkflowExecutor | None = None,
+    analysis_repository: InMemoryIncidentAnalysisRepository | None = None,
+    analysis_audit_log: InMemoryIncidentAnalysisAuditLog | None = None,
     read_input: Callable[[], str] | None = None,
     conversation_history: ConversationHistory | None = None,
 ) -> None:
@@ -157,6 +161,8 @@ def run_conversation_loop(
                 workflow_registry=workflow_registry,
                 workflow_run_repository=workflow_run_repository,
                 workflow_executor=workflow_executor,
+                analysis_repository=analysis_repository,
+                analysis_audit_log=analysis_audit_log,
                 client=client,
             )
             if command_result.message:

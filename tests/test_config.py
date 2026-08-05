@@ -56,6 +56,20 @@ from src.config import (
     WORKFLOW_REPOSITORY_SCHEMA_VERSION,
     WORKFLOW_RUN_PERSISTENCE_ENABLED,
     WORKFLOW_SINGLE_INSTANCE_COORDINATION_ENABLED,
+    AI_INCIDENT_ANALYSIS_ENABLED,
+    AI_INCIDENT_ANALYSIS_NOTE_AUTHOR,
+    AI_INCIDENT_ANALYSIS_NOTE_TAG,
+    AI_INCIDENT_ANALYSIS_NOTE_TYPE,
+    AI_INCIDENT_NOTE_SAVE_ENABLED,
+    INCIDENT_AI_CONTEXT_INJECTION_ENABLED,
+    MAX_ANALYSIS_EVENTS,
+    MAX_ANALYSIS_INDICATORS,
+    MAX_ANALYSIS_NOTES,
+    MAX_ANALYSIS_TOOL_SUMMARIES,
+    MAX_ANALYSIS_WORKFLOW_SUMMARIES,
+    MAX_INCIDENT_ANALYSIS_OUTPUT_CHARS,
+    MAX_INCIDENT_ANALYSIS_PACKET_CHARS,
+    MAX_RETAINED_INCIDENT_ANALYSES,
     get_default_document_vault_file_path,
     get_default_evidence_store_dir_path,
     get_default_incident_repository_file_path,
@@ -244,3 +258,22 @@ def test_default_workflow_repository_path_is_outside_project_source(
     assert PROJECT_ROOT not in path.parents
     assert "src" not in path.parts
     assert "tests" not in path.parts
+
+
+def test_incident_ai_analysis_capabilities_default_disabled() -> None:
+    """Milestone 12 analysis and note saving must remain opt-in and bounded."""
+    assert AI_INCIDENT_ANALYSIS_ENABLED is False
+    assert AI_INCIDENT_NOTE_SAVE_ENABLED is False
+    assert WORKFLOW_AI_CONTEXT_INJECTION_ENABLED is False
+    assert INCIDENT_AI_CONTEXT_INJECTION_ENABLED is False
+    assert AI_INCIDENT_ANALYSIS_NOTE_AUTHOR == "ai-analyst-assistance"
+    assert AI_INCIDENT_ANALYSIS_NOTE_TAG == "ai-assisted"
+    assert AI_INCIDENT_ANALYSIS_NOTE_TYPE == "hypothesis"
+    assert MAX_ANALYSIS_EVENTS == 10
+    assert MAX_ANALYSIS_INDICATORS == 20
+    assert MAX_ANALYSIS_NOTES == 10
+    assert MAX_ANALYSIS_WORKFLOW_SUMMARIES == 5
+    assert MAX_ANALYSIS_TOOL_SUMMARIES == 10
+    assert 20_000 <= MAX_INCIDENT_ANALYSIS_PACKET_CHARS <= 40_000
+    assert MAX_INCIDENT_ANALYSIS_OUTPUT_CHARS == 4_000
+    assert MAX_RETAINED_INCIDENT_ANALYSES == 50

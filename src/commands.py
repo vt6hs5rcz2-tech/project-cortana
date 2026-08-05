@@ -30,10 +30,15 @@ from src.config import (
     EXTERNAL_THREAT_INTELLIGENCE_LOOKUPS_ENABLED,
     EXTERNAL_TOOL_EXECUTION_ENABLED,
     HISTORY_PERSISTENCE_ENABLED,
+    AI_INCIDENT_ANALYSIS_ENABLED,
+    AI_INCIDENT_NOTE_SAVE_ENABLED,
     INCIDENT_AI_CONTEXT_INJECTION_ENABLED,
     INCIDENT_REPOSITORY_ENABLED,
     INCIDENT_REPOSITORY_PERSISTENCE_ENABLED,
     INCIDENT_SINGLE_INSTANCE_COORDINATION_ENABLED,
+    MAX_RETAINED_INCIDENT_ANALYSES,
+    MAX_INCIDENT_ANALYSIS_OUTPUT_CHARS,
+    MAX_INCIDENT_ANALYSIS_PACKET_CHARS,
     KNOWLEDGE_VAULT_ENABLED,
     LOCAL_DOCUMENT_RETRIEVAL_ENABLED,
     MAX_ACTIVE_MEMORIES,
@@ -88,6 +93,13 @@ from src.document_vault import (
     DuplicateDocumentHashError,
 )
 from src.evidence_store import EvidenceStore, LocalEvidenceStore
+from src.incident_analysis_audit import InMemoryIncidentAnalysisAuditLog
+from src.incident_analysis_commands import (
+    INCIDENT_ANALYSIS_COMMAND_NAMES,
+    IncidentAnalysisCommandContext,
+    handle_incident_analysis_command,
+)
+from src.incident_analysis_repository import InMemoryIncidentAnalysisRepository
 from src.incident_repository import (
     IncidentRepository,
     IncidentStorageError,
@@ -178,6 +190,7 @@ SUPPORTED_COMMANDS = frozenset(
         *SECURITY_COMMAND_NAMES,
         *TOOL_COMMAND_NAMES,
         *WORKFLOW_COMMAND_NAMES,
+        *INCIDENT_ANALYSIS_COMMAND_NAMES,
     }
 )
 
@@ -241,6 +254,10 @@ HELP_TEXT = """Cortana: Available commands:
   /playbook-show        - Show one defensive playbook by name
   /playbook-run         - Dry-run or execute one trusted playbook
   /playbook-status      - Show one workflow run by ID
+  /incident-analysis-prepare - Prepare one sanitized incident analysis packet
+  /incident-analysis-run - Confirm and run AI analysis for one prepared request
+  /incident-analysis-show - Show one in-memory incident analysis result
+  /incident-analysis-save-note - Save one analysis verbatim as an incident note
   /about                - Describe Project Cortana and this software milestone
   /exit                 - End the session cleanly"""
 
@@ -253,8 +270,10 @@ ABOUT_TEXT = (
     "human-controlled security event, incident, indicator, evidence, and "
     "chain-of-custody foundation, a human-supervised defensive tool "
     "framework with scope controls and approval, trusted defensive playbook "
-    "orchestration over allowlisted tools, durable workflow-run history, and "
-    "optional authorized incident linkage for completed playbook runs."
+    "orchestration over allowlisted tools, durable workflow-run history, "
+    "optional authorized incident linkage for completed playbook runs, and "
+    "optional controlled security analyst assistance over sanitized "
+    "single-incident packets."
 )
 
 CLEAR_CONFIRMATION = (
@@ -419,6 +438,8 @@ class CommandContext:
     workflow_registry: WorkflowRegistry
     workflow_run_repository: WorkflowRunRepository
     workflow_executor: WorkflowExecutor
+    analysis_repository: InMemoryIncidentAnalysisRepository
+    analysis_audit_log: InMemoryIncidentAnalysisAuditLog
     client: OpenAIClient | None = None
 
 
@@ -459,6 +480,17 @@ def _ephemeral_workflow_services(
         tool_repository=tool_repository,
         tool_executor=tool_executor,
         persist_runs=False,
+    )
+
+
+def _ephemeral_analysis_services() -> tuple[
+    InMemoryIncidentAnalysisRepository,
+    InMemoryIncidentAnalysisAuditLog,
+]:
+    """Create one consistent analysis repository and audit-log pair."""
+    return (
+        InMemoryIncidentAnalysisRepository(),
+        InMemoryIncidentAnalysisAuditLog(),
     )
 
 
@@ -519,14 +551,16 @@ def handle_slash_command(
     workflow_registry: WorkflowRegistry | None = None,
     workflow_run_repository: WorkflowRunRepository | None = None,
     workflow_executor: WorkflowExecutor | None = None,
+    analysis_repository: InMemoryIncidentAnalysisRepository | None = None,
+    analysis_audit_log: InMemoryIncidentAnalysisAuditLog | None = None,
     client: OpenAIClient | None = None,
 ) -> CommandResult:
     """Handle a slash command locally.
 
-    Most commands never call the AI service. ``/ask-docs`` is the explicit
-    exception and requires an injected client. Milestone 8 security commands,
-    Milestone 9 tool commands, and Milestone 10 workflow commands are always
-    local and never call the AI service.
+    Most commands never call the AI service. ``/ask-docs`` and explicit
+    incident-analysis run commands are the AI exceptions and require an
+    injected client. Milestone 8 security commands, Milestone 9 tool
+    commands, and Milestone 10/11 workflow commands are always local.
     """
     command_name = normalize_command_name(message)
 
@@ -559,6 +593,11 @@ def handle_slash_command(
             tool_repository=tool_repository,
             tool_executor=tool_executor,
         )
+
+    # Analysis services are all-or-nothing: a partial injection can otherwise
+    # pair an analysis repository with a different audit log than later commands.
+    if analysis_repository is None or analysis_audit_log is None:
+        analysis_repository, analysis_audit_log = _ephemeral_analysis_services()
 
     if command_name in SECURITY_COMMAND_NAMES:
         security_result = handle_security_command(
@@ -612,6 +651,26 @@ def handle_slash_command(
                 message=workflow_result.message,
             )
 
+    if command_name in INCIDENT_ANALYSIS_COMMAND_NAMES:
+        analysis_result = handle_incident_analysis_command(
+            command_name,
+            IncidentAnalysisCommandContext(
+                message=message,
+                settings=settings,
+                incident_repository=incident_repository,
+                tool_repository=tool_repository,
+                workflow_run_repository=workflow_run_repository,
+                analysis_repository=analysis_repository,
+                analysis_audit_log=analysis_audit_log,
+                client=client,
+            ),
+        )
+        if analysis_result is not None:
+            return CommandResult(
+                outcome=CommandOutcome.CONTINUE,
+                message=analysis_result.message,
+            )
+
     handler = COMMAND_HANDLERS.get(command_name)
 
     if handler is None:
@@ -638,6 +697,8 @@ def handle_slash_command(
         workflow_registry=workflow_registry,
         workflow_run_repository=workflow_run_repository,
         workflow_executor=workflow_executor,
+        analysis_repository=analysis_repository,
+        analysis_audit_log=analysis_audit_log,
         client=client,
     )
     return handler(context)
@@ -663,6 +724,7 @@ def _handle_status(context: CommandContext) -> CommandResult:
             context.tool_repository,
             context.workflow_registry,
             context.workflow_run_repository,
+            context.analysis_repository,
         )
     except MemoryStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
@@ -1412,6 +1474,7 @@ def format_status(
     tool_repository: ToolControlRepository | None = None,
     workflow_registry: WorkflowRegistry | None = None,
     workflow_run_repository: WorkflowRunRepository | None = None,
+    analysis_repository: InMemoryIncidentAnalysisRepository | None = None,
 ) -> str:
     """Build safe local session status text for /status."""
     completed_turns = conversation_history.completed_turn_count
@@ -1459,6 +1522,10 @@ def format_status(
         retained_workflow_run_count = 0
     else:
         retained_workflow_run_count = len(workflow_run_repository.list_runs())
+    if analysis_repository is None:
+        retained_analysis_count = 0
+    else:
+        retained_analysis_count = analysis_repository.analysis_count()
 
     return (
         "Cortana: Session status\n"
@@ -1561,7 +1628,17 @@ def format_status(
         "  Nested playbooks: "
         f"{'enabled' if WORKFLOW_NESTED_PLAYBOOKS_ENABLED else 'disabled'}\n"
         "  Workflow AI-context injection: "
-        f"{'enabled' if WORKFLOW_AI_CONTEXT_INJECTION_ENABLED else 'disabled'}"
+        f"{'enabled' if WORKFLOW_AI_CONTEXT_INJECTION_ENABLED else 'disabled'}\n"
+        "  Incident AI analysis: "
+        f"{'enabled' if AI_INCIDENT_ANALYSIS_ENABLED else 'disabled'}\n"
+        "  Incident AI analysis note saving: "
+        f"{'enabled' if AI_INCIDENT_NOTE_SAVE_ENABLED else 'disabled'}\n"
+        f"  Retained incident analyses: {retained_analysis_count}\n"
+        f"  Maximum retained incident analyses: {MAX_RETAINED_INCIDENT_ANALYSES}\n"
+        "  Maximum incident analysis packet characters: "
+        f"{MAX_INCIDENT_ANALYSIS_PACKET_CHARS}\n"
+        "  Maximum incident analysis output characters: "
+        f"{MAX_INCIDENT_ANALYSIS_OUTPUT_CHARS}"
     )
 
 

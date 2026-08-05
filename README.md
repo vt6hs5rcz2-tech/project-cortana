@@ -18,6 +18,7 @@ Project Cortana is an early software milestone focused on:
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 - Trusted defensive playbook orchestration over allowlisted Milestone 9 tools
 - Durable workflow-run and workflow-audit history with optional authorized incident linkage
+- Optional controlled security analyst assistance over sanitized single-incident packets
 
 ## Conversation history, persistent memory, active context, and documents
 
@@ -31,6 +32,7 @@ Project Cortana is an early software milestone focused on:
 | Security incidents and evidence | Survives restarts | Created only through explicit local Milestone 8 commands | Never in this milestone |
 | Defensive tool scopes, requests, approvals, results, and audits | Survives restarts | Created only through explicit local Milestone 9 commands | Never in this milestone |
 | Workflow/playbook run state and workflow audits | Survives restarts when persistence is enabled; otherwise current process only | Created only through explicit local Milestone 10/11 commands | Never in this milestone |
+| Incident AI analysis preparations and results | Current process only | Created only through explicit local Milestone 12 analysis commands | Only through `/incident-analysis-run`, as a sanitized allowlisted packet |
 
 Persistent memories, Knowledge Vault documents, incident records, and evidence copies are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories.
 
@@ -38,7 +40,7 @@ Saved memories remain inactive by default. Nothing from persistent memory is sen
 
 Documents remain inactive by default. No document text is sent to the AI unless the user explicitly invokes `/ask-docs`. Ordinary conversation never reads the Knowledge Vault.
 
-Security incident records, analyst notes, indicators, evidence metadata, and evidence file bytes are never sent to the AI in this milestone. They are not injected into ordinary chat, active-memory requests, or `/ask-docs`.
+Security incident records are never injected into ordinary chat, active-memory requests, or `/ask-docs`. When Milestone 12 analysis is explicitly enabled and the user runs `/incident-analysis-run`, only a sanitized allowlisted single-incident packet is sent. Evidence bytes, chain-of-custody records, and raw structured tool data remain structurally excluded from that packet.
 
 Defensive tool definitions, scope notes, request justifications, parameters, execution results, and audit details are never sent to the AI in this milestone. The AI cannot select or execute tools.
 
@@ -190,7 +192,7 @@ Evidence storage statuses:
 Behavior and limits:
 
 - All Milestone 8 commands are local and never call the AI service.
-- Incident data is never injected into AI requests in this milestone.
+- Ordinary chat, active memory, and `/ask-docs` never receive incident packets. Milestone 12 analysis is a separate, default-disabled explicit command path.
 - No automatic collection, scanning, remediation, containment, malware execution, packet capture, vulnerability scanning, penetration-testing actions, threat-intelligence network lookups, cloud SIEM integrations, or telemetry.
 - Evidence files may be dangerous. Cortana stores opaque bytes and never executes, opens for parsing, imports, or inspects evidence contents beyond hashing and byte-copying.
 - SHA-256 is calculated locally with streaming reads.
@@ -316,6 +318,41 @@ Example:
 /playbook-status <run-id>
 ```
 
+## Controlled security analyst assistance
+
+Milestone 12 adds optional, human-controlled AI assistance over one sanitized incident packet at a time. Analysis and note saving are disabled by default and never run automatically.
+
+Commands (explicit only; pipe-delimited):
+
+1. `/incident-analysis-prepare <kind> | <incident-id> | <scope-id> | <event-ids> | <indicator-ids> | <note-ids> | <workflow-run-ids>` — authorize, build packet, preview counts/warning (no AI call)
+2. `/incident-analysis-run <analysis-id>` — revalidate and call the AI for one prepared request
+3. `/incident-analysis-show <analysis-id>` — inspect one in-memory prepared or completed analysis
+4. `/incident-analysis-save-note <analysis-id>` — save the exact stored advisory output as one incident note
+
+Use `-` for an empty ID list, or comma-separated UUIDs for multiple IDs. Supported kinds: `summary`, `gaps`, `investigation_questions`, `report_draft`, `remediation_checklist`, `outcome_explanation`.
+
+Behavior and limits:
+
+- `AI_INCIDENT_ANALYSIS_ENABLED` and `AI_INCIDENT_NOTE_SAVE_ENABLED` default to disabled. Note saving also requires the analysis flag.
+- `WORKFLOW_AI_CONTEXT_INJECTION_ENABLED` (default false) independently gates whether Milestone 11 safe workflow/tool summaries may be selected into a packet. It does not enable analysis by itself.
+- Ordinary conversation never receives incident packets (`INCIDENT_AI_CONTEXT_INJECTION_ENABLED` remains false).
+- Prepare requires an authorized scope and reuses `assert_incident_authorized`. Selected records must belong to the same incident.
+- Prepare shows transmission warning and category/packet counts; it does not print the full packet or call the AI.
+- Each preparation uses a random untrusted-data boundary token for packet markers.
+- Packets are allowlisted single-incident projections. Evidence, custody, and raw structured tool data are structurally excluded.
+- Authorization is revalidated before the AI call and again before note saving.
+- Analysis results are retained in process memory only. The durable artifact is only an explicitly saved note.
+- Saved notes use fixed author `ai-analyst-assistance`, tag `ai-assisted`, type `hypothesis`, and a provenance banner; the body is verbatim analysis text.
+- Named limits cover selected events/indicators/notes/workflow/tool summaries, packet size, output size, and retained analyses.
+- No automatic persistence, tool/workflow execution, background work, or autonomous response.
+
+Centralized defaults:
+
+- Maximum selected events: 10; indicators: 20; notes: 10; workflow summaries: 5; tool summaries: 10
+- Maximum packet characters: 32,000
+- Maximum analysis output characters: 4,000
+- Maximum retained in-memory analyses: 50
+
 ## Local commands
 
 | Command | Description |
@@ -384,6 +421,10 @@ Example:
 | `/playbook-run <name> \| <scope-id> \| <incident-id>` | Dry-run one trusted playbook linked to an existing incident |
 | `/playbook-run <name> --execute \| <scope-id> \| <incident-id>` | Execute one trusted playbook linked to an existing incident |
 | `/playbook-status <run-id>` | Show one workflow run |
+| `/incident-analysis-prepare <kind> \| <incident-id> \| <scope-id> \| <event-ids> \| <indicator-ids> \| <note-ids> \| <workflow-run-ids>` | Prepare and preview one sanitized incident analysis packet |
+| `/incident-analysis-run <analysis-id>` | Confirm and run AI analysis for one prepared request |
+| `/incident-analysis-show <analysis-id>` | Show one in-memory incident analysis result |
+| `/incident-analysis-save-note <analysis-id>` | Save one analysis verbatim as an incident note |
 | `/about` | Describe Project Cortana and this milestone |
 | `/exit` | End the session cleanly |
 
@@ -401,6 +442,7 @@ Notes:
 - Milestone 8 security commands never call the AI service.
 - Milestone 9 defensive tool commands never call the AI service.
 - Milestone 10/11 workflow/playbook commands never call the AI service.
+- Milestone 12 prepare/show/save-note commands are local. Only `/incident-analysis-run` calls the AI, and only when analysis is enabled.
 - Absolute path-like input such as `/etc/passwd` is treated as conversation content for the AI, not as a local command, unless it is explicitly provided as an `/add-document` or `/evidence-register` argument.
 
 ## Active memory limits

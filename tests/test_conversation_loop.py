@@ -16,6 +16,8 @@ from src.document_extractor import DefaultTextExtractor
 from src.document_retrieval import LexicalDocumentRetriever
 from src.document_vault import DocumentVault, JsonDocumentVault
 from src.evidence_store import EvidenceStore, LocalEvidenceStore
+from src.incident_analysis_audit import InMemoryIncidentAnalysisAuditLog
+from src.incident_analysis_repository import InMemoryIncidentAnalysisRepository
 from src.incident_repository import IncidentRepository, JsonIncidentRepository
 from src.memory_store import JsonMemoryStore, MemoryStore
 from src.retrieval_session import RetrievalSession
@@ -556,6 +558,8 @@ def test_main_orchestrates_conversation_loop(
     received_workflow_registry: WorkflowRegistry | None = None
     received_workflow_run_repository: WorkflowRunRepository | None = None
     received_workflow_executor: WorkflowExecutor | None = None
+    received_analysis_repository: InMemoryIncidentAnalysisRepository | None = None
+    received_analysis_audit_log: InMemoryIncidentAnalysisAuditLog | None = None
 
     monkeypatch.setattr(main_module, "setup_logging", lambda: logger)
     monkeypatch.setattr(
@@ -614,6 +618,8 @@ def test_main_orchestrates_conversation_loop(
         workflow_registry: WorkflowRegistry,
         workflow_run_repository: WorkflowRunRepository,
         workflow_executor: WorkflowExecutor,
+        analysis_repository: InMemoryIncidentAnalysisRepository,
+        analysis_audit_log: InMemoryIncidentAnalysisAuditLog,
     ) -> None:
         nonlocal received_client, received_settings, received_logger, received_memory_store
         nonlocal received_active_memory_context
@@ -624,6 +630,7 @@ def test_main_orchestrates_conversation_loop(
         nonlocal received_tool_registry, received_tool_repository, received_tool_executor
         nonlocal received_workflow_registry, received_workflow_run_repository
         nonlocal received_workflow_executor
+        nonlocal received_analysis_repository, received_analysis_audit_log
         received_client = client
         received_settings = settings
         received_logger = logger
@@ -642,6 +649,8 @@ def test_main_orchestrates_conversation_loop(
         received_workflow_registry = workflow_registry
         received_workflow_run_repository = workflow_run_repository
         received_workflow_executor = workflow_executor
+        received_analysis_repository = analysis_repository
+        received_analysis_audit_log = analysis_audit_log
 
     monkeypatch.setattr(
         main_module,
@@ -678,4 +687,7 @@ def test_main_orchestrates_conversation_loop(
     assert isinstance(received_workflow_run_repository, JsonWorkflowRunRepository)
     assert received_workflow_run_repository.file_path == workflow_path
     assert isinstance(received_workflow_executor, WorkflowExecutor)
+    assert isinstance(received_analysis_repository, InMemoryIncidentAnalysisRepository)
+    assert received_analysis_repository.analysis_count() == 0
+    assert isinstance(received_analysis_audit_log, InMemoryIncidentAnalysisAuditLog)
     assert received_workflow_registry.count() >= 2
