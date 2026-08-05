@@ -160,10 +160,8 @@ def test_registry_and_child_dispatch_match_both_directions() -> None:
         child_dispatch_ids=CHILD_DISPATCH_IMPLEMENTATION_IDS,
     )
     for definition in registry.list_all():
-        if definition.tool_id in {"file-sha256", "compare-sha256"}:
+        if definition.tool_id in {"file-sha256", "compare-sha256", "text-search"}:
             assert definition.process_isolation == "eligible"
-        if definition.tool_id == "text-search":
-            assert definition.process_isolation == "prohibited"
 
 
 def test_envelope_exact_keys_and_bounds() -> None:

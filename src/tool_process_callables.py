@@ -22,7 +22,11 @@ from src.config import (
     VERSION,
 )
 from src.tool_common import ToolValidationError
-from src.tool_process_file_tools import run_compare_sha256, run_file_sha256
+from src.tool_process_file_tools import (
+    run_compare_sha256,
+    run_file_sha256,
+    run_text_search,
+)
 
 
 class ProcessSafeToolError(ToolValidationError):
@@ -94,4 +98,5 @@ PROCESS_SAFE_CALLABLES: dict[str, Any] = {
     "impl_simulated_log_check": run_simulated_log_check,
     "impl_file_sha256": run_file_sha256,
     "impl_compare_sha256": run_compare_sha256,
+    "impl_text_search": run_text_search,
 }

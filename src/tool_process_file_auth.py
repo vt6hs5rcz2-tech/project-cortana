@@ -14,6 +14,8 @@ from typing import Any
 from src.config import (
     MAX_PROCESS_FILE_AUTHORIZATION_PATH_CHARS,
     MAX_TOOL_FILE_BYTES,
+    MAX_TOOL_TEXT_SEARCH_MATCHES,
+    MAX_TOOL_TEXT_SEARCH_QUERY_CHARS,
 )
 from src.tool_common import ToolValidationError, validate_sha256_digest
 from src.tool_definition import DefensiveToolDefinition
@@ -49,6 +51,9 @@ FILE_AUTHORIZATION_KEYS: frozenset[str] = frozenset(
 _FILE_SHA256_PARAM_KEYS: frozenset[str] = frozenset({"file_authorization"})
 _COMPARE_SHA256_PARAM_KEYS: frozenset[str] = frozenset(
     {"file_authorization", "expected_sha256"}
+)
+_TEXT_SEARCH_PARAM_KEYS: frozenset[str] = frozenset(
+    {"file_authorization", "query", "max_matches"}
 )
 _MAX_IDENTITY_UINT = (2**64) - 1
 
@@ -204,6 +209,22 @@ def validate_file_tool_process_parameters(
             "expected_sha256": expected,
         }
 
+    if implementation_identifier == "impl_text_search":
+        if keys != _TEXT_SEARCH_PARAM_KEYS:
+            raise ToolProcessError(
+                "text-search process parameters keys are not an exact match."
+            )
+        if "path" in keys:
+            raise ToolProcessError("Raw path fields are not permitted.")
+        auth = validate_file_authorization(parameters["file_authorization"])
+        query = _validate_text_search_query(parameters["query"])
+        max_matches = _validate_text_search_max_matches(parameters["max_matches"])
+        return {
+            "file_authorization": auth.to_exact_dict(),
+            "query": query,
+            "max_matches": max_matches,
+        }
+
     raise ToolProcessError("Unsupported process-isolated file tool.")
 
 
@@ -257,21 +278,55 @@ def build_isolated_file_tool_parameters(
             implementation,
             {"file_authorization": authorization.to_exact_dict()},
         )
-    expected = validate_sha256_digest(
-        str(request.normalized_parameters["expected_sha256"])
-    )
-    return validate_file_tool_process_parameters(
-        implementation,
-        {
-            "file_authorization": authorization.to_exact_dict(),
-            "expected_sha256": expected,
-        },
-    )
+    if implementation == "impl_compare_sha256":
+        expected = validate_sha256_digest(
+            str(request.normalized_parameters["expected_sha256"])
+        )
+        return validate_file_tool_process_parameters(
+            implementation,
+            {
+                "file_authorization": authorization.to_exact_dict(),
+                "expected_sha256": expected,
+            },
+        )
+    if implementation == "impl_text_search":
+        query = str(request.normalized_parameters["query"])
+        raw_max = request.normalized_parameters.get(
+            "max_matches",
+            MAX_TOOL_TEXT_SEARCH_MATCHES,
+        )
+        max_matches = int(raw_max)
+        max_matches = min(max(max_matches, 1), MAX_TOOL_TEXT_SEARCH_MATCHES)
+        return validate_file_tool_process_parameters(
+            implementation,
+            {
+                "file_authorization": authorization.to_exact_dict(),
+                "query": query,
+                "max_matches": max_matches,
+            },
+        )
+    raise ToolProcessError("Unsupported process-isolated file tool.")
 
 
 def safe_filename_from_authorization(authorization: FileAuthorization) -> str:
     """Return basename-only display name from authorization data."""
     return filename_only(authorization.canonical_path)
+
+
+def _validate_text_search_query(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise ToolProcessError("query must be a non-empty string.")
+    if len(value) > MAX_TOOL_TEXT_SEARCH_QUERY_CHARS:
+        raise ToolProcessError("query exceeds the maximum length.")
+    return value
+
+
+def _validate_text_search_max_matches(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ToolProcessError("max_matches must be an integer.")
+    if value < 1 or value > MAX_TOOL_TEXT_SEARCH_MATCHES:
+        raise ToolProcessError("max_matches is outside the allowed range.")
+    return value
 
 
 def _matching_authorized_root(scope: AuthorizedScope, resolved: Path) -> str:

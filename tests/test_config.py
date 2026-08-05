@@ -300,7 +300,11 @@ def test_process_resource_governance_defaults_disabled() -> None:
     from src.config import (
         MAX_PROCESS_FILE_AUTHORIZATION_PATH_CHARS,
         MAX_PROCESS_IPC_REQUEST_BYTES,
+        MAX_TOOL_TEXT_SEARCH_PENDING_LINE_CHARS,
+        MAX_TOOL_TEXT_SEARCH_QUERY_CHARS,
     )
 
     assert MAX_PROCESS_FILE_AUTHORIZATION_PATH_CHARS == 4_096
     assert MAX_PROCESS_IPC_REQUEST_BYTES == 24_576
+    assert MAX_TOOL_TEXT_SEARCH_QUERY_CHARS == 200
+    assert MAX_TOOL_TEXT_SEARCH_PENDING_LINE_CHARS == 65_536

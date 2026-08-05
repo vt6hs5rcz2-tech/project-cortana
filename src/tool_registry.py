@@ -8,6 +8,7 @@ from src.config import (
     MAX_TOOL_OUTPUT_CHARS,
     MAX_TOOL_TEXT_SEARCH_MATCHES,
     MAX_TOOL_TEXT_SEARCH_PREVIEW_CHARS,
+    MAX_TOOL_TEXT_SEARCH_QUERY_CHARS,
 )
 from src.tool_common import ToolValidationError, validate_tool_id
 from src.tool_definition import (
@@ -225,7 +226,7 @@ def _builtin_tool_definitions() -> list[DefensiveToolDefinition]:
                     required=True,
                     description="Literal search string.",
                     minimum_length=1,
-                    maximum_length=200,
+                    maximum_length=MAX_TOOL_TEXT_SEARCH_QUERY_CHARS,
                     sensitive=True,
                 ),
                 create_parameter_definition(
@@ -243,6 +244,7 @@ def _builtin_tool_definitions() -> list[DefensiveToolDefinition]:
             supports_dry_run=True,
             enabled=True,
             implementation_identifier="impl_text_search",
+            process_isolation="eligible",
         ),
         create_tool_definition(
             tool_id="compare-sha256",

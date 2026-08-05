@@ -18,7 +18,7 @@ Project Cortana is an early software milestone focused on:
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 - Optional process-isolated execution for a tiny allowlisted defensive tool subset
 - Optional Windows Job Object resource governance for process-isolated tools
-- Optional process-isolated file integrity tools (`file-sha256`, `compare-sha256`) using the Windows safe-open foundation
+- Optional process-isolated file tools (`file-sha256`, `compare-sha256`, `text-search`) using the Windows safe-open foundation
 - Trusted defensive playbook orchestration over allowlisted Milestone 9 tools
 - Durable workflow-run and workflow-audit history with optional authorized incident linkage
 - Optional controlled security analyst assistance over sanitized single-incident packets
@@ -250,7 +250,7 @@ Behavior and limits:
 - The AI does not select tools and does not execute tools.
 - All file-based tools are read-only. They reject symlinks/reparse points and never delete, modify, or execute target files.
 - Built-in tools remain bounded and read-only. With process isolation disabled (default), execution uses in-process worker threads: timeouts stop the caller from waiting, but workers are not forcibly terminated, and late completion is never published.
-- Milestone 13 optionally enables process-isolated execution for a tiny allowlisted subset (`system-summary`, `simulated-log-check`) via `subprocess.Popen` and schema-validated JSON IPC. File-touching tools remain process-isolation prohibited. See the process-isolation section below.
+- Milestone 13 optionally enables process-isolated execution for a tiny allowlisted subset (`system-summary`, `simulated-log-check`) via `subprocess.Popen` and schema-validated JSON IPC. Milestones 15–16 extend isolation to reviewed file tools under dual gates. See the process-isolation sections below.
 - Evidence and incident systems remain separate unless a request explicitly links an existing incident ID as metadata.
 - Tool-control persistence uses atomic UTF-8 JSON outside the Git repository.
 - Atomic writes do not coordinate concurrent Cortana processes. Use one application instance per tool-control repository. Cross-process locking is not implemented yet.
@@ -273,7 +273,7 @@ Initial process-isolation eligible tools:
 - `system-summary`
 - `simulated-log-check`
 
-File-touching tools (`file-sha256`, `compare-sha256`, `text-search`), repository-backed tools (`incident-summary`), and all other tools remain `process_isolation=prohibited`.
+In Milestone 13, all file-touching tools remained `process_isolation=prohibited`. Milestones 15–16 later make `file-sha256`, `compare-sha256`, and `text-search` eligible under dual feature gates. Repository-backed tools (`incident-summary`) and all other tools remain prohibited.
 
 Architecture notes:
 
@@ -334,7 +334,7 @@ Safe file-opening foundation (`src/tool_process_safe_open.py`):
 - Captures and verifies Windows file identity (volume serial + file indexes), not path strings alone
 - When an authorized root is supplied, containment is checked before open on the caller path and again after open using a path independently derived from the handle via `GetFinalPathNameByHandle`
 - Plain `open()` / `os.open()` are not the secure boundary
-- Milestone 15 wires this foundation into process-isolated `file-sha256` and `compare-sha256` only
+- Milestones 15–16 wire this foundation into process-isolated `file-sha256`, `compare-sha256`, and `text-search`
 
 ### Controlled process-isolated file integrity tools (Milestone 15)
 
@@ -353,30 +353,57 @@ Routing:
 - file safe-open unavailable while file-tool isolation is enabled → fail closed in the parent before the child request is sent
 - `PROCESS_RESOURCE_LIMITS_ENABLED` remains an independent optional Job Object protection
 
-Eligible tools:
+Eligible tools (Milestone 15–16):
 
 - `file-sha256` → `process_isolation=eligible`
 - `compare-sha256` → `process_isolation=eligible` (still one authorized file path + one expected SHA-256 digest; not a two-file tool)
+- `text-search` → `process_isolation=eligible` (Milestone 16; third and final currently registered file tool eligible for process isolation)
 
-All other file-touching tools (including `text-search`) remain `process_isolation=prohibited`.
+All other file-touching tools remain `process_isolation=prohibited`.
 
 Security properties:
 
 - Parent validates schema/scope, then captures immutable file authorization (canonical path, authorized root, volume serial, file indexes, size, baseline last-write time)
 - Child receives exact-key nested `file_authorization` only; never scope/repository/approval/AI objects
 - Child hashes via streaming `hash_sha256_from_safe_handle` (`ReadFile` + `hashlib.update`); full-file buffering is not used for hashing
+- Child text-search uses incremental UTF-8 decoding (`errors="replace"`), bounded pending-line assembly, and literal case-sensitive line search; full-file buffering is not used
 - After EOF, the same handle is re-queried; size/identity/last-write changes fail closed as `failed` / `FileChangedDuringRead`
 - Identity mismatch fails closed as `failed` / `IdentityMismatch`
 - Oversized files fail closed as `failed` / `FileTooLarge`
-- Results expose basename-only filename fields (`filename_only`); canonical paths, roots, and identity fields never appear in results, audits, workflow records, or incident notes
+- Hash results expose basename-only `filename_only`; text-search keeps the existing `filename` basename field
+- Canonical paths, roots, identity fields, and search queries never appear in audits, workflow records, or incident notes
+- Match previews may appear only in the intended tool result `matches` list, not in audit logs
 - In-process open remains in `tool_safe_files.py`; isolated open remains in `tool_process_safe_open.py`
+
+### Controlled process-isolated text search (Milestone 16)
+
+Milestone 16 extends the dual-gated file-isolation path to the existing read-only `text-search` tool without redesigning its public interface.
+
+Preserved behavior:
+
+- one authorized file path, one literal query, optional `max_matches`
+- case-sensitive, non-regex, line-oriented search
+- UTF-8 decoding with `errors="replace"`; binary files are not specially rejected
+- bounded by `MAX_TOOL_FILE_BYTES`, `MAX_TOOL_TEXT_SEARCH_MATCHES`, and `MAX_TOOL_TEXT_SEARCH_PREVIEW_CHARS`
+- existing result shape (`filename`, `match_count`, `truncated`, `matches[{line_number, preview}]`)
+
+Isolated-path specifics:
+
+- requires both `PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED` and `PROCESS_FILE_TOOL_ISOLATION_ENABLED`
+- reuses unchanged `FileAuthorization` and `safe_open_for_read`
+- streams via incremental decoder and bounded pending-line memory (`MAX_TOOL_TEXT_SEARCH_PENDING_LINE_CHARS`)
+- queries and matched snippets are sensitive; they must not enter audit entries
+- hitting `max_matches` remains success with `truncated=True`, not an error
+- in-process fallback remains when either isolation flag is off
 
 Documented limitations:
 
 - File tools remain read-only
-- Only `file-sha256` and `compare-sha256` are process-isolation eligible
+- Only `file-sha256`, `compare-sha256`, and `text-search` are process-isolation eligible
 - `compare-sha256` remains one file plus an expected digest
-- Full paths are internal authorization data only
+- `text-search` remains literal and case-sensitive; invalid UTF-8 becomes replacement characters
+- Pending-line memory is bounded; pathologically long lines discard overflow with bounded overlap
+- Full paths and search queries are internal/sensitive authorization or parameter data
 - Hard links cannot be distinguished from another name for the same underlying file identity
 - Sparse files report logical size
 - Concurrent modification is detected using post-read size and last-write-time re-checks; this cannot guarantee protection against every filesystem or endpoint-security behavior

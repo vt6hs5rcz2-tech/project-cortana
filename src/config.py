@@ -133,6 +133,12 @@ MAX_TOOL_FILE_BYTES = 10 * 1024 * 1024
 MAX_TOOL_OUTPUT_CHARS = 8_000
 MAX_TOOL_TEXT_SEARCH_MATCHES = 50
 MAX_TOOL_TEXT_SEARCH_PREVIEW_CHARS = 120
+# Bound for one assembled line during process-isolated text-search streaming.
+# Much larger than preview length, large enough for realistic logs, far below
+# MAX_TOOL_FILE_BYTES so a no-newline file cannot grow memory without bound.
+MAX_TOOL_TEXT_SEARCH_PENDING_LINE_CHARS = 65_536
+# Existing tool schema bound for the literal search query.
+MAX_TOOL_TEXT_SEARCH_QUERY_CHARS = 200
 MAX_TOOL_TIMEOUT_SECONDS = 30
 DEFAULT_TOOL_TIMEOUT_SECONDS = 10
 MAX_TOOL_LIST_PREVIEW_CHARS = 120
@@ -149,7 +155,9 @@ MAX_PROCESS_DIAGNOSTIC_STDERR_BYTES = 4_096
 MAX_PROCESS_PARAMETER_COUNT = 16
 MAX_PROCESS_PARAMETER_NAME_CHARS = 64
 MAX_PROCESS_PARAMETER_STRING_CHARS = 2_000
-MAX_PROCESS_PARAMETER_NESTING_DEPTH = 2
+# Depth 3 is required for text-search structured results:
+# structured_data → matches[] → {line_number, preview} → scalar values.
+MAX_PROCESS_PARAMETER_NESTING_DEPTH = 3
 MAX_PROCESS_FILE_AUTHORIZATION_PATH_CHARS = 4_096
 PROCESS_IPC_SCHEMA_VERSION = 1
 

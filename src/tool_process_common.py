@@ -20,6 +20,7 @@ PROCESS_SAFE_FILE_IMPLEMENTATION_IDS: frozenset[str] = frozenset(
     {
         "impl_file_sha256",
         "impl_compare_sha256",
+        "impl_text_search",
     }
 )
 
@@ -27,6 +28,7 @@ PROCESS_SAFE_FILE_TOOL_IDS: frozenset[str] = frozenset(
     {
         "file-sha256",
         "compare-sha256",
+        "text-search",
     }
 )
 

@@ -179,9 +179,9 @@ def test_eligibility_only_reviewed_file_tools() -> None:
     registry = build_default_tool_registry()
     assert registry.require("file-sha256").process_isolation == "eligible"
     assert registry.require("compare-sha256").process_isolation == "eligible"
-    assert registry.require("text-search").process_isolation == "prohibited"
+    assert registry.require("text-search").process_isolation == "eligible"
     assert PROCESS_SAFE_FILE_IMPLEMENTATION_IDS <= PROCESS_SAFE_IMPLEMENTATION_IDS
-    assert {"file-sha256", "compare-sha256"} <= PROCESS_SAFE_TOOL_IDS
+    assert {"file-sha256", "compare-sha256", "text-search"} <= PROCESS_SAFE_TOOL_IDS
     assert CHILD_DISPATCH_IMPLEMENTATION_IDS == PROCESS_SAFE_IMPLEMENTATION_IDS
 
 
@@ -321,17 +321,18 @@ def test_envelope_accepts_file_authorization_shape() -> None:
 
 def test_streaming_hash_no_full_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
     payload = b"abc" * 1000
+    modules = _fake_win32(
+        volume=1,
+        size_bytes=len(payload),
+        index_high=1,
+        index_low=2,
+        write_time=9,
+        handle_path=r"C:\Cases\sample.txt",
+        payload=payload,
+    )
     monkeypatch.setattr(
         "src.tool_process_safe_open._require_win32_modules",
-        lambda: _fake_win32(
-            volume=1,
-            size_bytes=len(payload),
-            index_high=1,
-            index_low=2,
-            write_time=9,
-            handle_path=r"C:\Cases\sample.txt",
-            payload=payload,
-        ),
+        lambda: modules,
     )
     monkeypatch.setattr("src.tool_process_safe_open.os.name", "nt")
     file_identity = create_windows_file_identity(
@@ -375,12 +376,19 @@ def test_streaming_hash_no_full_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
                 list_append = True
     assert joined is False
     assert list_append is False
-    assert "chunks" not in ast.unparse(hash_fn)
+    rendered = ast.unparse(hash_fn)
+    assert "chunks" not in rendered
+    assert "assert_safe_handle_unchanged_after_read" in rendered
+    assert "GetFileInformationByHandle" not in rendered
+    assert "File identity changed during read." not in rendered
+    assert "Bytes read do not match open-time size." not in rendered
 
     result = hash_sha256_from_safe_handle(opened)  # type: ignore[arg-type]
     assert isinstance(result, FileHashResult)
     assert result.sha256_hex == hashlib.sha256(payload).hexdigest()
     assert result.size_bytes == len(payload)
+    assert result.final_size_bytes == len(payload)
+    assert result.final_last_write_time_filetime == 9
     assert HASH_CHUNK_SIZE == 1024 * 1024
 
 
@@ -388,6 +396,7 @@ def test_streaming_hash_no_full_buffer(monkeypatch: pytest.MonkeyPatch) -> None:
     "mutation,match",
     [
         ({"size_bytes": 6}, "size"),
+        ({"size_bytes": 3}, "size"),
         ({"write_time": 999}, "last-write"),
         ({"volume": 99}, "identity"),
         ({"index_low": 999}, "identity"),
@@ -399,18 +408,19 @@ def test_post_read_change_detection(
     match: str,
 ) -> None:
     payload = b"hello"
+    modules = _fake_win32(
+        volume=1,
+        size_bytes=len(payload),
+        index_high=1,
+        index_low=2,
+        write_time=9,
+        handle_path=r"C:\Cases\sample.txt",
+        payload=payload,
+        mutate_after_read=mutation,
+    )
     monkeypatch.setattr(
         "src.tool_process_safe_open._require_win32_modules",
-        lambda: _fake_win32(
-            volume=1,
-            size_bytes=len(payload),
-            index_high=1,
-            index_low=2,
-            write_time=9,
-            handle_path=r"C:\Cases\sample.txt",
-            payload=payload,
-            mutate_after_read=mutation,
-        ),
+        lambda: modules,
     )
     monkeypatch.setattr("src.tool_process_safe_open.os.name", "nt")
     file_identity = create_windows_file_identity(

@@ -81,12 +81,12 @@ def test_file_tool_isolation_flag_defaults_false() -> None:
     assert PROCESS_FILE_TOOL_ISOLATION_ENABLED is False
 
 
-def test_non_hash_file_tools_remain_ineligible() -> None:
+def test_non_file_tools_remain_ineligible_for_file_isolation() -> None:
     registry = build_default_tool_registry()
     assert registry.require("file-sha256").process_isolation == "eligible"
     assert registry.require("compare-sha256").process_isolation == "eligible"
-    for tool_id in ("text-search", "incident-summary"):
-        assert registry.require(tool_id).process_isolation == "prohibited"
+    assert registry.require("text-search").process_isolation == "eligible"
+    assert registry.require("incident-summary").process_isolation == "prohibited"
 
 
 def test_forbidden_path_formats() -> None:
@@ -384,11 +384,12 @@ def test_no_tool_dispatch_in_safe_open_module() -> None:
 
 
 def test_safe_open_callers_are_allowlisted() -> None:
-    """Only reviewed Milestone 15 modules may import the safe-open foundation."""
+    """Only reviewed Milestone 15/16 modules may import the safe-open foundation."""
     allowed = {
         Path("src") / "tool_process_file_auth.py",
         Path("src") / "tool_process_file_tools.py",
         Path("src") / "tool_process_adapter.py",
+        Path("src") / "tool_process_text_search.py",
     }
     callers: list[Path] = []
     for path in Path("src").rglob("*.py"):

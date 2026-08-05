@@ -262,7 +262,7 @@ def test_file_tools_remain_prohibited() -> None:
     registry = build_default_tool_registry()
     assert registry.require("file-sha256").process_isolation == "eligible"
     assert registry.require("compare-sha256").process_isolation == "eligible"
-    assert registry.require("text-search").process_isolation == "prohibited"
+    assert registry.require("text-search").process_isolation == "eligible"
 
 
 def test_assign_before_communicate(
