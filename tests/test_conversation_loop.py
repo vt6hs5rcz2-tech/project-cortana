@@ -26,7 +26,7 @@ from src.tool_repository import JsonToolControlRepository, ToolControlRepository
 from src.workflow_executor import WorkflowExecutor
 from src.workflow_registry import WorkflowRegistry
 from src.workflow_repository import (
-    InMemoryWorkflowRunRepository,
+    JsonWorkflowRunRepository,
     WorkflowRunRepository,
 )
 
@@ -537,6 +537,7 @@ def test_main_orchestrates_conversation_loop(
     incident_path = tmp_path / "incidents.json"
     evidence_dir = tmp_path / "evidence"
     tool_path = tmp_path / "tool_control.json"
+    workflow_path = tmp_path / "workflow_runs.json"
     received_client: OpenAIClient | None = None
     received_settings: Settings | None = None
     received_logger: logging.Logger | None = None
@@ -586,6 +587,11 @@ def test_main_orchestrates_conversation_loop(
         main_module,
         "get_default_tool_control_repository_file_path",
         lambda: tool_path,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "get_default_workflow_repository_file_path",
+        lambda: workflow_path,
     )
 
     def fake_run_conversation_loop(
@@ -669,6 +675,7 @@ def test_main_orchestrates_conversation_loop(
     assert received_tool_repository.file_path == tool_path
     assert isinstance(received_tool_executor, DefensiveToolExecutor)
     assert isinstance(received_workflow_registry, WorkflowRegistry)
-    assert isinstance(received_workflow_run_repository, InMemoryWorkflowRunRepository)
+    assert isinstance(received_workflow_run_repository, JsonWorkflowRunRepository)
+    assert received_workflow_run_repository.file_path == workflow_path
     assert isinstance(received_workflow_executor, WorkflowExecutor)
     assert received_workflow_registry.count() >= 2

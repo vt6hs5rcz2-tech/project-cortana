@@ -6,7 +6,14 @@ import logging
 from dataclasses import dataclass
 from typing import Callable
 
-from src.config import MAX_WORKFLOW_RUNTIME_SECONDS, MAX_WORKFLOW_STEPS
+from src.config import (
+    MAX_NOTE_TEXT_LENGTH,
+    MAX_WORKFLOW_RUNTIME_SECONDS,
+    MAX_WORKFLOW_STEPS,
+    WORKFLOW_INCIDENT_LINKAGE_ENABLED,
+)
+from src.incident_repository import IncidentRepository
+from src.security_note import create_incident_note
 from src.tool_approval import ToolApprovalRecord, assert_approval_allows_execution
 from src.tool_common import (
     ToolAuthorizationError,
@@ -90,6 +97,7 @@ class WorkflowExecutor:
         tool_executor: DefensiveToolExecutor,
         tool_repository: ToolControlRepository,
         run_repository: WorkflowRunRepository,
+        incident_repository: IncidentRepository | None = None,
         clock: WorkflowClock | None = None,
         max_runtime_seconds: int = MAX_WORKFLOW_RUNTIME_SECONDS,
         max_steps: int = MAX_WORKFLOW_STEPS,
@@ -99,6 +107,7 @@ class WorkflowExecutor:
         self._tool_executor = tool_executor
         self._tool_repository = tool_repository
         self._run_repository = run_repository
+        self._incident_repository = incident_repository
         self._clock = clock or SystemWorkflowClock()
         self._max_runtime_seconds = max_runtime_seconds
         self._max_steps = max_steps
@@ -131,6 +140,7 @@ class WorkflowExecutor:
             dry_run=request.dry_run,
             status="pending",
             scope_id=request.scope_id,
+            incident_id=request.incident_id,
             created_timestamp=created_at,
             cancellation_requested=request.cancellation_requested,
         )
@@ -142,6 +152,7 @@ class WorkflowExecutor:
             safe_details={
                 "dry_run": request.dry_run,
                 "status": run.status,
+                "incident_linked": request.incident_id is not None,
             },
         )
 
@@ -164,6 +175,7 @@ class WorkflowExecutor:
                     dry_run=run.dry_run,
                     status="pending",
                     scope_id=run.scope_id,
+                    incident_id=run.incident_id,
                     step_results=run.step_results,
                     created_timestamp=run.created_timestamp,
                     cancellation_requested=run.cancellation_requested,
@@ -205,6 +217,7 @@ class WorkflowExecutor:
             dry_run=request.dry_run,
             status="pending",
             scope_id=request.scope_id,
+            incident_id=request.incident_id,
             step_results=(),
             created_timestamp=run.created_timestamp,
             cancellation_requested=request.cancellation_requested,
@@ -291,6 +304,7 @@ class WorkflowExecutor:
                 "step_count": len(saved.step_results),
             },
         )
+        self._maybe_append_incident_note(request=request, run=saved)
         return saved
 
     def _preflight(self, request: WorkflowRunRequest) -> _PreflightContext:
@@ -309,6 +323,7 @@ class WorkflowExecutor:
 
         scope = self._require_scope(request.scope_id)
         assert_scope_usable(scope)
+        self._assert_incident_link_authorized(request, scope)
 
         tool_definitions: list[DefensiveToolDefinition] = []
         for step in workflow.steps:
@@ -712,6 +727,74 @@ class WorkflowExecutor:
         if is_expired(scope.expires_at):
             raise WorkflowAuthorizationError("Authorized scope has expired.")
         return scope
+
+    def _assert_incident_link_authorized(
+        self,
+        request: WorkflowRunRequest,
+        scope: AuthorizedScope,
+    ) -> None:
+        """Validate optional incident linkage before step one."""
+        if request.incident_id is None:
+            return
+        if not WORKFLOW_INCIDENT_LINKAGE_ENABLED:
+            raise WorkflowPolicyError("Workflow incident linkage is disabled.")
+        if self._incident_repository is None:
+            raise WorkflowPolicyError(
+                "Incident repository is required for workflow incident linkage."
+            )
+        incident = self._incident_repository.get_incident(request.incident_id)
+        if incident is None:
+            raise WorkflowValidationError("Linked incident was not found.")
+        assert_incident_authorized(scope, request.incident_id)
+
+    def _maybe_append_incident_note(
+        self,
+        *,
+        request: WorkflowRunRequest,
+        run: WorkflowRunResult,
+    ) -> None:
+        """Append exactly one safe summary note for a completed linked run."""
+        if not WORKFLOW_INCIDENT_LINKAGE_ENABLED:
+            return
+        if run.incident_id is None or request.incident_id is None:
+            return
+        if run.status != "completed":
+            return
+        if self._incident_repository is None:
+            return
+
+        # Revalidate existence and scope authorization before appending.
+        incident = self._incident_repository.get_incident(run.incident_id)
+        if incident is None:
+            logger.error(
+                "Workflow incident note skipped; incident missing run_id=%s",
+                run.run_id,
+            )
+            return
+        try:
+            scope = self._require_scope(run.scope_id)
+            assert_incident_authorized(scope, run.incident_id)
+        except (ToolAuthorizationError, WorkflowAuthorizationError):
+            logger.error(
+                "Workflow incident note skipped; authorization failed run_id=%s",
+                run.run_id,
+            )
+            return
+
+        completed_at = run.completed_timestamp or self._clock.utc_now_iso()
+        note_text = (
+            f"Workflow playbook '{run.playbook_name}' v{run.playbook_version} "
+            f"run {run.run_id} finished with status {run.status} at {completed_at}."
+        )
+        if len(note_text) > MAX_NOTE_TEXT_LENGTH:
+            note_text = f"{note_text[:MAX_NOTE_TEXT_LENGTH]}..."
+        note = create_incident_note(
+            incident_id=run.incident_id,
+            author="workflow-orchestration",
+            text=note_text,
+            note_type="summary",
+        )
+        self._incident_repository.add_note(note)
 
     def _budget_exhausted(self, started_monotonic: float) -> bool:
         elapsed = self._clock.monotonic() - started_monotonic

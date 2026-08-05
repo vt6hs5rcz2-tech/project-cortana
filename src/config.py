@@ -132,6 +132,13 @@ WORKFLOW_PARALLEL_EXECUTION_ENABLED = False
 WORKFLOW_BACKGROUND_EXECUTION_ENABLED = False
 WORKFLOW_NESTED_PLAYBOOKS_ENABLED = False
 
+# Persistent workflow operations and incident linkage (Milestone 11)
+WORKFLOW_RUN_PERSISTENCE_ENABLED = True
+WORKFLOW_INCIDENT_LINKAGE_ENABLED = True
+WORKFLOW_SINGLE_INSTANCE_COORDINATION_ENABLED = False
+WORKFLOW_REPOSITORY_SCHEMA_VERSION = 1
+WORKFLOW_REPOSITORY_FILENAME = "workflow_runs.json"
+
 MAX_WORKFLOW_STEPS = 8
 MAX_WORKFLOW_RUNTIME_SECONDS = 60
 MAX_WORKFLOW_NAME_LENGTH = 100
@@ -141,6 +148,7 @@ MAX_WORKFLOW_STEP_ID_LENGTH = 100
 MAX_WORKFLOW_STEP_DESCRIPTION_LENGTH = 500
 MAX_WORKFLOW_ERROR_MESSAGE_LENGTH = 500
 MAX_WORKFLOW_RUNS_RETAINED = 100
+MAX_WORKFLOW_AUDIT_ENTRIES_RETAINED = 500
 MAX_WORKFLOW_LIST_PREVIEW_CHARS = 120
 MAX_WORKFLOW_AUDIT_DETAILS_LENGTH = 1_000
 
@@ -183,3 +191,8 @@ def get_default_evidence_store_dir_path() -> Path:
 def get_default_tool_control_repository_file_path() -> Path:
     """Return the default user-local path for the tool-control repository JSON file."""
     return _default_app_data_dir() / TOOL_CONTROL_REPOSITORY_FILENAME
+
+
+def get_default_workflow_repository_file_path() -> Path:
+    """Return the default user-local path for the workflow repository JSON file."""
+    return _default_app_data_dir() / WORKFLOW_REPOSITORY_FILENAME

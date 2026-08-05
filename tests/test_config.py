@@ -49,13 +49,19 @@ from src.config import (
     WORKFLOW_BACKGROUND_EXECUTION_ENABLED,
     WORKFLOW_DYNAMIC_STEP_BINDING_ENABLED,
     WORKFLOW_EXTERNAL_PLAYBOOK_LOADING_ENABLED,
+    WORKFLOW_INCIDENT_LINKAGE_ENABLED,
     WORKFLOW_NESTED_PLAYBOOKS_ENABLED,
     WORKFLOW_PARALLEL_EXECUTION_ENABLED,
+    WORKFLOW_REPOSITORY_FILENAME,
+    WORKFLOW_REPOSITORY_SCHEMA_VERSION,
+    WORKFLOW_RUN_PERSISTENCE_ENABLED,
+    WORKFLOW_SINGLE_INSTANCE_COORDINATION_ENABLED,
     get_default_document_vault_file_path,
     get_default_evidence_store_dir_path,
     get_default_incident_repository_file_path,
     get_default_memory_file_path,
     get_default_tool_control_repository_file_path,
+    get_default_workflow_repository_file_path,
 )
 
 
@@ -214,3 +220,27 @@ def test_defensive_workflow_orchestration_capabilities_are_centralized() -> None
     assert WORKFLOW_AI_CONTEXT_INJECTION_ENABLED is False
     assert MAX_WORKFLOW_STEPS == 8
     assert MAX_WORKFLOW_RUNTIME_SECONDS == 60
+
+
+def test_workflow_persistence_and_linkage_capabilities_are_independent() -> None:
+    """Milestone 11 persistence and incident linkage must be separately flagged."""
+    assert WORKFLOW_RUN_PERSISTENCE_ENABLED is True
+    assert WORKFLOW_INCIDENT_LINKAGE_ENABLED is True
+    assert WORKFLOW_SINGLE_INSTANCE_COORDINATION_ENABLED is False
+    assert WORKFLOW_REPOSITORY_SCHEMA_VERSION == 1
+    assert WORKFLOW_REPOSITORY_FILENAME == "workflow_runs.json"
+
+
+def test_default_workflow_repository_path_is_outside_project_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default workflow repository storage should use a user-local path."""
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Example\AppData\Local")
+
+    path = get_default_workflow_repository_file_path()
+
+    assert path.name == WORKFLOW_REPOSITORY_FILENAME
+    assert "ProjectCortana" in path.parts
+    assert PROJECT_ROOT not in path.parents
+    assert "src" not in path.parts
+    assert "tests" not in path.parts

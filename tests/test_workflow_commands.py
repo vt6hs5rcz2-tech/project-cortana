@@ -68,6 +68,8 @@ def _services(tmp_path: Path) -> WorkflowServices:
             tool_registry=registry,
             tool_repository=tools_repo,
             tool_executor=tool_executor,
+            incident_repository=incidents,
+            persist_runs=False,
         )
     )
     return (
@@ -242,6 +244,8 @@ def test_partial_workflow_injection_uses_all_or_nothing_consistent_services(
         tool_registry=registry,
         tool_repository=tools_repo,
         tool_executor=tool_executor,
+        incident_repository=incidents,
+        persist_runs=False,
     )
 
     # Seed a scope through the shared tool repository.
@@ -331,6 +335,7 @@ def test_help_about_status_include_workflow(tmp_path: Path) -> None:
     assert "/playbooks" in HELP_TEXT
     assert "/playbook-run" in HELP_TEXT
     assert "playbook" in ABOUT_TEXT.lower()
+    assert "incident linkage" in ABOUT_TEXT.lower() or "durable workflow" in ABOUT_TEXT.lower()
 
     services = _services(tmp_path)
     _result, repo, runs, _services_out = _run(
@@ -350,5 +355,175 @@ def test_help_about_status_include_workflow(tmp_path: Path) -> None:
         workflow_run_repository=runs,
     )
     assert "Defensive workflow orchestration: enabled" in status
+    assert "Workflow run persistence: enabled" in status
+    assert "Workflow incident linkage: enabled" in status
+    assert "Workflow single-instance coordination: disabled" in status
+    assert "Maximum retained workflow runs: 100" in status
+    assert "Maximum retained workflow audit entries: 500" in status
     assert "External playbook loading: disabled" in status
     assert WORKFLOW_COMMAND_NAMES
+
+
+def test_playbook_run_with_incident_and_status_display(tmp_path: Path) -> None:
+    from src.security_incident import create_security_incident
+
+    client = cast(OpenAIClient, CountingClient())
+    services = _services(tmp_path)
+    incidents = services[1]
+    incident = incidents.add_incident(
+        create_security_incident(
+            title="Command linked case",
+            summary="Summary",
+            severity="low",
+        )
+    )
+    _scope_result, repo, _runs, services = _run(
+        "/scope-new Baseline | system-summary,simulated-log-check | none | review",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    scope_id = repo.list_scopes()[0].scope_id
+
+    run_result, _repo, runs, services = _run(
+        f"/playbook-run platform-baseline | {scope_id} | {incident.incident_id}",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    assert "Mode: dry-run" in (run_result.message or "")
+    assert incident.incident_id in (run_result.message or "")
+    assert runs.list_runs()[0].incident_id == incident.incident_id
+    assert runs.list_runs()[0].status == "completed"
+    assert len(incidents.list_notes(incident.incident_id)) == 1
+
+    status, _repo, _runs, services = _run(
+        f"/playbook-status {runs.list_runs()[0].run_id}",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    assert f"Incident ID: {incident.incident_id}" in (status.message or "")
+
+    execute_result, _repo, runs, _services_out = _run(
+        (
+            f"/playbook-run platform-baseline --execute | {scope_id} | "
+            f"{incident.incident_id}"
+        ),
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    assert "Mode: execute" in (execute_result.message or "")
+    assert cast(CountingClient, client).calls == 0
+
+
+def test_playbook_run_rejects_malformed_incident_fields(tmp_path: Path) -> None:
+    client = cast(OpenAIClient, CountingClient())
+    services = _services(tmp_path)
+    _scope_result, repo, _runs, services = _run(
+        "/scope-new Baseline | system-summary,simulated-log-check | none | review",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    scope_id = repo.list_scopes()[0].scope_id
+
+    blank_incident, _repo, _runs, services = _run(
+        f"/playbook-run platform-baseline | {scope_id} |    ",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    assert "Usage" in (blank_incident.message or "")
+
+    extra_fields, _repo, _runs, services = _run(
+        f"/playbook-run platform-baseline | {scope_id} | {scope_id} | extra",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    assert "Usage" in (extra_fields.message or "")
+
+    unknown_incident, _repo, runs, _services_out = _run(
+        (
+            f"/playbook-run platform-baseline | {scope_id} | "
+            "11111111-1111-1111-1111-111111111111"
+        ),
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    # Preflight failure still returns a run message, not AI content.
+    assert "Playbook run preflight_failed" in (unknown_incident.message or "")
+    assert runs.list_runs()[-1].status == "preflight_failed"
+    assert cast(CountingClient, client).calls == 0
+
+
+def test_playbook_run_rejects_duplicate_execute_flag(tmp_path: Path) -> None:
+    client = cast(OpenAIClient, CountingClient())
+    services = _services(tmp_path)
+    _scope_result, repo, runs, services = _run(
+        "/scope-new Baseline | system-summary,simulated-log-check | none | review",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    scope_id = repo.list_scopes()[0].scope_id
+    before = len(runs.list_runs())
+
+    result, _repo, runs, _services_out = _run(
+        f"/playbook-run platform-baseline --execute --execute | {scope_id}",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    assert "Usage" in (result.message or "")
+    assert len(runs.list_runs()) == before
+    assert cast(CountingClient, client).calls == 0
+
+
+def test_playbook_run_rejects_unknown_flag(tmp_path: Path) -> None:
+    client = cast(OpenAIClient, CountingClient())
+    services = _services(tmp_path)
+    _scope_result, repo, runs, services = _run(
+        "/scope-new Baseline | system-summary,simulated-log-check | none | review",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    scope_id = repo.list_scopes()[0].scope_id
+    before = len(runs.list_runs())
+
+    result, _repo, runs, _services_out = _run(
+        f"/playbook-run platform-baseline --foo | {scope_id}",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    assert "Usage" in (result.message or "")
+    assert len(runs.list_runs()) == before
+    assert cast(CountingClient, client).calls == 0
+
+
+def test_playbook_run_rejects_malformed_non_uuid_incident_id(tmp_path: Path) -> None:
+    client = cast(OpenAIClient, CountingClient())
+    services = _services(tmp_path)
+    _scope_result, repo, runs, services = _run(
+        "/scope-new Baseline | system-summary,simulated-log-check | none | review",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    scope_id = repo.list_scopes()[0].scope_id
+    before = len(runs.list_runs())
+
+    result, _repo, runs, _services_out = _run(
+        f"/playbook-run platform-baseline | {scope_id} | not-a-uuid",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    assert "Usage" in (result.message or "")
+    assert len(runs.list_runs()) == before
+    assert cast(CountingClient, client).calls == 0

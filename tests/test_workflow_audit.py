@@ -14,7 +14,7 @@ from tests.workflow_helpers import make_executor, make_scope, workflow_registry
 
 
 def test_lifecycle_audit_order_and_forbidden_keys(tmp_path: Path) -> None:
-    executor, repo, _tools, _workflows, runs = make_executor(
+    executor, repo, _tools, _workflows, runs, _incidents = make_executor(
         tmp_path,
         workflows=workflow_registry(),
     )

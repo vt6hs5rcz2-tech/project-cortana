@@ -1,12 +1,18 @@
-"""Local slash-command handlers for Milestone 10 workflow orchestration."""
+"""Local slash-command handlers for Milestone 10/11 workflow orchestration."""
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
-from src.config import MAX_WORKFLOW_LIST_PREVIEW_CHARS
+from src.config import (
+    MAX_WORKFLOW_LIST_PREVIEW_CHARS,
+    WORKFLOW_INCIDENT_LINKAGE_ENABLED,
+    WORKFLOW_RUN_PERSISTENCE_ENABLED,
+    get_default_workflow_repository_file_path,
+)
 from src.incident_repository import IncidentRepository
 from src.security_commands import extract_command_argument, split_delimited_fields
 from src.tool_common import (
@@ -30,6 +36,7 @@ from src.workflow_executor import WorkflowExecutor
 from src.workflow_registry import WorkflowRegistry
 from src.workflow_repository import (
     InMemoryWorkflowRunRepository,
+    JsonWorkflowRunRepository,
     WorkflowRunRepository,
 )
 from src.workflow_request import create_workflow_run_request
@@ -52,15 +59,20 @@ WORKFLOW_COMMAND_NAMES = frozenset(
 
 PLAYBOOK_RUN_USAGE = (
     "Cortana: Usage: /playbook-run <name> | <scope-id> "
-    "or /playbook-run <name> --execute | <scope-id>"
+    "or /playbook-run <name> --execute | <scope-id> "
+    "or /playbook-run <name> | <scope-id> | <incident-id> "
+    "or /playbook-run <name> --execute | <scope-id> | <incident-id>"
 )
 PLAYBOOKS_EMPTY = "Cortana: No defensive playbooks are registered."
 EXECUTE_TOKEN = "--execute"
+INCIDENT_LINKAGE_DISABLED_MESSAGE = (
+    "Cortana: Workflow incident linkage is disabled."
+)
 
 
 @dataclass(frozen=True)
 class WorkflowCommandContext:
-    """Inputs available to Milestone 10 workflow command handlers."""
+    """Inputs available to Milestone 10/11 workflow command handlers."""
 
     message: str
     tool_registry: ToolRegistry
@@ -86,7 +98,7 @@ def handle_workflow_command(
     command_name: str,
     context: WorkflowCommandContext,
 ) -> WorkflowCommandResult | None:
-    """Dispatch a Milestone 10 workflow command, or return None when unknown."""
+    """Dispatch a workflow command, or return None when unknown."""
     handler = WORKFLOW_COMMAND_HANDLERS.get(command_name)
     if handler is None:
         return None
@@ -98,16 +110,34 @@ def create_default_workflow_services(
     tool_registry: ToolRegistry,
     tool_repository: ToolControlRepository,
     tool_executor: DefensiveToolExecutor,
+    incident_repository: IncidentRepository | None = None,
+    workflow_repository_file_path: Path | None = None,
+    persist_runs: bool | None = None,
 ) -> tuple[WorkflowRegistry, WorkflowRunRepository, WorkflowExecutor]:
-    """Create default in-memory workflow services with built-in playbooks."""
+    """Create default workflow services with built-in playbooks.
+
+    When ``persist_runs`` is None, ``WORKFLOW_RUN_PERSISTENCE_ENABLED`` selects
+    ``JsonWorkflowRunRepository`` or ``InMemoryWorkflowRunRepository``.
+    """
     workflow_registry = build_default_workflow_registry(tool_registry=tool_registry)
-    run_repository: WorkflowRunRepository = InMemoryWorkflowRunRepository()
+    use_persistence = (
+        WORKFLOW_RUN_PERSISTENCE_ENABLED if persist_runs is None else persist_runs
+    )
+    if use_persistence:
+        path = (
+            workflow_repository_file_path
+            or get_default_workflow_repository_file_path()
+        )
+        run_repository: WorkflowRunRepository = JsonWorkflowRunRepository(path)
+    else:
+        run_repository = InMemoryWorkflowRunRepository()
     workflow_executor = WorkflowExecutor(
         workflow_registry=workflow_registry,
         tool_registry=tool_registry,
         tool_executor=tool_executor,
         tool_repository=tool_repository,
         run_repository=run_repository,
+        incident_repository=incident_repository,
     )
     return workflow_registry, run_repository, workflow_executor
 
@@ -168,39 +198,74 @@ def _handle_playbook_show(context: WorkflowCommandContext) -> WorkflowCommandRes
     return WorkflowCommandResult(message="\n".join(lines))
 
 
+def _parse_playbook_run_argument(
+    argument: str,
+) -> tuple[str, bool, str, str | None] | None:
+    """Parse playbook-run grammar with optional trailing incident ID.
+
+    Returns ``(playbook_name, dry_run, scope_id, incident_id)``.
+    """
+    fields = split_delimited_fields(argument, 3)
+    incident_id: str | None
+    if fields is not None:
+        name_field, scope_id, incident_field = fields
+        if not incident_field.strip():
+            return None
+        incident_id = incident_field.strip()
+    else:
+        fields = split_delimited_fields(argument, 2)
+        if fields is None:
+            return None
+        name_field, scope_id = fields
+        incident_id = None
+
+    cleaned_scope = scope_id.strip()
+    # Reject delimiter residue left by trailing empty fields after argument strip.
+    if not cleaned_scope or "|" in cleaned_scope:
+        return None
+    if incident_id is not None and "|" in incident_id:
+        return None
+
+    name_tokens = name_field.split()
+    if len(name_tokens) == 1:
+        playbook_name = name_tokens[0]
+        if "|" in playbook_name:
+            return None
+        return playbook_name, True, cleaned_scope, incident_id
+    if len(name_tokens) == 2 and name_tokens[1] == EXECUTE_TOKEN:
+        playbook_name = name_tokens[0]
+        if "|" in playbook_name:
+            return None
+        return playbook_name, False, cleaned_scope, incident_id
+    return None
+
+
 def _handle_playbook_run(context: WorkflowCommandContext) -> WorkflowCommandResult:
     argument = extract_command_argument(context.message).strip()
     if not argument:
         return WorkflowCommandResult(message=PLAYBOOK_RUN_USAGE)
 
-    fields = split_delimited_fields(argument, 2)
-    if fields is None:
+    parsed = _parse_playbook_run_argument(argument)
+    if parsed is None:
         return WorkflowCommandResult(message=PLAYBOOK_RUN_USAGE)
 
-    name_field, scope_id = fields
-    name_tokens = name_field.split()
-    dry_run = True
-    if len(name_tokens) == 1:
-        playbook_name = name_tokens[0]
-    elif len(name_tokens) == 2 and name_tokens[1] == EXECUTE_TOKEN:
-        playbook_name = name_tokens[0]
-        dry_run = False
-    else:
-        return WorkflowCommandResult(message=PLAYBOOK_RUN_USAGE)
+    playbook_name, dry_run, scope_id, incident_id = parsed
+
+    if incident_id is not None and not WORKFLOW_INCIDENT_LINKAGE_ENABLED:
+        return WorkflowCommandResult(message=INCIDENT_LINKAGE_DISABLED_MESSAGE)
 
     try:
         context.workflow_registry.require(playbook_name)
-        scope = context.tool_repository.get_scope(scope_id.strip())
+        scope = context.tool_repository.get_scope(scope_id)
         if scope is None:
             return WorkflowCommandResult(
-                message=(
-                    f"Cortana: No saved scope found with ID '{scope_id.strip()}'."
-                )
+                message=f"Cortana: No saved scope found with ID '{scope_id}'."
             )
         run_request = create_workflow_run_request(
             playbook_name=playbook_name,
             scope_id=scope.scope_id,
             dry_run=dry_run,
+            incident_id=incident_id,
         )
         result = context.workflow_executor.run(run_request)
     except (
@@ -225,13 +290,14 @@ def _handle_playbook_run(context: WorkflowCommandContext) -> WorkflowCommandResu
         result.status,
         result.dry_run,
     )
-    return WorkflowCommandResult(
-        message=(
-            f"Cortana: Playbook run {result.status} ({result.run_id}). "
-            f"Playbook: {result.playbook_name} v{result.playbook_version}. "
-            f"Mode: {mode}. Steps recorded: {len(result.step_results)}."
-        )
+    message = (
+        f"Cortana: Playbook run {result.status} ({result.run_id}). "
+        f"Playbook: {result.playbook_name} v{result.playbook_version}. "
+        f"Mode: {mode}. Steps recorded: {len(result.step_results)}."
     )
+    if result.incident_id is not None:
+        message += f" Incident: {result.incident_id}."
+    return WorkflowCommandResult(message=message)
 
 
 def _handle_playbook_status(context: WorkflowCommandContext) -> WorkflowCommandResult:
@@ -260,8 +326,10 @@ def _handle_playbook_status(context: WorkflowCommandContext) -> WorkflowCommandR
         f"  Status: {run.status}",
         f"  Dry-run: {run.dry_run}",
         f"  Scope ID: {run.scope_id}",
-        f"  Steps recorded: {len(run.step_results)}",
     ]
+    if run.incident_id is not None:
+        lines.append(f"  Incident ID: {run.incident_id}")
+    lines.append(f"  Steps recorded: {len(run.step_results)}")
     if run.error_code is not None:
         lines.append(f"  Error code: {run.error_code}")
     for step in run.step_results:

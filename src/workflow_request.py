@@ -10,6 +10,7 @@ from src.tool_approval import ToolApprovalRecord, validate_tool_approval
 from src.tool_common import (
     require_non_blank_text,
     utc_timestamp,
+    validate_optional_uuid,
     validate_uuid,
 )
 from src.tool_request import ToolExecutionRequest, validate_tool_execution_request
@@ -31,6 +32,7 @@ class WorkflowRunRequest:
     requested_by: str
     created_timestamp: str
     dry_run: bool
+    incident_id: str | None
     step_tool_requests: dict[str, ToolExecutionRequest]
     step_approvals: dict[str, ToolApprovalRecord]
     cancellation_requested: bool
@@ -43,6 +45,7 @@ def create_workflow_run_request(
     playbook_version: str | None = None,
     requested_by: str = "local-user",
     dry_run: bool = True,
+    incident_id: str | None = None,
     step_tool_requests: Mapping[str, ToolExecutionRequest] | None = None,
     step_approvals: Mapping[str, ToolApprovalRecord] | None = None,
     cancellation_requested: bool = False,
@@ -58,6 +61,10 @@ def create_workflow_run_request(
     if playbook_version is not None and playbook_version.strip():
         cleaned_version = validate_playbook_version(playbook_version)
     cleaned_scope = validate_uuid(scope_id, field_name="Scope ID")
+    cleaned_incident = validate_optional_uuid(
+        incident_id,
+        field_name="Incident ID",
+    )
     cleaned_by = require_non_blank_text(
         requested_by,
         field_name="Requested by",
@@ -92,6 +99,7 @@ def create_workflow_run_request(
         requested_by=cleaned_by,
         created_timestamp=utc_timestamp(),
         dry_run=bool(dry_run),
+        incident_id=cleaned_incident,
         step_tool_requests=requests,
         step_approvals=approvals,
         cancellation_requested=bool(cancellation_requested),

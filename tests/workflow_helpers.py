@@ -59,26 +59,29 @@ def make_executor(
     workflows: WorkflowRegistry | None = None,
     clock: WorkflowClock | None = None,
     max_runtime_seconds: int = MAX_WORKFLOW_RUNTIME_SECONDS,
+    runs: InMemoryWorkflowRunRepository | None = None,
 ) -> tuple[
     WorkflowExecutor,
     JsonToolControlRepository,
     ToolRegistry,
     WorkflowRegistry,
     InMemoryWorkflowRunRepository,
+    JsonIncidentRepository,
 ]:
     resolved_tools = tools or tool_registry()
     repo = tool_repository(tmp_path)
     incidents = incident_repository(tmp_path)
     tool_exec = DefensiveToolExecutor(incident_repository=incidents)
     resolved_workflows = workflows or workflow_registry(resolved_tools)
-    runs = InMemoryWorkflowRunRepository()
+    run_repo = runs if runs is not None else InMemoryWorkflowRunRepository()
     executor = WorkflowExecutor(
         workflow_registry=resolved_workflows,
         tool_registry=resolved_tools,
         tool_executor=tool_exec,
         tool_repository=repo,
-        run_repository=runs,
+        run_repository=run_repo,
+        incident_repository=incidents,
         clock=clock,
         max_runtime_seconds=max_runtime_seconds,
     )
-    return executor, repo, resolved_tools, resolved_workflows, runs
+    return executor, repo, resolved_tools, resolved_workflows, run_repo, incidents

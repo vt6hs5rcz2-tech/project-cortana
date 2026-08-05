@@ -115,3 +115,44 @@ def test_no_json_yaml_playbook_loaders() -> None:
                     assert node.module.split(".", 1)[0] not in {"yaml", "toml"}
         assert "load_playbook" not in source
         assert "read_playbook" not in source
+
+
+def test_workflow_modules_forbid_evidence_custody_and_ai_imports() -> None:
+    forbidden_modules = {
+        "src.evidence_store",
+        "src.ai_service",
+        "src.openai_client",
+    }
+    forbidden_names = {
+        "EvidenceStore",
+        "LocalEvidenceStore",
+        "add_evidence",
+        "append_custody_entry",
+        "OpenAIClient",
+        "create_openai_client",
+    }
+    for path in WORKFLOW_MODULES:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in forbidden_modules:
+                pytest.fail(f"{path} imports {node.module}")
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name in forbidden_modules:
+                        pytest.fail(f"{path} imports {alias.name}")
+        for name in forbidden_names:
+            assert name not in source, f"{path} references {name}"
+
+
+def test_no_workflow_resume_or_background_scheduler_paths() -> None:
+    executor_source = Path("src/workflow_executor.py").read_text(encoding="utf-8")
+    assert "def resume" not in executor_source
+    assert "BackgroundScheduler" not in executor_source
+    assert "APScheduler" not in executor_source
+    assert "threading.Thread" not in executor_source
+    assert "subprocess" not in executor_source
+    repo_source = Path("src/workflow_repository.py").read_text(encoding="utf-8")
+    assert "ABANDONED_AFTER_RESTART_ERROR_CODE" in repo_source
+    assert "cannot be resumed" in repo_source.lower()
+    assert "abandoned" in Path("src/workflow_common.py").read_text(encoding="utf-8")

@@ -47,6 +47,8 @@ from src.config import (
     SEMANTIC_RETRIEVAL_ENABLED,
     SOURCE_MANIFEST_PERSISTENCE_ENABLED,
     DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED,
+    MAX_WORKFLOW_AUDIT_ENTRIES_RETAINED,
+    MAX_WORKFLOW_RUNS_RETAINED,
     TOOL_AUDIT_PERSISTENCE_ENABLED,
     TOOL_DRY_RUN_ENFORCEMENT_ENABLED,
     TOOL_HUMAN_APPROVAL_ENABLED,
@@ -56,8 +58,11 @@ from src.config import (
     WORKFLOW_BACKGROUND_EXECUTION_ENABLED,
     WORKFLOW_DYNAMIC_STEP_BINDING_ENABLED,
     WORKFLOW_EXTERNAL_PLAYBOOK_LOADING_ENABLED,
+    WORKFLOW_INCIDENT_LINKAGE_ENABLED,
     WORKFLOW_NESTED_PLAYBOOKS_ENABLED,
     WORKFLOW_PARALLEL_EXECUTION_ENABLED,
+    WORKFLOW_RUN_PERSISTENCE_ENABLED,
+    WORKFLOW_SINGLE_INSTANCE_COORDINATION_ENABLED,
 )
 from src.conversation import ConversationHistory
 from src.document import (
@@ -247,8 +252,9 @@ ABOUT_TEXT = (
     "local Knowledge Vault, source-grounded document questions, a local "
     "human-controlled security event, incident, indicator, evidence, and "
     "chain-of-custody foundation, a human-supervised defensive tool "
-    "framework with scope controls and approval, and trusted defensive "
-    "playbook orchestration over allowlisted tools."
+    "framework with scope controls and approval, trusted defensive playbook "
+    "orchestration over allowlisted tools, durable workflow-run history, and "
+    "optional authorized incident linkage for completed playbook runs."
 )
 
 CLEAR_CONFIRMATION = (
@@ -447,11 +453,12 @@ def _ephemeral_workflow_services(
     tool_repository: ToolControlRepository,
     tool_executor: DefensiveToolExecutor,
 ) -> tuple[WorkflowRegistry, WorkflowRunRepository, WorkflowExecutor]:
-    """Create disposable workflow services for tests that omit Milestone 10 injection."""
+    """Create disposable workflow services for tests that omit workflow injection."""
     return create_default_workflow_services(
         tool_registry=tool_registry,
         tool_repository=tool_repository,
         tool_executor=tool_executor,
+        persist_runs=False,
     )
 
 
@@ -1534,6 +1541,15 @@ def format_status(
         f"  Registered playbooks: {registered_playbook_count}\n"
         f"  Enabled playbooks: {enabled_playbook_count}\n"
         f"  Retained workflow runs: {retained_workflow_run_count}\n"
+        "  Workflow run persistence: "
+        f"{'enabled' if WORKFLOW_RUN_PERSISTENCE_ENABLED else 'disabled'}\n"
+        "  Workflow incident linkage: "
+        f"{'enabled' if WORKFLOW_INCIDENT_LINKAGE_ENABLED else 'disabled'}\n"
+        "  Workflow single-instance coordination: "
+        f"{'enabled' if WORKFLOW_SINGLE_INSTANCE_COORDINATION_ENABLED else 'disabled'}\n"
+        f"  Maximum retained workflow runs: {MAX_WORKFLOW_RUNS_RETAINED}\n"
+        "  Maximum retained workflow audit entries: "
+        f"{MAX_WORKFLOW_AUDIT_ENTRIES_RETAINED}\n"
         "  External playbook loading: "
         f"{'enabled' if WORKFLOW_EXTERNAL_PLAYBOOK_LOADING_ENABLED else 'disabled'}\n"
         "  Dynamic step binding: "

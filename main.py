@@ -13,6 +13,7 @@ from src.config import (
     get_default_incident_repository_file_path,
     get_default_memory_file_path,
     get_default_tool_control_repository_file_path,
+    get_default_workflow_repository_file_path,
 )
 from src.conversation_loop import run_conversation_loop
 from src.document_chunker import DocumentChunker
@@ -89,6 +90,8 @@ def main() -> None:
             tool_registry=tool_registry,
             tool_repository=tool_repository,
             tool_executor=tool_executor,
+            incident_repository=incident_repository,
+            workflow_repository_file_path=get_default_workflow_repository_file_path(),
         )
     )
 

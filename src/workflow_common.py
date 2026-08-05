@@ -31,6 +31,7 @@ WorkflowRunStatus = Literal[
     "denied",
     "timed_out",
     "cancelled",
+    "abandoned",
 ]
 WorkflowStepStatus = Literal[
     "pending",
@@ -70,6 +71,7 @@ WORKFLOW_RUN_STATUSES: frozenset[str] = frozenset(
         "denied",
         "timed_out",
         "cancelled",
+        "abandoned",
     }
 )
 WORKFLOW_STEP_STATUSES: frozenset[str] = frozenset(
@@ -111,7 +113,13 @@ WORKFLOW_TERMINAL_STATUSES: frozenset[str] = frozenset(
         "denied",
         "timed_out",
         "cancelled",
+        "abandoned",
     }
+)
+
+ABANDONED_AFTER_RESTART_ERROR_CODE = "AbandonedAfterRestart"
+ABANDONED_AFTER_RESTART_MESSAGE = (
+    "Workflow run was abandoned after process restart and cannot be resumed."
 )
 
 PLAYBOOK_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,62}$")

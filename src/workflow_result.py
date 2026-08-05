@@ -8,6 +8,7 @@ from src.config import MAX_WORKFLOW_ERROR_MESSAGE_LENGTH
 from src.tool_common import (
     utc_timestamp,
     validate_optional_utc_timestamp,
+    validate_optional_uuid,
     validate_tool_id,
     validate_utc_timestamp,
     validate_uuid,
@@ -55,6 +56,7 @@ class WorkflowRunResult:
     dry_run: bool
     status: WorkflowRunStatus
     scope_id: str
+    incident_id: str | None
     step_results: tuple[WorkflowStepResult, ...]
     created_timestamp: str
     started_timestamp: str | None
@@ -73,6 +75,7 @@ _ALLOWED_RUN_TRANSITIONS: dict[str, frozenset[str]] = {
             "denied",
             "timed_out",
             "failed",
+            "abandoned",
         }
     ),
     "preflight_failed": frozenset(),
@@ -83,6 +86,7 @@ _ALLOWED_RUN_TRANSITIONS: dict[str, frozenset[str]] = {
             "denied",
             "timed_out",
             "cancelled",
+            "abandoned",
         }
     ),
     "completed": frozenset(),
@@ -90,6 +94,7 @@ _ALLOWED_RUN_TRANSITIONS: dict[str, frozenset[str]] = {
     "denied": frozenset(),
     "timed_out": frozenset(),
     "cancelled": frozenset(),
+    "abandoned": frozenset(),
 }
 
 
@@ -184,6 +189,7 @@ def create_workflow_run_result(
     dry_run: bool,
     status: str,
     scope_id: str,
+    incident_id: str | None = None,
     step_results: list[WorkflowStepResult] | tuple[WorkflowStepResult, ...] = (),
     created_timestamp: str | None = None,
     started_timestamp: str | None = None,
@@ -201,6 +207,7 @@ def create_workflow_run_result(
             dry_run=bool(dry_run),
             status=status,  # type: ignore[arg-type]
             scope_id=scope_id,
+            incident_id=incident_id,
             step_results=tuple(step_results),
             created_timestamp=created_timestamp or utc_timestamp(),
             started_timestamp=started_timestamp,
@@ -232,6 +239,10 @@ def validate_workflow_run_result(result: WorkflowRunResult) -> WorkflowRunResult
         dry_run=bool(result.dry_run),
         status=status,  # type: ignore[arg-type]
         scope_id=validate_uuid(result.scope_id, field_name="Scope ID"),
+        incident_id=validate_optional_uuid(
+            result.incident_id,
+            field_name="Incident ID",
+        ),
         step_results=validated_steps,
         created_timestamp=validate_utc_timestamp(
             result.created_timestamp,
@@ -288,6 +299,7 @@ def transition_workflow_run_result(
             dry_run=result.dry_run,
             status=next_status,  # type: ignore[arg-type]
             scope_id=result.scope_id,
+            incident_id=result.incident_id,
             step_results=next_steps,
             created_timestamp=result.created_timestamp,
             started_timestamp=(
@@ -336,6 +348,7 @@ def append_step_result(
             dry_run=result.dry_run,
             status=result.status,
             scope_id=result.scope_id,
+            incident_id=result.incident_id,
             step_results=(*result.step_results, validated_step),
             created_timestamp=result.created_timestamp,
             started_timestamp=result.started_timestamp,

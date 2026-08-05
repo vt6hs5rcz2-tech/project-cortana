@@ -17,6 +17,7 @@ Project Cortana is an early software milestone focused on:
 - Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 - Trusted defensive playbook orchestration over allowlisted Milestone 9 tools
+- Durable workflow-run and workflow-audit history with optional authorized incident linkage
 
 ## Conversation history, persistent memory, active context, and documents
 
@@ -29,7 +30,7 @@ Project Cortana is an early software milestone focused on:
 | Retrieved document passages | Current request/session only | Selected only by `/search-docs` (local) or `/ask-docs` (AI) | Only selected chunks through `/ask-docs` |
 | Security incidents and evidence | Survives restarts | Created only through explicit local Milestone 8 commands | Never in this milestone |
 | Defensive tool scopes, requests, approvals, results, and audits | Survives restarts | Created only through explicit local Milestone 9 commands | Never in this milestone |
-| Workflow/playbook run state and workflow audits | Current process only | Created only through explicit local Milestone 10 commands | Never in this milestone |
+| Workflow/playbook run state and workflow audits | Survives restarts when persistence is enabled; otherwise current process only | Created only through explicit local Milestone 10/11 commands | Never in this milestone |
 
 Persistent memories, Knowledge Vault documents, incident records, and evidence copies are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories.
 
@@ -271,6 +272,18 @@ Multi-field Milestone 8 commands use the delimiter ` | ` so paths and free text 
 
 Milestone 10 adds a bounded, deterministic workflow layer that coordinates multiple existing approved defensive tools through trusted, predefined playbooks.
 
+Milestone 11 adds durable workflow-run and workflow-audit history, plus optional linkage of an authorized workflow run to an existing incident. This is record durability and traceability only: workflows remain non-resumable, non-autonomous, and do not create evidence or custody records.
+
+### Milestone 11 release note (default behavior change)
+
+**Upgrading from Milestone 10:** Milestone 11 enables durable workflow-run persistence and incident linkage by default (`WORKFLOW_RUN_PERSISTENCE_ENABLED = True`, `WORKFLOW_INCIDENT_LINKAGE_ENABLED = True`).
+
+- Workflow runs and workflow audit entries now persist across application restarts in a user-local JSON repository.
+- Non-terminal runs found after restart are marked `abandoned` and are never resumed, retried, or continued.
+- Incident linkage is enabled by default; a completed linked run may append one bounded summary note to an existing authorized incident.
+- Either capability can be disabled independently through its config flag. When both are disabled, Milestone 10 in-memory behavior remains unchanged.
+- Persisted workflow data uses a reduced safe projection and excludes raw parameters, `structured_data`, approvals, secrets, and file contents.
+
 Built-in playbooks:
 
 | Playbook | Steps |
@@ -285,8 +298,13 @@ Behavior and limits:
 - `DefensiveToolExecutor` remains the sole tool execution boundary.
 - Dry-run is the default. `/playbook-run <name> | <scope-id>` calls `plan_dry_run` for each reached step and never calls `execute`.
 - Explicit execution uses `/playbook-run <name> --execute | <scope-id>` and still requires scope, policy, and step-specific fingerprint-bound approvals where Milestone 9 requires them.
+- Optional incident linkage uses `/playbook-run <name> | <scope-id> | <incident-id>` or `/playbook-run <name> --execute | <scope-id> | <incident-id>`.
+- Incident linkage reuses `assert_incident_authorized` and requires the incident to exist before step one. On successful completion, exactly one bounded `summary` incident note is appended.
 - Execution is strictly sequential and stop-on-failure. There is no parallel execution, silent retry, nested playbook, dynamic output piping, background worker, or arbitrary scripting interface.
-- Workflow run state is retained in memory only for the current process.
+- When `WORKFLOW_RUN_PERSISTENCE_ENABLED` is true, workflow runs and workflow audit entries are stored in a dedicated user-local JSON file using atomic writes. Persisted records use a strict safe-field allowlist and never store raw tool structured data, parameters, paths, or approval fingerprints.
+- Persisted non-terminal runs from a previous process lifetime are deterministically marked `abandoned` on load. Workflows are never resumed, retried, or continued after restart.
+- One application instance should access the workflow repository file at a time. Atomic writes protect against partial-write corruption; they do not provide full concurrent multi-process coordination. Last-writer-wins is not a supported operating mode.
+- `WORKFLOW_RUN_PERSISTENCE_ENABLED` and `WORKFLOW_INCIDENT_LINKAGE_ENABLED` are independent. When both are disabled, Milestone 10 in-memory behavior remains unchanged.
 - Workflow commands never call the AI service.
 
 Example:
@@ -294,6 +312,7 @@ Example:
 ```text
 /scope-new Baseline lab | system-summary,simulated-log-check | none | Local baseline review
 /playbook-run platform-baseline | <scope-id>
+/playbook-run platform-baseline | <scope-id> | <incident-id>
 /playbook-status <run-id>
 ```
 
@@ -362,6 +381,8 @@ Example:
 | `/playbook-show <name>` | Show one defensive playbook |
 | `/playbook-run <name> \| <scope-id>` | Dry-run one trusted playbook |
 | `/playbook-run <name> --execute \| <scope-id>` | Execute one trusted playbook after validations |
+| `/playbook-run <name> \| <scope-id> \| <incident-id>` | Dry-run one trusted playbook linked to an existing incident |
+| `/playbook-run <name> --execute \| <scope-id> \| <incident-id>` | Execute one trusted playbook linked to an existing incident |
 | `/playbook-status <run-id>` | Show one workflow run |
 | `/about` | Describe Project Cortana and this milestone |
 | `/exit` | End the session cleanly |
@@ -379,7 +400,7 @@ Notes:
 - `/ask-docs` sends only selected retrieved chunks, never the entire vault and never incident records.
 - Milestone 8 security commands never call the AI service.
 - Milestone 9 defensive tool commands never call the AI service.
-- Milestone 10 workflow/playbook commands never call the AI service.
+- Milestone 10/11 workflow/playbook commands never call the AI service.
 - Absolute path-like input such as `/etc/passwd` is treated as conversation content for the AI, not as a local command, unless it is explicitly provided as an `/add-document` or `/evidence-register` argument.
 
 ## Active memory limits

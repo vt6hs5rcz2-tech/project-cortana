@@ -84,7 +84,7 @@ def _two_step_registry(tools: ToolRegistry) -> WorkflowRegistry:
 def test_dry_run_is_sequential_and_never_executes(tmp_path: Path) -> None:
     tools = build_default_tool_registry()
     workflows = _two_step_registry(tools)
-    executor, repo, _tools, _workflows, runs = make_executor(
+    executor, repo, _tools, _workflows, runs, _incidents = make_executor(
         tmp_path,
         tools=tools,
         workflows=workflows,
@@ -117,7 +117,7 @@ def test_dry_run_is_sequential_and_never_executes(tmp_path: Path) -> None:
 def test_stop_after_first_failure_no_retries(tmp_path: Path) -> None:
     tools = build_default_tool_registry()
     workflows = _two_step_registry(tools)
-    executor, repo, _tools, _workflows, _runs = make_executor(
+    executor, repo, _tools, _workflows, _runs, _incidents = make_executor(
         tmp_path,
         tools=tools,
         workflows=workflows,
@@ -155,7 +155,7 @@ def test_stop_after_first_failure_no_retries(tmp_path: Path) -> None:
 def test_scope_disabled_after_first_step_denies_next(tmp_path: Path) -> None:
     tools = build_default_tool_registry()
     workflows = _two_step_registry(tools)
-    executor, repo, _tools, _workflows, _runs = make_executor(
+    executor, repo, _tools, _workflows, _runs, _incidents = make_executor(
         tmp_path,
         tools=tools,
         workflows=workflows,
@@ -190,7 +190,7 @@ def test_scope_disabled_after_first_step_denies_next(tmp_path: Path) -> None:
 def test_preflight_denies_when_scope_missing_a_tool(tmp_path: Path) -> None:
     tools = build_default_tool_registry()
     workflows = _two_step_registry(tools)
-    executor, repo, _tools, _workflows, _runs = make_executor(
+    executor, repo, _tools, _workflows, _runs, _incidents = make_executor(
         tmp_path,
         tools=tools,
         workflows=workflows,
@@ -217,7 +217,7 @@ def test_runtime_budget_enforced_live(tmp_path: Path) -> None:
     tools = build_default_tool_registry()
     workflows = _two_step_registry(tools)
     clock = ManualWorkflowClock()
-    executor, repo, _tools, _workflows, _runs = make_executor(
+    executor, repo, _tools, _workflows, _runs, _incidents = make_executor(
         tmp_path,
         tools=tools,
         workflows=workflows,
@@ -249,7 +249,7 @@ def test_runtime_budget_enforced_live(tmp_path: Path) -> None:
 def test_explicit_execute_uses_execute_after_validation(tmp_path: Path) -> None:
     tools = build_default_tool_registry()
     workflows = _two_step_registry(tools)
-    executor, repo, _tools, _workflows, _runs = make_executor(
+    executor, repo, _tools, _workflows, _runs, _incidents = make_executor(
         tmp_path,
         tools=tools,
         workflows=workflows,
@@ -303,7 +303,7 @@ def test_approval_required_step_blocked_without_record(tmp_path: Path) -> None:
             tool_registry=tools,
         )
     )
-    executor, repo, _tools, _workflows, _runs = make_executor(
+    executor, repo, _tools, _workflows, _runs, _incidents = make_executor(
         tmp_path,
         tools=tools,
         workflows=workflows,
@@ -351,7 +351,7 @@ def test_approval_fingerprint_and_expiry_and_denied(tmp_path: Path) -> None:
             tool_registry=tools,
         )
     )
-    executor, repo, _tools, _workflows, _runs = make_executor(
+    executor, repo, _tools, _workflows, _runs, _incidents = make_executor(
         tmp_path,
         tools=tools,
         workflows=workflows,
@@ -462,7 +462,7 @@ def test_valid_step_approval_allows_execute(tmp_path: Path) -> None:
             tool_registry=tools,
         )
     )
-    executor, repo, _tools, _workflows, _runs = make_executor(
+    executor, repo, _tools, _workflows, _runs, _incidents = make_executor(
         tmp_path,
         tools=tools,
         workflows=workflows,
@@ -502,7 +502,7 @@ def test_valid_step_approval_allows_execute(tmp_path: Path) -> None:
 def test_tool_disabled_after_first_step_denies_next(tmp_path: Path) -> None:
     tools = build_default_tool_registry()
     workflows = _two_step_registry(tools)
-    executor, repo, _tools, _workflows, _runs = make_executor(
+    executor, repo, _tools, _workflows, _runs, _incidents = make_executor(
         tmp_path,
         tools=tools,
         workflows=workflows,
@@ -537,7 +537,7 @@ def test_tool_disabled_after_first_step_denies_next(tmp_path: Path) -> None:
 def test_cancellation_before_next_step(tmp_path: Path) -> None:
     tools = build_default_tool_registry()
     workflows = _two_step_registry(tools)
-    executor, repo, _tools, _workflows, _runs = make_executor(
+    executor, repo, _tools, _workflows, _runs, _incidents = make_executor(
         tmp_path,
         tools=tools,
         workflows=workflows,
