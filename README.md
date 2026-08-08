@@ -23,16 +23,17 @@ Project Cortana is an early software milestone focused on:
 - Durable workflow-run and workflow-audit history with optional authorized incident linkage
 - Optional controlled security analyst assistance over sanitized single-incident packets
 - Coordinated evidence↔incident linking, incident-scoped evidence text-search request creation, and AI-off bounded incident context display
+- Deterministic ordinary-language routing for a small high-confidence set of existing capabilities (slash commands remain privileged)
 
 ## Conversation history, persistent memory, active context, and documents
 
 | Kind | Lifetime | How it changes | Sent to AI? |
 | --- | --- | --- | --- |
-| Temporary conversation history | Current session only | Built from chat turns; cleared with `/clear` | Yes, as prior turns |
-| Explicit persistent memory | Survives restarts | Saved only through local `/remember` commands | No, unless activated |
+| Temporary conversation history | Current session only | Built from unmatched chat turns; cleared with `/clear`; slash commands and orchestrator-handled routes are excluded | Yes, as prior turns |
+| Explicit persistent memory | Survives restarts | Saved only through local `/remember` or explicit NL `remember …` routing | No, unless activated |
 | Active memory context | Current session only | Selected with `/recall`; cleared with `/release`, `/release-all`, or restart | Yes, only while active |
 | Knowledge Vault documents | Survives restarts | Ingested only through local `/add-document` | No by default |
-| Retrieved document passages | Current request/session only | Selected only by `/search-docs` (local) or `/ask-docs` (AI) | Only selected chunks through `/ask-docs` |
+| Retrieved document passages | Current request/session only | Selected by `/search-docs` (local), explicit NL document-search routing (lexical only), or `/ask-docs` (AI) | Only selected chunks through `/ask-docs` |
 | Security incidents and evidence | Survives restarts | Created only through explicit local Milestone 8 commands | Never in this milestone |
 | Defensive tool scopes, requests, approvals, results, and audits | Survives restarts | Created only through explicit local Milestone 9 commands | Never in this milestone |
 | Workflow/playbook run state and workflow audits | Survives restarts when persistence is enabled; otherwise current process only | Created only through explicit local Milestone 10/11 commands | Never in this milestone |
@@ -375,6 +376,34 @@ Security properties:
 - Canonical paths, roots, identity fields, and search queries never appear in audits, workflow records, or incident notes
 - Match previews may appear only in the intended tool result `matches` list, not in audit logs
 - In-process open remains in `tool_safe_files.py`; isolated open remains in `tool_process_safe_open.py`
+
+### Unified assistant orchestration (Milestone 18)
+
+Milestone 18 adds a small deterministic natural-language orchestration layer for high-confidence ordinary-language requests. It is integration only: no autonomous agent, no AI intent classifier, and no replacement for the slash-command control plane.
+
+Behavior:
+
+- Slash input never enters the orchestrator; existing slash dispatch is unchanged
+- Only non-slash input is offered to `UnifiedAssistantOrchestrator`
+- Matching uses whole-message anchored parsers (`re.fullmatch` / exact allowlists)
+- Ambiguous phrases fall through to ordinary AI conversation unchanged
+- Orchestrator-handled requests and results are excluded from ordinary AI conversation history
+
+High-confidence operational routes:
+
+- Memory write: `remember <text>`, `remember: <text>`, `remember - <text>` (reuses `MemoryStore`; does not activate memory)
+- Memory read: exact phrases `list my memories`, `list memories`, `show my memories`
+- Document search: anchored `find document(s) about …` / `search document(s) for …` / `search my documents for …` — **lexical search only** via `LexicalDocumentRetriever` (not `/ask-docs`, no AI client)
+- Incident read: exact `show incident <UUID>` (read-only `IncidentRepository`; incident contents stay out of conversation history)
+
+Guidance-only routes (static text; no executors, no AI, no request construction):
+
+- Evidence search → points to controlled `/evidence-search`
+- Tools → points to controlled `/tool-*`
+- Workflows → points to controlled `/playbook-*`
+- Analyst assistance → points to controlled `/incident-analysis-*` and existing feature gates
+
+Not routed by natural language in this milestone: evidence-search request construction, ask-docs, ingestion/deletion, tool/workflow/AI analysis execution, note saving, shell/network/remediation, and other consequential flows remain explicit controlled commands.
 
 ### Evidence text search and bounded incident context (Milestone 17)
 

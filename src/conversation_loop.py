@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient, generate_response
+from src.assistant_orchestrator import UnifiedAssistantOrchestrator
 from src.commands import CommandOutcome, handle_slash_command, parse_slash_input
 from src.conversation import (
     STARTUP_GREETING,
@@ -124,6 +125,12 @@ def run_conversation_loop(
     chunker = document_chunker or DocumentChunker()
     retriever = document_retriever or LexicalDocumentRetriever(chunker=chunker)
     session = retrieval_session or RetrievalSession()
+    orchestrator = UnifiedAssistantOrchestrator(
+        memory_store=memory_store,
+        document_vault=document_vault,
+        document_retriever=retriever,
+        incident_repository=incident_repository,
+    )
 
     print(STARTUP_GREETING)
 
@@ -170,6 +177,11 @@ def run_conversation_loop(
             if command_result.outcome == CommandOutcome.EXIT:
                 end_conversation(logger=logger)
                 return
+            continue
+
+        orchestration_result = orchestrator.try_handle(user_message)
+        if orchestration_result is not None:
+            print(orchestration_result.safe_user_message)
             continue
 
         handle_message(
