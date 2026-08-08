@@ -57,6 +57,7 @@ COMMAND_INCIDENT = "incident"
 COMMAND_INCIDENT_STATUS = "incident-status"
 COMMAND_INCIDENT_LINK_EVENT = "incident-link-event"
 COMMAND_INCIDENT_UNLINK_EVENT = "incident-unlink-event"
+COMMAND_INCIDENT_LINK_EVIDENCE = "incident-link-evidence"
 COMMAND_INDICATOR_ADD = "indicator-add"
 COMMAND_INDICATORS = "indicators"
 COMMAND_INDICATOR = "indicator"
@@ -80,6 +81,7 @@ SECURITY_COMMAND_NAMES = frozenset(
         COMMAND_INCIDENT_STATUS,
         COMMAND_INCIDENT_LINK_EVENT,
         COMMAND_INCIDENT_UNLINK_EVENT,
+        COMMAND_INCIDENT_LINK_EVIDENCE,
         COMMAND_INDICATOR_ADD,
         COMMAND_INDICATORS,
         COMMAND_INDICATOR,
@@ -121,6 +123,9 @@ INCIDENT_LINK_USAGE = (
 )
 INCIDENT_UNLINK_USAGE = (
     "Cortana: Usage: /incident-unlink-event <incident-id> <event-id>"
+)
+INCIDENT_LINK_EVIDENCE_USAGE = (
+    "Cortana: Usage: /incident-link-evidence <incident-id> <evidence-id>"
 )
 
 INDICATOR_ADD_USAGE = (
@@ -615,6 +620,51 @@ def _handle_incident_unlink_event(
     )
 
 
+def _handle_incident_link_evidence(
+    context: SecurityCommandContext,
+) -> SecurityCommandResult:
+    """Link registered evidence to an incident on both sides (idempotent)."""
+    argument = extract_command_argument(context.message).strip()
+    parts = argument.split()
+    if len(parts) != 2:
+        return SecurityCommandResult(message=INCIDENT_LINK_EVIDENCE_USAGE)
+
+    incident_id_argument, evidence_id_argument = parts
+    try:
+        incident_id = validate_security_id(
+            incident_id_argument,
+            field_name="Incident ID",
+        )
+        evidence_id = validate_security_id(
+            evidence_id_argument,
+            field_name="Evidence ID",
+        )
+        incident, evidence = context.incident_repository.link_evidence_to_incident(
+            incident_id,
+            evidence_id,
+        )
+    except InvalidSecurityIdError:
+        return SecurityCommandResult(
+            message="Cortana: Incident and evidence IDs must be valid UUIDs."
+        )
+    except IncidentRelationshipError as error:
+        return SecurityCommandResult(message=error.user_message)
+    except IncidentStorageError as error:
+        return SecurityCommandResult(message=error.user_message)
+
+    logger.info(
+        "Linked evidence to incident incident_id=%s evidence_id=%s",
+        incident.incident_id,
+        evidence.evidence_id,
+    )
+    return SecurityCommandResult(
+        message=(
+            f"Cortana: Linked evidence '{evidence.evidence_id}' to incident "
+            f"'{incident.incident_id}'."
+        )
+    )
+
+
 def _handle_indicator_add(context: SecurityCommandContext) -> SecurityCommandResult:
     """Add one indicator with type, value, and confidence."""
     fields = split_delimited_fields(extract_command_argument(context.message), 3)
@@ -1096,6 +1146,7 @@ SECURITY_COMMAND_HANDLERS: dict[str, SecurityCommandHandler] = {
     COMMAND_INCIDENT_STATUS: _handle_incident_status,
     COMMAND_INCIDENT_LINK_EVENT: _handle_incident_link_event,
     COMMAND_INCIDENT_UNLINK_EVENT: _handle_incident_unlink_event,
+    COMMAND_INCIDENT_LINK_EVIDENCE: _handle_incident_link_evidence,
     COMMAND_INDICATOR_ADD: _handle_indicator_add,
     COMMAND_INDICATORS: _handle_indicators,
     COMMAND_INDICATOR: _handle_indicator,

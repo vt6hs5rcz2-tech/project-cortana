@@ -107,6 +107,13 @@ class IncidentRepository(Protocol):
     ) -> tuple[SecurityIncident, SecurityEvent]:
         """Unlink an event and incident on both sides consistently."""
 
+    def link_evidence_to_incident(
+        self,
+        incident_id: str,
+        evidence_id: str,
+    ) -> tuple[SecurityIncident, EvidenceRecord]:
+        """Link evidence and incident on both sides consistently (idempotent)."""
+
     def list_indicators(self) -> list[SecurityIndicator]:
         """Return saved indicators in storage order."""
 
@@ -331,6 +338,52 @@ class JsonIncidentRepository:
         state.events[self._event_index(state, event_id) or 0] = updated_event
         self._persist(state)
         return updated_incident, updated_event
+
+    def link_evidence_to_incident(
+        self,
+        incident_id: str,
+        evidence_id: str,
+    ) -> tuple[SecurityIncident, EvidenceRecord]:
+        """Link evidence to an incident on both sides (idempotent)."""
+        state = self._clone_state(self._ensure_loaded())
+        incident = self._find_incident(state, incident_id)
+        evidence = self._find_evidence(state, evidence_id)
+        if incident is None:
+            raise IncidentRelationshipError("Cortana: Incident was not found.")
+        if evidence is None:
+            raise IncidentRelationshipError("Cortana: Evidence was not found.")
+
+        already_on_incident = evidence_id in incident.evidence_ids
+        already_on_evidence = incident_id in evidence.related_incident_ids
+        if already_on_incident and already_on_evidence:
+            return incident, evidence
+
+        next_evidence_ids = list(incident.evidence_ids)
+        if not already_on_incident:
+            next_evidence_ids.append(evidence_id)
+
+        next_related_incident_ids = list(evidence.related_incident_ids)
+        if not already_on_evidence:
+            next_related_incident_ids.append(incident_id)
+
+        updated_incident = replace_security_incident(
+            incident,
+            evidence_ids=next_evidence_ids,
+        )
+        updated_evidence = replace_evidence_record(
+            evidence,
+            related_incident_ids=next_related_incident_ids,
+        )
+        incident_index = self._incident_index(state, incident_id)
+        evidence_index = self._evidence_index(state, evidence_id)
+        if incident_index is None:
+            raise IncidentRelationshipError("Cortana: Incident was not found.")
+        if evidence_index is None:
+            raise IncidentRelationshipError("Cortana: Evidence was not found.")
+        state.incidents[incident_index] = updated_incident
+        state.evidence[evidence_index] = updated_evidence
+        self._persist(state)
+        return updated_incident, updated_evidence
 
     def list_indicators(self) -> list[SecurityIndicator]:
         """Return a copy of saved indicators."""

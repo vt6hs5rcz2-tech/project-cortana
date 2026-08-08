@@ -50,6 +50,14 @@ class EvidenceStore(Protocol):
     def has_stored_copy(self, evidence_id: str) -> bool:
         """Return whether a stored evidence object exists for the ID."""
 
+    def resolve_stored_evidence_path(self, evidence_id: str) -> Path:
+        """Return the absolute path of one stored evidence object for tool use.
+
+        Intended only for authorized defensive tool operations. Callers must
+        authorize the path with existing scope checks and must not display,
+        audit, or persist the path outside ordinary tool-request machinery.
+        """
+
 
 class LocalEvidenceStore:
     """User-local evidence directory that stores opaque byte copies only."""
@@ -160,6 +168,45 @@ class LocalEvidenceStore:
             return path.exists() and not path.is_symlink() and path.is_file()
         except OSError:
             return False
+
+    def resolve_stored_evidence_path(self, evidence_id: str) -> Path:
+        """Return a safe absolute path to one existing stored evidence object."""
+        canonical_id = _canonical_evidence_id(evidence_id)
+        path = self._object_path(canonical_id)
+        try:
+            if path.is_symlink():
+                raise EvidenceStoreError(
+                    "Cortana: Stored evidence object is not a regular file."
+                )
+            if not path.exists():
+                raise EvidenceStoreError(
+                    "Cortana: Stored evidence object was not found."
+                )
+            if not path.is_file():
+                raise EvidenceStoreError(
+                    "Cortana: Stored evidence object is not a regular file."
+                )
+            resolved = path.resolve(strict=False)
+            if resolved.is_symlink():
+                raise EvidenceStoreError(
+                    "Cortana: Stored evidence object is not a regular file."
+                )
+            if not resolved.is_file():
+                raise EvidenceStoreError(
+                    "Cortana: Stored evidence object is not a regular file."
+                )
+            return resolved
+        except EvidenceStoreError:
+            raise
+        except OSError as error:
+            logger.error(
+                "Evidence resolve path failed evidence_id=%s error_type=%s",
+                canonical_id,
+                type(error).__name__,
+            )
+            raise EvidenceStoreError(
+                "Cortana: Stored evidence could not be resolved safely."
+            ) from error
 
     def _object_path(self, evidence_id: str) -> Path:
         """Return the safe internal object path derived only from the evidence ID."""

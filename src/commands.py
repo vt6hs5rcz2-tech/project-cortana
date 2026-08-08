@@ -104,6 +104,11 @@ from src.incident_analysis_commands import (
     handle_incident_analysis_command,
 )
 from src.incident_analysis_repository import InMemoryIncidentAnalysisRepository
+from src.incident_evidence_search_commands import (
+    INCIDENT_EVIDENCE_COMMAND_NAMES,
+    IncidentEvidenceCommandContext,
+    handle_incident_evidence_command,
+)
 from src.incident_repository import (
     IncidentRepository,
     IncidentStorageError,
@@ -195,6 +200,7 @@ SUPPORTED_COMMANDS = frozenset(
         *TOOL_COMMAND_NAMES,
         *WORKFLOW_COMMAND_NAMES,
         *INCIDENT_ANALYSIS_COMMAND_NAMES,
+        *INCIDENT_EVIDENCE_COMMAND_NAMES,
     }
 )
 
@@ -228,6 +234,7 @@ HELP_TEXT = """Cortana: Available commands:
   /incident-status      - Update one security incident status
   /incident-link-event  - Link an event to an incident
   /incident-unlink-event - Unlink an event from an incident
+  /incident-link-evidence - Link registered evidence to an incident
   /indicator-add        - Record one local indicator
   /indicators           - List saved indicators
   /indicator            - Show one indicator by ID
@@ -235,6 +242,8 @@ HELP_TEXT = """Cortana: Available commands:
   /evidence             - List saved evidence metadata
   /evidence-show        - Show one evidence record by ID
   /evidence-verify      - Verify a stored evidence copy by SHA-256
+  /evidence-search      - Create a text-search request for linked evidence
+  /incident-context     - Display bounded AI-off incident context
   /incident-add-note    - Add one analyst note to an incident
   /incident-notes       - List analyst notes for an incident
   /incident-timeline    - Show a derived incident timeline
@@ -620,6 +629,24 @@ def handle_slash_command(
             return CommandResult(
                 outcome=CommandOutcome.CONTINUE,
                 message=security_result.message,
+            )
+
+    if command_name in INCIDENT_EVIDENCE_COMMAND_NAMES:
+        evidence_search_result = handle_incident_evidence_command(
+            command_name,
+            IncidentEvidenceCommandContext(
+                message=message,
+                incident_repository=incident_repository,
+                evidence_store=evidence_store,
+                tool_registry=tool_registry,
+                tool_repository=tool_repository,
+                workflow_run_repository=workflow_run_repository,
+            ),
+        )
+        if evidence_search_result is not None:
+            return CommandResult(
+                outcome=CommandOutcome.CONTINUE,
+                message=evidence_search_result.message,
             )
 
     if command_name in TOOL_COMMAND_NAMES:

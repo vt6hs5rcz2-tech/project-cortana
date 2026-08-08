@@ -22,6 +22,7 @@ Project Cortana is an early software milestone focused on:
 - Trusted defensive playbook orchestration over allowlisted Milestone 9 tools
 - Durable workflow-run and workflow-audit history with optional authorized incident linkage
 - Optional controlled security analyst assistance over sanitized single-incident packets
+- Coordinated evidence↔incident linking, incident-scoped evidence text-search request creation, and AI-off bounded incident context display
 
 ## Conversation history, persistent memory, active context, and documents
 
@@ -374,6 +375,32 @@ Security properties:
 - Canonical paths, roots, identity fields, and search queries never appear in audits, workflow records, or incident notes
 - Match previews may appear only in the intended tool result `matches` list, not in audit logs
 - In-process open remains in `tool_safe_files.py`; isolated open remains in `tool_process_safe_open.py`
+
+### Evidence text search and bounded incident context (Milestone 17)
+
+Milestone 17 adds a thin operator bridge over existing incident, evidence, scope, tool, and M12 packet machinery. It does not introduce an Investigation entity or a second search engine.
+
+Capabilities:
+
+- `/incident-link-evidence <incident-id> <evidence-id>` — bidirectional, idempotent membership update on `SecurityIncident.evidence_ids` and `EvidenceRecord.related_incident_ids`
+- `/evidence-search <incident-id> | <evidence-id> | <scope-id> | <query> [| <max-matches>]` — creates an ordinary `text-search` `ToolExecutionRequest` with `incident_id` set; does **not** execute the search
+- `/incident-context <incident-id> | <scope-id> | <event-ids> | <indicator-ids> | <note-ids> | <workflow-run-ids>` — displays the existing M12 allowlisted packet for operator review (**AI-off**; use `-` for empty ID lists)
+
+Execution rules for evidence search:
+
+- Scope is supplied per operation
+- Scope must authorize both the incident (`assert_incident_authorized`) and the resolved evidence-store path (`assert_path_authorized`)
+- Evidence must already be linked to the incident on both sides
+- Operator continues with existing `/tool-dry-run`, `/tool-approve`, and `/tool-run`
+- Process isolation / Job Objects remain governed by existing M13–16 flags when enabled
+- Resolved evidence-store paths are not printed by the new commands
+
+AI boundary:
+
+- Bounded context display reuses `build_incident_analysis_packet` and never calls AI
+- `AI_INCIDENT_ANALYSIS_ENABLED` and `/incident-analysis-*` remain the only AI analysis route
+
+Demo-ready later (sanitized data only): evidence linking, controlled evidence-search request creation, AI-off incident context display.
 
 ### Controlled process-isolated text search (Milestone 16)
 

@@ -153,6 +153,22 @@ def test_verification_mismatch_and_missing(
     assert store.verify_stored_hash(evidence_id, digest) == "missing"
 
 
+def test_resolve_stored_evidence_path_for_tool_use(tmp_path: Path) -> None:
+    """Resolver returns an absolute regular-file path without mutating bytes."""
+    source = tmp_path / "payload.txt"
+    source.write_text("payload-body", encoding="utf-8")
+    store = evidence_store(tmp_path)
+    evidence_id = "12121212-1212-1212-1212-121212121212"
+    store.copy_from_path(str(source), evidence_id=evidence_id)
+
+    resolved = store.resolve_stored_evidence_path(evidence_id)
+    assert resolved.is_absolute()
+    assert resolved.is_file()
+    assert resolved.read_text(encoding="utf-8") == "payload-body"
+    with pytest.raises(EvidenceStoreError):
+        store.resolve_stored_evidence_path("34343434-3434-3434-3434-343434343434")
+
+
 def test_no_path_leakage_in_errors_or_logs(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,

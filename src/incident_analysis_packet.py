@@ -144,6 +144,33 @@ FORBIDDEN_PACKET_KEYS: frozenset[str] = frozenset(
 )
 
 
+def build_bounded_incident_context_for_display(
+    *,
+    incident_repository: IncidentRepository,
+    workflow_run_repository: WorkflowRunRepository,
+    incident_id: str,
+    selected_event_ids: tuple[str, ...] = (),
+    selected_indicator_ids: tuple[str, ...] = (),
+    selected_note_ids: tuple[str, ...] = (),
+    selected_workflow_run_ids: tuple[str, ...] = (),
+) -> IncidentAnalysisPacket:
+    """Assemble the existing M12 allowlisted packet for AI-off operator review.
+
+    Delegates to :func:`build_incident_analysis_packet`. Does not call AI,
+    does not create analysis repository state, and does not widen packet
+    allowlists.
+    """
+    return build_incident_analysis_packet(
+        incident_repository=incident_repository,
+        workflow_run_repository=workflow_run_repository,
+        incident_id=incident_id,
+        selected_event_ids=selected_event_ids,
+        selected_indicator_ids=selected_indicator_ids,
+        selected_note_ids=selected_note_ids,
+        selected_workflow_run_ids=selected_workflow_run_ids,
+    )
+
+
 def build_incident_analysis_packet(
     *,
     incident_repository: IncidentRepository,
