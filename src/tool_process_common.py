@@ -178,5 +178,31 @@ def process_ipc_schema_version() -> int:
 
 
 def python_executable() -> str:
-    """Return the absolute path of the current Python interpreter."""
+    """Return the absolute path of the Python interpreter used for child processes.
+
+    On Windows, ``.venv\\Scripts\\python.exe`` is a launcher stub that creates a
+    second OS process for the base interpreter. Cortana's Job Object enforces
+    ``ActiveProcessLimit = 1``, so that second CreateProcess is rejected with
+    ``ERROR_NOT_ENOUGH_QUOTA``. When running inside a Windows virtual
+    environment, return the trusted base interpreter derived from
+    ``sys.base_prefix`` so the child is a single process. Elsewhere, return
+    ``sys.executable``.
+
+    The path is never taken from user input or arbitrary environment overrides.
+    """
+    if os.name == "nt" and sys.prefix != sys.base_prefix:
+        candidate = Path(sys.base_prefix) / "python.exe"
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as error:
+            raise ToolProcessError(
+                "Trusted base Python interpreter is unavailable for "
+                "process-isolated execution."
+            ) from error
+        if not resolved.is_file():
+            raise ToolProcessError(
+                "Trusted base Python interpreter is unavailable for "
+                "process-isolated execution."
+            )
+        return str(resolved)
     return sys.executable

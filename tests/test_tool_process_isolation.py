@@ -28,6 +28,7 @@ from src.tool_process_common import (
     ToolProcessError,
     assert_process_isolation_tables_match,
     build_child_environment,
+    python_executable,
     registry_process_isolation_implementation_ids,
 )
 from src.tool_process_envelope import (
@@ -280,6 +281,102 @@ def test_child_environment_excludes_sentinel_secrets(
     joined = json.dumps(env)
     assert "sk-test-secret" not in joined
     assert "parent-only-secret" not in joined
+
+
+def test_python_executable_windows_venv_uses_base_interpreter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Windows venv selection must return the trusted base python.exe."""
+    base_prefix = tmp_path / "base-python"
+    base_prefix.mkdir()
+    base_python = base_prefix / "python.exe"
+    base_python.write_bytes(b"fake-interpreter")
+    venv_prefix = tmp_path / "venv"
+    venv_prefix.mkdir()
+
+    monkeypatch.setattr("src.tool_process_common.os.name", "nt")
+    monkeypatch.setattr(sys, "prefix", str(venv_prefix))
+    monkeypatch.setattr(sys, "base_prefix", str(base_prefix))
+    monkeypatch.setattr(sys, "executable", str(venv_prefix / "Scripts" / "python.exe"))
+
+    selected = Path(python_executable())
+    assert selected == base_python.resolve()
+    assert selected.name.lower() == "python.exe"
+
+
+def test_python_executable_windows_non_venv_keeps_sys_executable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Windows non-venv selection must keep sys.executable unchanged."""
+    prefix = tmp_path / "python-install"
+    prefix.mkdir()
+    current = prefix / "python.exe"
+    current.write_bytes(b"current")
+
+    monkeypatch.setattr("src.tool_process_common.os.name", "nt")
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+    monkeypatch.setattr(sys, "base_prefix", str(prefix))
+    monkeypatch.setattr(sys, "executable", str(current))
+
+    assert python_executable() == str(current)
+
+
+def test_python_executable_non_windows_keeps_sys_executable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Non-Windows selection must keep sys.executable even inside a venv."""
+    base_prefix = tmp_path / "base"
+    base_prefix.mkdir()
+    (base_prefix / "python.exe").write_bytes(b"unused-on-posix")
+    venv_prefix = tmp_path / "venv"
+    venv_prefix.mkdir()
+    current = venv_prefix / "bin" / "python"
+    current.parent.mkdir()
+    current.write_bytes(b"venv-python")
+
+    monkeypatch.setattr("src.tool_process_common.os.name", "posix")
+    monkeypatch.setattr(sys, "prefix", str(venv_prefix))
+    monkeypatch.setattr(sys, "base_prefix", str(base_prefix))
+    monkeypatch.setattr(sys, "executable", str(current))
+
+    assert python_executable() == str(current)
+
+
+def test_python_executable_windows_venv_missing_base_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Missing base interpreter must fail closed without falling back."""
+    base_prefix = tmp_path / "missing-base"
+    base_prefix.mkdir()
+    venv_prefix = tmp_path / "venv"
+    venv_prefix.mkdir()
+    launcher = venv_prefix / "Scripts" / "python.exe"
+    launcher.parent.mkdir()
+    launcher.write_bytes(b"launcher")
+
+    monkeypatch.setattr("src.tool_process_common.os.name", "nt")
+    monkeypatch.setattr(sys, "prefix", str(venv_prefix))
+    monkeypatch.setattr(sys, "base_prefix", str(base_prefix))
+    monkeypatch.setattr(sys, "executable", str(launcher))
+
+    with pytest.raises(ToolProcessError, match="Trusted base Python interpreter"):
+        python_executable()
+
+
+def test_tool_process_adapter_explicit_python_override_is_authoritative(
+    tmp_path: Path,
+) -> None:
+    """Constructor python_executable_path must remain authoritative."""
+    override = str(tmp_path / "custom-python.exe")
+    adapter = ToolProcessAdapter(
+        scratch_dir=tmp_path / "scratch",
+        python_executable_path=override,
+    )
+    assert adapter._python == override  # noqa: SLF001 — constructor wiring
 
 
 def test_child_runner_dispatch_and_result_file(tmp_path: Path) -> None:
