@@ -13,7 +13,7 @@ Project Cortana is an early software milestone focused on:
 - Explicit, session-only active memory context for AI requests
 - Local Knowledge Vault for explicit document ingestion and inspection
 - Deterministic local lexical document retrieval
-- Explicit source-grounded AI questions over retrieved document passages
+- Explicit source-grounded AI questions, document summaries, and two-document comparison over retrieved document passages
 - Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 - Optional process-isolated execution for a tiny allowlisted defensive tool subset
@@ -35,7 +35,7 @@ Project Cortana is an early software milestone focused on:
 | Explicit persistent memory | Survives restarts | Saved only through local `/remember` or explicit NL `remember …` routing | No, unless activated |
 | Active memory context | Current session only | Selected with `/recall`; cleared with `/release`, `/release-all`, or restart | Yes, only while active |
 | Knowledge Vault documents | Survives restarts | Ingested only through local `/add-document` | No by default |
-| Retrieved document passages | Current request/session only | Selected by `/search-docs` (local), explicit NL document-search routing (lexical only), or `/ask-docs` (AI) | Only selected chunks through `/ask-docs` |
+| Retrieved document passages | Current request/session only | Selected by `/search-docs` (local), explicit NL document-search routing (lexical only), or grounded AI commands (`/ask-docs`, `/doc-summary`, `/docs-compare`) | Only selected chunks through grounded document AI commands |
 | Security incidents and evidence | Survives restarts | Created only through explicit local Milestone 8 commands | Never in this milestone |
 | Defensive tool scopes, requests, approvals, results, and audits | Survives restarts | Created only through explicit local Milestone 9 commands | Never in this milestone |
 | Workflow/playbook run state and workflow audits | Survives restarts when persistence is enabled; otherwise current process only | Created only through explicit local Milestone 10/11 commands | Never in this milestone |
@@ -47,7 +47,7 @@ Persistent memories, Knowledge Vault documents, incident records, and evidence c
 
 Saved memories remain inactive by default. Nothing from persistent memory is sent to the AI model unless the user explicitly activates it with `/recall` for the current session.
 
-Documents remain inactive by default. No document text is sent to the AI unless the user explicitly invokes `/ask-docs`. Ordinary conversation never reads the Knowledge Vault.
+Documents remain inactive by default. No document text is sent to the AI unless the user explicitly invokes `/ask-docs`, `/doc-summary`, or `/docs-compare`. Ordinary conversation never reads the Knowledge Vault.
 
 Security incident records are never injected into ordinary chat, active-memory requests, or `/ask-docs`. When Milestone 12 analysis is explicitly enabled and the user runs `/incident-analysis-run`, only a sanitized allowlisted single-incident packet is sent. Evidence bytes, chain-of-custody records, and raw structured tool data remain structurally excluded from that packet.
 
@@ -78,7 +78,7 @@ Behavior and limits:
 - Storage is local and outside the source repository.
 - Original binary document files are not copied into the vault.
 - Extracted text and document metadata are stored locally as JSON.
-- Documents are not sent to the AI model unless selected chunks are explicitly requested through `/ask-docs`.
+- Documents are not sent to the AI model unless selected chunks are explicitly requested through `/ask-docs`, `/doc-summary`, or `/docs-compare`.
 - OCR is not implemented.
 - Embeddings, vector databases, cloud file search, semantic search, and autonomous retrieval are not implemented.
 - If the vault file is missing, Cortana starts with an empty document list.
@@ -112,12 +112,38 @@ Retrieved-context limits:
 - Chunk overlap: 150 characters
 - Maximum retrieved chunks per grounded request: 8
 - Maximum retrieved-context characters per grounded request: 12,000
+- Maximum grounded answer characters: 4,000
+- Maximum summary map stages: 8
+- Maximum summary output characters: 4,000
+- Maximum compare documents: 2
+- Maximum compare chunks per document: 4
+- Maximum compare context characters: 12,000
 
 Lexical retrieval matches words and phrases present in stored text. Semantic retrieval would attempt meaning-based similarity; it is disabled in this milestone.
 
+Feature flags:
+
+- `LOCAL_DOCUMENT_RETRIEVAL_ENABLED` gates `/search-docs`, M18 lexical document-search routing, and grounded operations that depend on local retrieval
+- `DOCUMENT_CONTEXT_INJECTION_ENABLED` gates `/ask-docs`, `/doc-summary`, and `/docs-compare`
+- `SEMANTIC_RETRIEVAL_ENABLED` remains false and unimplemented
+
 ## Source-grounded answers
 
-`/ask-docs <question>` is the only command that retrieves document passages and sends selected chunks to the AI.
+Milestone 21 routes grounded document AI through `DocumentKnowledgeService` and a dedicated AI path that excludes ordinary conversation history and active memory.
+
+Commands that send selected document text to the AI:
+
+- `/ask-docs <question>` — vault-wide lexical retrieval, then grounded Q&A
+- `/doc-summary <document-id>` — sequential chunk map/reduce summary of one authorized document
+- `/docs-compare <doc-id> | <doc-id> | <question>` — scoped retrieval inside exactly two documents
+
+Grounded model output must be one JSON object:
+
+```json
+{"answer":"...","support":"supported|partial|unsupported","citations":["[DOC-1:C1]"]}
+```
+
+`support="supported"` means the model declared the answer source-supported and every citation label it used was present in the supplied source packet after local structural validation. It does **not** mean Cortana independently proved that every sentence is logically entailed by the cited source text. M21 does not implement an NLI/entailment engine.
 
 Citation labels use a compact deterministic format such as `[DOC-1:C1]`. Each label maps through a session source manifest to:
 
@@ -126,7 +152,7 @@ Citation labels use a compact deterministic format such as `[DOC-1:C1]`. Each la
 - chunk index
 - character range
 
-Citation-label validation checks that labels in the AI response match the exact labels supplied with the request. It does **not** prove full factual entailment of every natural-language claim against the source text.
+Citation-label validation checks that labels in the AI response match the exact labels supplied with the request. Fabricated labels are marked and support is downgraded. It does **not** prove full factual entailment of every natural-language claim against the source text.
 
 Source manifests:
 
@@ -136,7 +162,7 @@ Source manifests:
 - Are not written to disk
 - Do not expose local file paths or vault paths
 
-Active-memory context and retrieved-document context can appear in the same AI request, but remain separate structured developer messages.
+Grounded document AI requests never include ordinary conversation history or active memory. Document Q&A/summary/compare results are not written into ordinary `ConversationHistory`.
 
 ## Security event, incident, and evidence foundation
 
@@ -677,7 +703,9 @@ Centralized defaults:
 | `/remove-all-documents confirm` | Confirm deletion of all stored documents |
 | `/search-docs <query>` | Search Knowledge Vault documents locally without calling the AI |
 | `/ask-docs <question>` | Ask a source-grounded question using retrieved document passages |
-| `/sources` | Show sources from the latest successful `/ask-docs` request |
+| `/doc-summary <document-id>` | Summarize one authorized Knowledge Vault document |
+| `/docs-compare <doc-id> \| <doc-id> \| <question>` | Compare two authorized documents for one question |
+| `/sources` | Show sources from the latest successful grounded document request |
 | `/event-new <severity> \| <title> \| <description>` | Record one local security event |
 | `/events` | List saved security events |
 | `/event <event-id>` | Show one security event |
@@ -738,7 +766,8 @@ Notes:
 - `/remove-document` removes one vault document and invalidates matching source-manifest entries.
 - `/remove-all-documents confirm` deletes all vault documents and clears the source manifest. It does not affect persistent memories, active-memory context, incidents, or evidence.
 - `/search-docs` never calls the AI service.
-- `/ask-docs` sends only selected retrieved chunks, never the entire vault and never incident records.
+- `/ask-docs`, `/doc-summary`, and `/docs-compare` send only selected retrieved/authorized chunks, never the entire vault and never incident records.
+- Grounded document commands do not write into ordinary conversation history and do not inject active memory.
 - Milestone 8 security commands never call the AI service.
 - Milestone 9 defensive tool commands never call the AI service.
 - Milestone 10/11 workflow/playbook commands never call the AI service.

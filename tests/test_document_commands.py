@@ -491,7 +491,10 @@ def test_status_reports_knowledge_vault_safely(tmp_path: Path) -> None:
     assert "Supported document types:" in status
     for extension in sorted(ALLOWED_DOCUMENT_EXTENSIONS):
         assert extension in status
-    assert "Document context injection: enabled (explicit /ask-docs only)" in status
+    assert (
+        "Document context injection: enabled "
+        "(explicit /ask-docs, /doc-summary, /docs-compare)"
+    ) in status
     assert DOCUMENT_CONTEXT_INJECTION_ENABLED is True
     assert "Local document retrieval: enabled" in status
     assert "Semantic retrieval: disabled" in status

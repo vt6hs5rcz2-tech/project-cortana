@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,7 +12,12 @@ import pytest
 
 import main as main_module
 from src.active_memory import ActiveMemoryContext
-from src.ai_service import AIResponse, OpenAIClient, ResponsesClient
+from src.ai_service import (
+    GROUNDED_DOCUMENT_INSTRUCTIONS,
+    AIResponse,
+    OpenAIClient,
+    ResponsesClient,
+)
 from src.citation_validation import UNSUPPORTED_CITATION_MARKER
 from src.commands import (
     ASK_DOCS_EMPTY_VAULT,
@@ -41,13 +47,27 @@ from src.document_retrieval import LexicalDocumentRetriever
 from src.document_vault import JsonDocumentVault
 from src.identity import CORTANA_SYSTEM_INSTRUCTIONS
 from src.memory import MemoryRecord
-from src.memory_context import MEMORY_CONTEXT_PREAMBLE
 from src.memory_store import JsonMemoryStore
 from src.retrieval_session import RetrievalSession
 from src.settings import Settings
 
 DOC_BOUNDARY = "doc_session_token_01"
 MEM_BOUNDARY = "mem_session_token_01"
+
+
+def _grounded_json(
+    answer: str = "Answer from [DOC-1:C1]",
+    *,
+    support: str = "supported",
+    citations: list[str] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "answer": answer,
+            "support": support,
+            "citations": citations if citations is not None else ["[DOC-1:C1]"],
+        }
+    )
 
 
 @dataclass
@@ -60,12 +80,21 @@ class FakeAIResponse:
 class FakeResponses:
     """Fake Responses API used without network access."""
 
-    def __init__(self, output_text: str = "Answer from [DOC-1:C1]") -> None:
-        self.output_text = output_text
+    def __init__(
+        self,
+        output_text: str | list[str] | None = None,
+    ) -> None:
+        if output_text is None:
+            self._outputs = [_grounded_json()]
+        elif isinstance(output_text, list):
+            self._outputs = output_text
+        else:
+            self._outputs = [output_text]
         self.calls = 0
         self.model: str | None = None
         self.input: ConversationApiInput | None = None
         self.instructions: str | None = None
+        self.inputs: list[ConversationApiInput] = []
 
     def create(
         self,
@@ -77,8 +106,10 @@ class FakeResponses:
         self.calls += 1
         self.model = model
         self.input = input
+        self.inputs.append(input)
         self.instructions = instructions
-        return FakeAIResponse(output_text=self.output_text)
+        index = min(self.calls - 1, len(self._outputs) - 1)
+        return FakeAIResponse(output_text=self._outputs[index])
 
 
 class FakeClient:
@@ -86,7 +117,7 @@ class FakeClient:
 
     responses: ResponsesClient
 
-    def __init__(self, output_text: str = "Answer from [DOC-1:C1]") -> None:
+    def __init__(self, output_text: str | list[str] | None = None) -> None:
         self.responses = FakeResponses(output_text=output_text)
 
     @property
@@ -168,6 +199,8 @@ def test_help_lists_retrieval_commands() -> None:
     """Help text should include search-docs, ask-docs, and sources."""
     assert "/search-docs" in HELP_TEXT
     assert "/ask-docs" in HELP_TEXT
+    assert "/doc-summary" in HELP_TEXT
+    assert "/docs-compare" in HELP_TEXT
     assert "/sources" in HELP_TEXT
 
 
@@ -264,6 +297,7 @@ def test_absolute_path_still_reaches_ordinary_ai_chat(
     output = capsys.readouterr().out
     assert client.fake_responses.calls == 1
     assert client.fake_responses.input == "/etc/passwd"
+    assert client.fake_responses.instructions == CORTANA_SYSTEM_INSTRUCTIONS
     assert "Path handled" in output
 
 
@@ -313,7 +347,9 @@ def test_ask_docs_sends_only_retrieved_chunks_and_records_sources(
         "gardening.txt",
         "Tomatoes prefer warm soil and consistent watering.",
     )
-    client = FakeClient(output_text="Outbound SSH is blocked [DOC-1:C1].")
+    client = FakeClient(
+        output_text=_grounded_json("Outbound SSH is blocked [DOC-1:C1].")
+    )
     active = ActiveMemoryContext(boundary_token=MEM_BOUNDARY)
     memory_store = _store(tmp_path)
     memory = memory_store.add_memory("Analyst prefers concise answers.")
@@ -330,21 +366,22 @@ def test_ask_docs_sends_only_retrieved_chunks_and_records_sources(
 
     assert result.message is not None
     assert "Outbound SSH is blocked [DOC-1:C1]." in result.message
+    assert "Support: supported" in result.message
     assert client.fake_responses.calls == 1
-    assert client.fake_responses.instructions == CORTANA_SYSTEM_INSTRUCTIONS
+    assert client.fake_responses.instructions == GROUNDED_DOCUMENT_INSTRUCTIONS
     api_input = client.fake_responses.input
     assert isinstance(api_input, list)
     assert api_input[0]["role"] == "developer"
-    assert MEMORY_CONTEXT_PREAMBLE in api_input[0]["content"]
-    assert "Analyst prefers concise answers." in api_input[0]["content"]
-    assert api_input[1]["role"] == "developer"
-    assert DOCUMENT_CONTEXT_PREAMBLE in api_input[1]["content"]
-    assert "firewall blocks outbound SSH" in api_input[1]["content"]
-    assert "Tomatoes prefer warm soil" not in api_input[1]["content"]
+    assert DOCUMENT_CONTEXT_PREAMBLE in api_input[0]["content"]
+    assert "firewall blocks outbound SSH" in api_input[0]["content"]
+    assert "Tomatoes prefer warm soil" not in api_input[0]["content"]
+    assert "Analyst prefers concise answers." not in api_input[0]["content"]
+    assert len(api_input) == 2
     assert api_input[-1]["role"] == "user"
-    assert api_input[-1]["content"] == "What does the firewall block?"
+    assert "What does the firewall block?" in api_input[-1]["content"]
     assert session.has_source_manifest is True
-    assert history.completed_turn_count == 1
+    assert history.completed_turn_count == 0
+    assert history.turns == []
 
     sources, _, _, _, client2 = _run(
         "/sources",
@@ -355,6 +392,7 @@ def test_ask_docs_sends_only_retrieved_chunks_and_records_sources(
     )
     assert sources.message is not None
     assert "[DOC-1:C1]" in sources.message
+    assert "document_id=" in sources.message
     assert "filename=firewall.txt" in sources.message
     assert "chunk_index=" in sources.message
     assert "chars=" in sources.message
@@ -366,7 +404,12 @@ def test_ask_docs_detects_invented_citations(tmp_path: Path) -> None:
     """Invented citation labels should be marked unsupported."""
     vault = _vault(tmp_path)
     _add_document(tmp_path, vault, "rules.txt", "MFA is required for VPN access.")
-    client = FakeClient(output_text="Required per [DOC-1:C1] and [DOC-9:C9].")
+    client = FakeClient(
+        output_text=_grounded_json(
+            "Required per [DOC-1:C1] and [DOC-9:C9].",
+            citations=["[DOC-1:C1]", "[DOC-9:C9]"],
+        )
+    )
 
     result, _, _, _, _ = _run(
         "/ask-docs Is MFA required?",
@@ -379,6 +422,7 @@ def test_ask_docs_detects_invented_citations(tmp_path: Path) -> None:
     assert "[DOC-1:C1]" in result.message
     assert UNSUPPORTED_CITATION_MARKER in result.message
     assert "[DOC-9:C9]" not in result.message
+    assert "Support: partial" in result.message
 
 
 def test_ask_docs_ai_failure_does_not_corrupt_session(tmp_path: Path) -> None:
@@ -411,6 +455,22 @@ def test_ask_docs_ai_failure_does_not_corrupt_session(tmp_path: Path) -> None:
     assert vault.document_count() == 1
 
 
+def test_ask_docs_malformed_json_fails_closed(tmp_path: Path) -> None:
+    """Malformed grounded model output must not be shown raw."""
+    vault = _vault(tmp_path)
+    _add_document(tmp_path, vault, "rules.txt", "Rotate API keys every 90 days.")
+    result, history, _, session, _ = _run(
+        "/ask-docs How often should keys rotate?",
+        tmp_path=tmp_path,
+        vault=vault,
+        client=FakeClient(output_text="not-json-at-all"),
+    )
+    assert result.message == "Cortana: I could not complete that request."
+    assert "not-json-at-all" not in (result.message or "")
+    assert session.has_source_manifest is False
+    assert history.turns == []
+
+
 def test_sources_empty_clear_and_remove_all_reset(tmp_path: Path) -> None:
     """ /sources empty state, /clear, and remove-all should reset the manifest. """
     result, _, _, session, _ = _run("/sources", tmp_path=tmp_path)
@@ -419,17 +479,19 @@ def test_sources_empty_clear_and_remove_all_reset(tmp_path: Path) -> None:
     vault = _vault(tmp_path)
     _add_document(tmp_path, vault, "a.txt", "Incident response requires triage notes.")
     history = ConversationHistory()
+    history.add_user_message("unrelated chat")
+    history.add_assistant_message("unrelated answer")
     ask, history, _, session, _ = _run(
         "/ask-docs What does incident response require?",
         tmp_path=tmp_path,
         vault=vault,
         session=session,
         history=history,
-        client=FakeClient(output_text="Triage notes [DOC-1:C1]."),
+        client=FakeClient(output_text=_grounded_json("Triage notes [DOC-1:C1].")),
     )
     assert ask.message is not None
     assert session.has_source_manifest is True
-    assert history.turns
+    assert history.completed_turn_count == 1
 
     clear, history, _, session, _ = _run(
         "/clear",
@@ -447,7 +509,7 @@ def test_sources_empty_clear_and_remove_all_reset(tmp_path: Path) -> None:
         tmp_path=tmp_path,
         vault=vault,
         session=session,
-        client=FakeClient(output_text="Triage notes [DOC-1:C1]."),
+        client=FakeClient(output_text=_grounded_json("Triage notes [DOC-1:C1].")),
     )
     assert session.has_source_manifest is True
     remove, _, _, session, _ = _run(
@@ -473,7 +535,12 @@ def test_remove_document_invalidates_stale_manifest_entries(tmp_path: Path) -> N
         tmp_path=tmp_path,
         vault=vault,
         session=session,
-        client=FakeClient(output_text="See [DOC-1:C1] and [DOC-2:C1]."),
+        client=FakeClient(
+            output_text=_grounded_json(
+                "See [DOC-1:C1] and [DOC-2:C1].",
+                citations=["[DOC-1:C1]", "[DOC-2:C1]"],
+            )
+        ),
     )
     assert ask.message is not None
     assert len(session.source_manifest) >= 1
@@ -501,7 +568,7 @@ def test_status_reports_retrieval_capabilities_safely(tmp_path: Path) -> None:
         tmp_path=tmp_path,
         vault=vault,
         session=session,
-        client=FakeClient(output_text="Noted [DOC-1:C1]."),
+        client=FakeClient(output_text=_grounded_json("Noted [DOC-1:C1].")),
     )
 
     status = format_status(
@@ -516,7 +583,10 @@ def test_status_reports_retrieval_capabilities_safely(tmp_path: Path) -> None:
 
     assert "Local document retrieval: enabled" in status
     assert "Semantic retrieval: disabled" in status
-    assert "Document context injection: enabled (explicit /ask-docs only)" in status
+    assert (
+        "Document context injection: enabled "
+        "(explicit /ask-docs, /doc-summary, /docs-compare)"
+    ) in status
     assert f"Maximum retrieved chunks: {MAX_RETRIEVED_CHUNKS}" in status
     assert (
         f"Maximum retrieved context characters: {MAX_RETRIEVED_CONTEXT_CHARS}"
@@ -552,14 +622,14 @@ def test_logs_omit_document_and_question_text(
             f"/ask-docs {question}",
             tmp_path=tmp_path,
             vault=vault,
-            client=FakeClient(output_text="Yes [DOC-1:C1]."),
+            client=FakeClient(output_text=_grounded_json("Yes [DOC-1:C1].")),
         )
 
     assert result.message is not None
     combined = "\n".join(caplog.messages)
     assert "UniqueDocumentBodyTextXYZ" not in combined
     assert question not in combined
-    assert "citation_validation_succeeded=" in combined
+    assert "task_type=ask" in combined
 
 
 def test_new_application_session_starts_with_empty_manifest(
@@ -631,7 +701,7 @@ def test_retrieved_chunks_do_not_become_memories_or_active_context(
         vault=vault,
         memory_store=memory_store,
         active=active,
-        client=FakeClient(output_text="Documented [DOC-1:C1]."),
+        client=FakeClient(output_text=_grounded_json("Documented [DOC-1:C1].")),
     )
 
     assert memory_store.list_memories() == []

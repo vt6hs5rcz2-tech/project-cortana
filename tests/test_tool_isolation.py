@@ -50,7 +50,12 @@ class FakeResponses:
                 "instructions": instructions,
             }
         )
-        return FakeAIResponse(output_text="Isolated response")
+        return FakeAIResponse(
+            output_text=(
+                '{"answer":"Isolated response [DOC-1:C1]",'
+                '"support":"supported","citations":["[DOC-1:C1]"]}'
+            )
+        )
 
 
 class FakeClient:

@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 
 from src.config import (
+    LOCAL_DOCUMENT_RETRIEVAL_ENABLED,
     MAX_MEMORY_TEXT_LENGTH,
     MAX_SEARCH_DOCS_RESULTS,
     MAX_SEARCH_RESULT_PREVIEW_CHARS,
@@ -326,6 +327,17 @@ class UnifiedAssistantOrchestrator:
         match = _DOCUMENT_SEARCH_PATTERN.fullmatch(message)
         if match is None:
             return None
+
+        if not LOCAL_DOCUMENT_RETRIEVAL_ENABLED:
+            return OrchestrationResult(
+                domain="documents",
+                action="search",
+                confidence="high",
+                missing_fields=(),
+                safe_user_message=(
+                    "Cortana: Local document retrieval is currently disabled."
+                ),
+            )
 
         query = match.group("query").strip()
         if not query:

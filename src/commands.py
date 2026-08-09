@@ -14,8 +14,7 @@ from src.active_memory import (
     DuplicateActiveMemoryError,
     normalize_memory_id,
 )
-from src.ai_service import OpenAIClient, generate_response
-from src.citation_validation import validate_response_citations
+from src.ai_service import OpenAIClient
 from src.config import (
     ACTIVE_MEMORY_PERSISTENCE_ENABLED,
     ALLOWED_DOCUMENT_EXTENSIONS,
@@ -45,10 +44,16 @@ from src.config import (
     MAX_ACTIVE_MEMORY_CHARS,
     MAX_MEMORY_TEXT_LENGTH,
     MAX_REMINDER_AUDIT_ENTRIES,
+    MAX_COMPARE_CHUNKS_PER_DOCUMENT,
+    MAX_COMPARE_CONTEXT_CHARS,
+    MAX_COMPARE_DOCUMENTS,
+    MAX_GROUNDED_ANSWER_CHARS,
     MAX_RETRIEVED_CHUNKS,
     MAX_RETRIEVED_CONTEXT_CHARS,
     MAX_SEARCH_DOCS_RESULTS,
     MAX_SEARCH_RESULT_PREVIEW_CHARS,
+    MAX_SUMMARY_MAP_STAGES,
+    MAX_SUMMARY_OUTPUT_CHARS,
     MAX_STORED_REMINDERS,
     REMINDER_REPOSITORY_ENABLED,
     REMINDER_REPOSITORY_PERSISTENCE_ENABLED,
@@ -90,13 +95,17 @@ from src.document import (
 from src.document_chunker import DocumentChunkingError
 from src.document_extractor import DocumentExtractionError, TextExtractor
 from src.document_ingestion import DocumentIngestionError, ingest_local_document
+from src.document_knowledge_service import (
+    DocumentKnowledgeError,
+    DocumentKnowledgeService,
+    format_grounded_answer_message,
+)
 from src.document_retrieval import (
     BlankRetrievalQueryError,
     DocumentRetrievalError,
     LexicalDocumentRetriever,
     RetrievalContextLimitError,
     RetrievalResult,
-    build_source_manifest,
 )
 from src.document_vault import (
     DocumentCountLimitError,
@@ -192,6 +201,8 @@ COMMAND_REMOVE_DOCUMENT = "remove-document"
 COMMAND_REMOVE_ALL_DOCUMENTS = "remove-all-documents"
 COMMAND_SEARCH_DOCS = "search-docs"
 COMMAND_ASK_DOCS = "ask-docs"
+COMMAND_DOC_SUMMARY = "doc-summary"
+COMMAND_DOCS_COMPARE = "docs-compare"
 COMMAND_SOURCES = "sources"
 
 FORGET_ALL_CONFIRM_TOKEN = "confirm"
@@ -219,6 +230,8 @@ SUPPORTED_COMMANDS = frozenset(
         COMMAND_REMOVE_ALL_DOCUMENTS,
         COMMAND_SEARCH_DOCS,
         COMMAND_ASK_DOCS,
+        COMMAND_DOC_SUMMARY,
+        COMMAND_DOCS_COMPARE,
         COMMAND_SOURCES,
         *SECURITY_COMMAND_NAMES,
         *TOOL_COMMAND_NAMES,
@@ -249,6 +262,8 @@ HELP_TEXT = """Cortana: Available commands:
   /remove-all-documents - Delete all stored documents after confirmation
   /search-docs          - Search Knowledge Vault documents locally
   /ask-docs             - Ask a source-grounded question over retrieved documents
+  /doc-summary          - Summarize one authorized Knowledge Vault document
+  /docs-compare         - Compare two authorized documents for one question
   /sources              - Show sources from the latest grounded answer
   /event-new            - Record one local security event
   /events               - List saved security events
@@ -323,7 +338,8 @@ ABOUT_TEXT = (
     "defensive-operations assistant. This build is an early software milestone "
     "focused on identity, local commands, in-session conversation, explicit "
     "user-controlled persistent memory, temporary active memory context, a "
-    "local Knowledge Vault, source-grounded document questions, a local "
+    "local Knowledge Vault, source-grounded document questions, summaries, "
+    "two-document comparison, a local "
     "human-controlled security event, incident, indicator, evidence, and "
     "chain-of-custody foundation, a human-supervised defensive tool "
     "framework with scope controls and approval, optional process-isolated "
@@ -456,9 +472,21 @@ ASK_DOCS_AI_FAILURE = "Cortana: I could not complete that request."
 ASK_DOCS_UNAVAILABLE = (
     "Cortana: Source-grounded document questions are unavailable right now."
 )
+DOC_SUMMARY_MISSING_ID = (
+    "Cortana: Please provide a document ID. Usage: /doc-summary <document-id>"
+)
+DOCS_COMPARE_USAGE = (
+    "Cortana: Usage: /docs-compare <doc-id> | <doc-id> | <question>"
+)
+LOCAL_DOCUMENT_RETRIEVAL_DISABLED_MESSAGE = (
+    "Cortana: Local document retrieval is currently disabled."
+)
+DOCUMENT_CONTEXT_INJECTION_DISABLED_MESSAGE = (
+    "Cortana: Source-grounded document AI is currently disabled."
+)
 SOURCES_EMPTY = (
     "Cortana: No grounded document sources are available in this session yet. "
-    "Use /ask-docs to ask a source-grounded question first."
+    "Use /ask-docs, /doc-summary, or /docs-compare first."
 )
 
 UNKNOWN_COMMAND_TEMPLATE = (
@@ -646,7 +674,8 @@ def handle_slash_command(
 ) -> CommandResult:
     """Handle a slash command locally.
 
-    Most commands never call the AI service. ``/ask-docs`` and explicit
+    Most commands never call the AI service. Grounded document commands
+    (``/ask-docs``, ``/doc-summary``, ``/docs-compare``) and explicit
     incident-analysis run commands are the AI exceptions and require an
     injected client. Milestone 8 security commands, Milestone 9 tool
     commands, and Milestone 10/11 workflow commands are always local.
@@ -1355,8 +1384,30 @@ def _handle_remove_all_documents(context: CommandContext) -> CommandResult:
     )
 
 
+def _document_knowledge_service(context: CommandContext) -> DocumentKnowledgeService:
+    """Build the grounded document knowledge service for one command."""
+    return DocumentKnowledgeService(
+        vault=context.document_vault,
+        retriever=context.document_retriever,
+        retrieval_session=context.retrieval_session,
+        settings=context.settings,
+        client=context.client,
+    )
+
+
+def _handle_knowledge_error(error: DocumentKnowledgeError) -> CommandResult:
+    """Map knowledge-service errors to command results."""
+    return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
+
+
 def _handle_search_docs(context: CommandContext) -> CommandResult:
     """Run local lexical document search without calling the AI service."""
+    if not LOCAL_DOCUMENT_RETRIEVAL_ENABLED:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=LOCAL_DOCUMENT_RETRIEVAL_DISABLED_MESSAGE,
+        )
+
     query = extract_command_argument(context.message)
     if not query.strip():
         return CommandResult(
@@ -1415,7 +1466,7 @@ def _handle_search_docs(context: CommandContext) -> CommandResult:
 
 
 def _handle_ask_docs(context: CommandContext) -> CommandResult:
-    """Retrieve local evidence and ask a source-grounded AI question."""
+    """Ask a source-grounded question through DocumentKnowledgeService."""
     question = extract_command_argument(context.message)
     if not question.strip():
         return CommandResult(
@@ -1423,107 +1474,63 @@ def _handle_ask_docs(context: CommandContext) -> CommandResult:
             message=ASK_DOCS_MISSING_QUESTION,
         )
 
-    if context.client is None:
-        return CommandResult(
-            outcome=CommandOutcome.CONTINUE,
-            message=ASK_DOCS_UNAVAILABLE,
-        )
-
+    service = _document_knowledge_service(context)
     try:
-        documents = context.document_vault.list_documents()
-    except DocumentStorageError as error:
-        return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
-
-    if not documents:
-        return CommandResult(
-            outcome=CommandOutcome.CONTINUE,
-            message=ASK_DOCS_EMPTY_VAULT,
-        )
-
-    try:
-        results = context.document_retriever.search(question, documents)
-    except BlankRetrievalQueryError:
-        return CommandResult(
-            outcome=CommandOutcome.CONTINUE,
-            message=ASK_DOCS_MISSING_QUESTION,
-        )
-    except (
-        DocumentChunkingError,
-        DocumentRetrievalError,
-        RetrievalContextLimitError,
-    ) as error:
-        logger.error(
-            "Grounded document retrieval failed error_type=%s",
-            type(error).__name__,
-        )
-        return CommandResult(
-            outcome=CommandOutcome.CONTINUE,
-            message="Cortana: Document evidence could not be prepared safely.",
-        )
-
-    if not results:
-        logger.info("Grounded document question found no evidence result_count=0")
-        return CommandResult(
-            outcome=CommandOutcome.CONTINUE,
-            message=ASK_DOCS_NO_EVIDENCE,
-        )
-
-    active_memories = context.active_memory_context.list_active()
-    try:
-        answer = generate_response(
-            client=context.client,
-            settings=context.settings,
-            user_message=question.strip(),
-            conversation_history=context.conversation_history,
-            active_memories=active_memories or None,
-            memory_boundary_token=(
-                context.active_memory_context.boundary_token
-                if active_memories
-                else None
-            ),
-            document_results=results,
-            document_boundary_token=context.retrieval_session.boundary_token,
-        )
-    except Exception as error:
-        logger.error(
-            "Grounded document AI request failed error_type=%s",
-            type(error).__name__,
-        )
-        return CommandResult(
-            outcome=CommandOutcome.CONTINUE,
-            message=ASK_DOCS_AI_FAILURE,
-        )
-
-    citation_result = validate_response_citations(
-        answer,
-        {result.citation_label for result in results},
-    )
-    final_answer = citation_result.sanitized_response
-    logger.info(
-        "Grounded document question completed result_count=%s "
-        "citation_validation_succeeded=%s",
-        len(results),
-        citation_result.is_valid,
-    )
-
-    manifest = build_source_manifest(results)
-    context.retrieval_session.record_grounded_result(
-        query=question.strip(),
-        source_manifest=manifest,
-        citation_labels={result.citation_label for result in results},
-    )
-
-    context.conversation_history.add_user_message(question.strip())
-    context.conversation_history.add_assistant_message(final_answer)
+        answer = service.ask(question)
+    except DocumentKnowledgeError as error:
+        return _handle_knowledge_error(error)
 
     return CommandResult(
         outcome=CommandOutcome.CONTINUE,
-        message=f"Cortana: {final_answer}",
+        message=format_grounded_answer_message(answer),
+    )
+
+
+def _handle_doc_summary(context: CommandContext) -> CommandResult:
+    """Summarize one authorized Knowledge Vault document."""
+    document_id = extract_command_argument(context.message).strip()
+    if not document_id:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=DOC_SUMMARY_MISSING_ID,
+        )
+
+    service = _document_knowledge_service(context)
+    try:
+        answer = service.summarize(document_id)
+    except DocumentKnowledgeError as error:
+        return _handle_knowledge_error(error)
+
+    return CommandResult(
+        outcome=CommandOutcome.CONTINUE,
+        message=format_grounded_answer_message(answer),
+    )
+
+
+def _handle_docs_compare(context: CommandContext) -> CommandResult:
+    """Compare two authorized documents for one grounded question."""
+    argument = extract_command_argument(context.message)
+    parts = [part.strip() for part in argument.split("|")]
+    if len(parts) != 3 or not parts[0] or not parts[1] or not parts[2]:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=DOCS_COMPARE_USAGE,
+        )
+
+    service = _document_knowledge_service(context)
+    try:
+        answer = service.compare(parts[0], parts[1], parts[2])
+    except DocumentKnowledgeError as error:
+        return _handle_knowledge_error(error)
+
+    return CommandResult(
+        outcome=CommandOutcome.CONTINUE,
+        message=format_grounded_answer_message(answer),
     )
 
 
 def _handle_sources(context: CommandContext) -> CommandResult:
-    """Show the source manifest from the latest successful /ask-docs request."""
+    """Show the source manifest from the latest successful grounded request."""
     manifest = context.retrieval_session.source_manifest
     if not manifest:
         return CommandResult(
@@ -1534,7 +1541,8 @@ def _handle_sources(context: CommandContext) -> CommandResult:
     lines = ["Cortana: Latest grounded sources:"]
     for entry in manifest:
         lines.append(
-            f"  {entry.citation_label} filename={entry.filename} "
+            f"  {entry.citation_label} document_id={entry.document_id} "
+            f"filename={entry.filename} "
             f"chunk_index={entry.chunk_index} "
             f"chars={entry.start_offset}-{entry.end_offset}"
         )
@@ -1607,6 +1615,8 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     COMMAND_REMOVE_ALL_DOCUMENTS: _handle_remove_all_documents,
     COMMAND_SEARCH_DOCS: _handle_search_docs,
     COMMAND_ASK_DOCS: _handle_ask_docs,
+    COMMAND_DOC_SUMMARY: _handle_doc_summary,
+    COMMAND_DOCS_COMPARE: _handle_docs_compare,
     COMMAND_SOURCES: _handle_sources,
 }
 
@@ -1638,7 +1648,7 @@ def format_status(
     session = retrieval_session
     has_manifest = session.has_source_manifest if session is not None else False
     document_injection = (
-        "enabled (explicit /ask-docs only)"
+        "enabled (explicit /ask-docs, /doc-summary, /docs-compare)"
         if DOCUMENT_CONTEXT_INJECTION_ENABLED
         else "disabled"
     )
@@ -1729,6 +1739,14 @@ def format_status(
         f"  Maximum retrieved chunks: {MAX_RETRIEVED_CHUNKS}\n"
         "  Maximum retrieved context characters: "
         f"{MAX_RETRIEVED_CONTEXT_CHARS}\n"
+        f"  Maximum grounded answer characters: {MAX_GROUNDED_ANSWER_CHARS}\n"
+        f"  Maximum summary map stages: {MAX_SUMMARY_MAP_STAGES}\n"
+        f"  Maximum summary output characters: {MAX_SUMMARY_OUTPUT_CHARS}\n"
+        f"  Maximum compare documents: {MAX_COMPARE_DOCUMENTS}\n"
+        "  Maximum compare chunks per document: "
+        f"{MAX_COMPARE_CHUNKS_PER_DOCUMENT}\n"
+        "  Maximum compare context characters: "
+        f"{MAX_COMPARE_CONTEXT_CHARS}\n"
         "  Current source manifest: "
         f"{'present' if has_manifest else 'absent'}\n"
         "  Source manifest persistence: "

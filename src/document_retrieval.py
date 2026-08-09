@@ -205,6 +205,122 @@ class LexicalDocumentRetriever:
             max_results=max_results,
         )
 
+    def retrieve_within_documents(
+        self,
+        query: str,
+        documents: Sequence[DocumentRecord],
+        document_ids: Sequence[str],
+        *,
+        max_chunks_per_document: int,
+        max_total_chunks: int | None = None,
+        max_total_chars: int | None = None,
+    ) -> list[RetrievalResult]:
+        """Retrieve matching chunks only within explicitly required document IDs.
+
+        ``document_ids`` is required and must be non-empty. Citation labels use
+        stable DOC-N numbering from the explicit ID order, not score rank.
+        """
+        if not document_ids:
+            raise DocumentRetrievalError(
+                "Scoped retrieval requires at least one explicit document ID."
+            )
+        if max_chunks_per_document <= 0:
+            raise DocumentRetrievalError(
+                "Maximum chunks per document must be positive."
+            )
+
+        tokens = tokenize_query(query)
+        if not tokens:
+            raise BlankRetrievalQueryError(
+                "Retrieval query must contain at least one searchable term."
+            )
+
+        by_id = {document.id: document for document in documents}
+        total_chunk_limit = (
+            max_total_chunks
+            if max_total_chunks is not None
+            else self._config.max_retrieved_chunks
+        )
+        total_char_limit = (
+            max_total_chars
+            if max_total_chars is not None
+            else self._config.max_retrieved_context_chars
+        )
+        if total_chunk_limit <= 0:
+            raise DocumentRetrievalError("Maximum total chunks must be positive.")
+        if total_char_limit <= 0:
+            raise DocumentRetrievalError(
+                "Maximum total context characters must be positive."
+            )
+
+        per_document_char_budget = max(1, total_char_limit // len(document_ids))
+        results: list[RetrievalResult] = []
+        total_chars = 0
+
+        for document_number, document_id in enumerate(document_ids, start=1):
+            document = by_id.get(document_id)
+            if document is None:
+                raise DocumentRetrievalError(
+                    f"Document '{document_id}' was not found for scoped retrieval."
+                )
+
+            try:
+                chunks = self._chunker.chunk_document(document)
+            except DocumentChunkingError as error:
+                raise DocumentRetrievalError(str(error)) from error
+
+            scored: list[tuple[float, tuple[str, ...], DocumentChunk]] = []
+            for chunk in chunks:
+                score, matched = self._score_chunk(chunk.text, tokens, query)
+                if score > 0:
+                    scored.append((score, matched, chunk))
+
+            scored.sort(
+                key=lambda item: (
+                    -item[0],
+                    item[2].chunk_index,
+                )
+            )
+
+            selected_for_document = 0
+            document_chars = 0
+            for score, matched, chunk in scored:
+                if selected_for_document >= max_chunks_per_document:
+                    break
+                if len(results) >= total_chunk_limit:
+                    break
+                if document_chars + len(chunk.text) > per_document_char_budget:
+                    if selected_for_document == 0 and len(chunk.text) > per_document_char_budget:
+                        raise RetrievalContextLimitError(
+                            "A single matching chunk exceeds the per-document "
+                            "retrieved context character budget."
+                        )
+                    break
+                if total_chars + len(chunk.text) > total_char_limit:
+                    if not results:
+                        raise RetrievalContextLimitError(
+                            "A single matching chunk exceeds the maximum retrieved "
+                            "context character limit."
+                        )
+                    break
+
+                results.append(
+                    RetrievalResult(
+                        chunk=chunk,
+                        score=score,
+                        matched_terms=matched,
+                        citation_label=build_citation_label(
+                            document_number,
+                            chunk.chunk_index,
+                        ),
+                    )
+                )
+                selected_for_document += 1
+                document_chars += len(chunk.text)
+                total_chars += len(chunk.text)
+
+        return results
+
     def _select_within_limits(
         self,
         scored: Sequence[tuple[float, tuple[str, ...], DocumentChunk]],

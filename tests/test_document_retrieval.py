@@ -162,3 +162,37 @@ def test_search_vault_local_only(tmp_path: object) -> None:
 
     with pytest.raises(BlankRetrievalQueryError):
         retriever.search("   ", vault.list_documents())
+
+
+def test_retrieve_within_documents_requires_ids_and_excludes_others() -> None:
+    """Scoped retrieval must require IDs and keep DOC numbering stable."""
+    docs = [
+        _document("a.txt", "Remote access requires alpha controls."),
+        _document("b.txt", "Remote access requires beta controls."),
+        _document("c.txt", "Remote access UNIQUE_C_SCOPED_MARKER."),
+    ]
+    retriever = _retriever()
+
+    with pytest.raises(Exception):
+        retriever.retrieve_within_documents(
+            "remote access",
+            docs,
+            (),
+            max_chunks_per_document=2,
+        )
+
+    results = retriever.retrieve_within_documents(
+        "remote access",
+        docs,
+        (docs[0].id, docs[1].id),
+        max_chunks_per_document=2,
+        max_total_chunks=4,
+        max_total_chars=2000,
+    )
+    assert results
+    assert all(item.chunk.document_id != docs[2].id for item in results)
+    assert any(item.citation_label.startswith("[DOC-1:") for item in results)
+    assert any(item.citation_label.startswith("[DOC-2:") for item in results)
+    assert "UNIQUE_C_SCOPED_MARKER" not in " ".join(
+        item.chunk.text for item in results
+    )
