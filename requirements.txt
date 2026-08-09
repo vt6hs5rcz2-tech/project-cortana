@@ -6,3 +6,7 @@ rich==15.0.0
 pytest==9.1.1
 tzdata
 pywin32==311; sys_platform == "win32"
+google-api-python-client==2.184.0
+google-auth==2.40.3
+google-auth-oauthlib==1.2.2
+keyring==25.6.0

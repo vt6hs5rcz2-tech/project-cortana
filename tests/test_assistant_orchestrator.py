@@ -43,6 +43,9 @@ FORBIDDEN_ORCHESTRATOR_TOKENS = (
     "ReminderService",
     "ReminderRepository",
     "JsonReminderRepository",
+    "CalendarService",
+    "CalendarRepository",
+    "JsonCalendarRepository",
     "ai_service",
     "openai_client",
     "OpenAIClient",
@@ -731,6 +734,8 @@ def test_incident_read_does_not_mutate_history(
         ("analyze this incident with ai", "/incident-analysis-"),
         ("set a reminder", "/reminder-add"),
         ("list reminders", "/reminders"),
+        ("show my calendar", "/calendar-events"),
+        ("schedule a meeting", "/calendar-create"),
     ],
 )
 def test_guidance_routes_are_static(
@@ -853,6 +858,8 @@ def test_orchestrator_ast_has_no_forbidden_imports() -> None:
         "src.incident_analysis_service",
         "src.reminder_service",
         "src.reminder_repository",
+        "src.calendar_service",
+        "src.calendar_repository",
         "src.tool_process_runner",
         "src.tool_safe_files",
         "src.tool_process_text_search",
@@ -1093,6 +1100,8 @@ def test_incident_read_is_case_insensitive(tmp_path: Path, prefix: str) -> None:
         ("Run AI Analysis", "/incident-analysis-"),
         ("SET A REMINDER", "/reminder-add"),
         ("List Reminders", "/reminders"),
+        ("SHOW MY CALENDAR", "/calendar-events"),
+        ("Schedule A Meeting", "/calendar-confirm"),
     ],
 )
 def test_guidance_phrases_are_case_insensitive(

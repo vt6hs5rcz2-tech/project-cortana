@@ -22,6 +22,7 @@ from src.incident_analysis_audit import InMemoryIncidentAnalysisAuditLog
 from src.incident_analysis_repository import InMemoryIncidentAnalysisRepository
 from src.incident_repository import IncidentRepository
 from src.memory_store import MemoryStore
+from src.calendar_service import CalendarService
 from src.reminder_service import ReminderService
 from src.retrieval_session import RetrievalSession
 from src.settings import Settings
@@ -118,6 +119,7 @@ def run_conversation_loop(
     analysis_repository: InMemoryIncidentAnalysisRepository | None = None,
     analysis_audit_log: InMemoryIncidentAnalysisAuditLog | None = None,
     reminder_service: ReminderService | None = None,
+    calendar_service: CalendarService | None = None,
     read_input: Callable[[], str] | None = None,
     conversation_history: ConversationHistory | None = None,
 ) -> None:
@@ -173,6 +175,7 @@ def run_conversation_loop(
                 analysis_repository=analysis_repository,
                 analysis_audit_log=analysis_audit_log,
                 reminder_service=reminder_service,
+                calendar_service=calendar_service,
                 client=client,
             )
             if command_result.message:

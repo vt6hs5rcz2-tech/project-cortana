@@ -52,6 +52,10 @@ from src.config import (
     MAX_STORED_REMINDERS,
     REMINDER_REPOSITORY_ENABLED,
     REMINDER_REPOSITORY_PERSISTENCE_ENABLED,
+    CALENDAR_REPOSITORY_ENABLED,
+    CALENDAR_REPOSITORY_PERSISTENCE_ENABLED,
+    MAX_CALENDAR_PROPOSALS,
+    MAX_CALENDAR_AUDIT_ENTRIES,
     MAX_STORED_DOCUMENTS,
     SEMANTIC_RETRIEVAL_ENABLED,
     SOURCE_MANIFEST_PERSISTENCE_ENABLED,
@@ -120,6 +124,13 @@ from src.incident_repository import (
 )
 from src.memory import MemoryRecord, MemoryTextTooLongError, MemoryValidationError
 from src.memory_store import MemoryStorageError, MemoryStore
+from src.calendar_commands import (
+    CALENDAR_COMMAND_NAMES,
+    CalendarCommandContext,
+    create_default_calendar_service,
+    handle_calendar_command,
+)
+from src.calendar_service import CalendarService
 from src.reminder_commands import (
     REMINDER_COMMAND_NAMES,
     ReminderCommandContext,
@@ -128,6 +139,7 @@ from src.reminder_commands import (
 )
 from src.reminder_repository import ReminderStorageError
 from src.reminder_service import ReminderService
+from src.secret_store import InMemorySecretStore
 from src.retrieval_session import RetrievalSession
 from src.security_commands import (
     SECURITY_COMMAND_NAMES,
@@ -214,6 +226,7 @@ SUPPORTED_COMMANDS = frozenset(
         *INCIDENT_ANALYSIS_COMMAND_NAMES,
         *INCIDENT_EVIDENCE_COMMAND_NAMES,
         *REMINDER_COMMAND_NAMES,
+        *CALENDAR_COMMAND_NAMES,
     }
 )
 
@@ -291,6 +304,17 @@ HELP_TEXT = """Cortana: Available commands:
   /reminder-cancel      - Cancel one reminder
   /reminder-snooze      - Snooze the current reminder occurrence
   /reminder-reschedule  - Reschedule one reminder
+  /calendar-connect     - Connect one Google Calendar account via OAuth
+  /calendar-disconnect  - Disconnect Google Calendar and remove local credentials
+  /calendars            - List calendars for the connected account
+  /calendar-use         - Set the default calendar ID
+  /calendar-events      - List upcoming calendar events
+  /calendar-event       - Show one calendar event
+  /calendar-freebusy    - Show busy intervals for a time window
+  /calendar-create      - Prepare a timed event create proposal
+  /calendar-reschedule  - Prepare a timed event reschedule proposal
+  /calendar-cancel      - Prepare an event cancel proposal
+  /calendar-confirm     - Confirm and execute one calendar proposal
   /about                - Describe Project Cortana and this software milestone
   /exit                 - End the session cleanly"""
 
@@ -312,7 +336,8 @@ ABOUT_TEXT = (
     "incident linkage for completed playbook runs, optional controlled "
     "security analyst assistance over sanitized single-incident packets, "
     "and a local timezone-aware reminder scheduling foundation separate "
-    "from persistent memory."
+    "from persistent memory, plus Google Calendar integration with secure "
+    "credential storage and explicit prepare-confirm writes."
 )
 
 CLEAR_CONFIRMATION = (
@@ -480,6 +505,7 @@ class CommandContext:
     analysis_repository: InMemoryIncidentAnalysisRepository
     analysis_audit_log: InMemoryIncidentAnalysisAuditLog
     reminder_service: ReminderService
+    calendar_service: CalendarService
     client: OpenAIClient | None = None
 
 
@@ -539,6 +565,19 @@ def _ephemeral_reminder_service() -> ReminderService:
     root = Path(tempfile.mkdtemp(prefix="cortana-reminders-"))
     return create_default_reminder_service(
         repository_file_path=root / "reminders.json",
+    )
+
+
+def _ephemeral_calendar_service(
+    *,
+    oauth_client_file: Path | None = None,
+) -> CalendarService:
+    """Create a disposable calendar service for tests that omit injection."""
+    root = Path(tempfile.mkdtemp(prefix="cortana-calendar-"))
+    return create_default_calendar_service(
+        repository_file_path=root / "calendar_control.json",
+        secret_store=InMemorySecretStore(),
+        oauth_client_file=oauth_client_file,
     )
 
 
@@ -602,6 +641,7 @@ def handle_slash_command(
     analysis_repository: InMemoryIncidentAnalysisRepository | None = None,
     analysis_audit_log: InMemoryIncidentAnalysisAuditLog | None = None,
     reminder_service: ReminderService | None = None,
+    calendar_service: CalendarService | None = None,
     client: OpenAIClient | None = None,
 ) -> CommandResult:
     """Handle a slash command locally.
@@ -650,6 +690,11 @@ def handle_slash_command(
 
     if reminder_service is None:
         reminder_service = _ephemeral_reminder_service()
+
+    if calendar_service is None:
+        calendar_service = _ephemeral_calendar_service(
+            oauth_client_file=settings.google_oauth_client_file,
+        )
 
     if command_name in SECURITY_COMMAND_NAMES:
         security_result = handle_security_command(
@@ -755,6 +800,20 @@ def handle_slash_command(
                 message=reminder_result.message,
             )
 
+    if command_name in CALENDAR_COMMAND_NAMES:
+        calendar_result = handle_calendar_command(
+            command_name,
+            CalendarCommandContext(
+                message=message,
+                calendar_service=calendar_service,
+            ),
+        )
+        if calendar_result is not None:
+            return CommandResult(
+                outcome=CommandOutcome.CONTINUE,
+                message=calendar_result.message,
+            )
+
     handler = COMMAND_HANDLERS.get(command_name)
 
     if handler is None:
@@ -784,6 +843,7 @@ def handle_slash_command(
         analysis_repository=analysis_repository,
         analysis_audit_log=analysis_audit_log,
         reminder_service=reminder_service,
+        calendar_service=calendar_service,
         client=client,
     )
     return handler(context)
@@ -811,6 +871,7 @@ def _handle_status(context: CommandContext) -> CommandResult:
             context.workflow_run_repository,
             context.analysis_repository,
             context.reminder_service,
+            context.calendar_service,
         )
     except MemoryStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
@@ -1564,6 +1625,7 @@ def format_status(
     workflow_run_repository: WorkflowRunRepository | None = None,
     analysis_repository: InMemoryIncidentAnalysisRepository | None = None,
     reminder_service: ReminderService | None = None,
+    calendar_service: CalendarService | None = None,
 ) -> str:
     """Build safe local session status text for /status."""
     completed_turns = conversation_history.completed_turn_count
@@ -1597,6 +1659,20 @@ def format_status(
     else:
         stored_reminder_count = reminder_service.count_all()
         scheduled_reminder_count = reminder_service.count_scheduled()
+
+    if calendar_service is None:
+        calendar_connection = "not_connected"
+        calendar_provider = "-"
+        calendar_default = "-"
+        calendar_pending = 0
+        calendar_unknown = 0
+    else:
+        calendar_view = calendar_service.status_view()
+        calendar_connection = calendar_view.connection_state
+        calendar_provider = calendar_view.provider_id or "-"
+        calendar_default = calendar_view.default_calendar_id or "-"
+        calendar_pending = calendar_view.pending_proposal_count
+        calendar_unknown = calendar_view.unknown_outcome_count
 
     registry = tool_registry or build_default_tool_registry()
     registered_tool_count = registry.count()
@@ -1750,7 +1826,18 @@ def format_status(
         f"  Maximum stored reminders: {MAX_STORED_REMINDERS}\n"
         f"  Maximum reminder audit entries: {MAX_REMINDER_AUDIT_ENTRIES}\n"
         "  Reminder repository persistence: "
-        f"{'enabled' if REMINDER_REPOSITORY_PERSISTENCE_ENABLED else 'disabled'}"
+        f"{'enabled' if REMINDER_REPOSITORY_PERSISTENCE_ENABLED else 'disabled'}\n"
+        "  Calendar repository: "
+        f"{'enabled' if CALENDAR_REPOSITORY_ENABLED else 'disabled'}\n"
+        f"  Calendar connection: {calendar_connection}\n"
+        f"  Calendar provider: {calendar_provider}\n"
+        f"  Default calendar ID: {calendar_default}\n"
+        f"  Pending calendar proposals: {calendar_pending}\n"
+        f"  Unknown-outcome calendar proposals: {calendar_unknown}\n"
+        f"  Maximum calendar proposals: {MAX_CALENDAR_PROPOSALS}\n"
+        f"  Maximum calendar audit entries: {MAX_CALENDAR_AUDIT_ENTRIES}\n"
+        "  Calendar repository persistence: "
+        f"{'enabled' if CALENDAR_REPOSITORY_PERSISTENCE_ENABLED else 'disabled'}"
     )
 
 

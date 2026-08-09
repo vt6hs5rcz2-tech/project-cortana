@@ -25,6 +25,7 @@ Project Cortana is an early software milestone focused on:
 - Coordinated evidence↔incident linking, incident-scoped evidence text-search request creation, and AI-off bounded incident context display
 - Deterministic ordinary-language routing for a small high-confidence set of existing capabilities (slash commands remain privileged)
 - Local timezone-aware reminder scheduling foundation separate from persistent memory
+- Google Calendar integration with OS credential storage and explicit prepare→confirm writes
 
 ## Conversation history, persistent memory, active context, and documents
 
@@ -40,6 +41,7 @@ Project Cortana is an early software milestone focused on:
 | Workflow/playbook run state and workflow audits | Survives restarts when persistence is enabled; otherwise current process only | Created only through explicit local Milestone 10/11 commands | Never in this milestone |
 | Incident AI analysis preparations and results | Current process only | Created only through explicit local Milestone 12 analysis commands | Only through `/incident-analysis-run`, as a sanitized allowlisted packet |
 | Reminders | Survives restarts | Created only through explicit local Milestone 19 reminder commands | Never in this milestone |
+| Calendar account metadata, proposals, and calendar audits | Survives restarts | Connected/changed only through explicit local Milestone 20 calendar commands | Never in this milestone |
 
 Persistent memories, Knowledge Vault documents, incident records, and evidence copies are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories.
 
@@ -411,7 +413,48 @@ Commands:
 
 M18 guidance only (exact phrases; no operational execution): `set a reminder`, `list reminders`.
 
-Not in this milestone: push/email/SMS/voice delivery, Google Calendar or other providers, appointments/bookings/payments, yearly/COUNT/UNTIL/RRULE engines, background schedulers, AI scheduling, or reminder↔memory linkage.
+Not in this milestone: push/email/SMS/voice delivery, appointments/bookings/payments, yearly/COUNT/UNTIL/RRULE engines, background schedulers, AI scheduling, reminder↔calendar linkage, or reminder↔memory linkage.
+
+### Google Calendar integration (Milestone 20)
+
+Milestone 20 adds Cortana's first real external calendar integration: one authorized Google Calendar account, secure OAuth credential storage, event/free-busy reads, conflict checking, and explicit prepare→confirm writes. Google remains the source of truth for event data. Reminders stay a separate local domain.
+
+Behavior:
+
+- Desktop OAuth loopback via `InstalledAppFlow.run_local_server()` using `CORTANA_GOOGLE_OAUTH_CLIENT_FILE`
+- Exact scopes: `calendar.calendarlist.readonly`, `calendar.events`, `calendar.freebusy`
+- Persist only the Google refresh token in the OS credential store (`keyring` / Windows Credential Manager); never in `calendar_control.json`, audit, logs, AI history, or tool child process env
+- Local `calendar_control.json` stores one account metadata object, proposals, and bounded audits only (no event catalog, no tokens)
+- Default calendar starts as Google's stable `primary` alias; change with `/calendar-use`
+- Timed local wall times are interpreted in the selected calendar's IANA timezone (never OS timezone guessing)
+- Reads: list calendars, list/show events, free/busy
+- Writes: timed non-recurring create/reschedule/cancel only after `/calendar-confirm`
+- Create proposals generate a Google-compliant `client_event_id` once at prepare time and reuse it for recovery
+- Confirm rechecks free/busy and etag/stale state; conflicts and stale remote changes fail closed and require re-prepare
+- Ambiguous provider outcomes become `unknown_outcome` (not blind retry as failed)
+- Recurring and all-day events are readable; writes to recurring/all-day events are rejected
+- No attendees, booking, payments, background sync, multi-provider support, or AI calendar execution
+- Calendar slash output and M18 guidance stay outside ordinary AI conversation history
+
+Commands:
+
+```text
+/calendar-connect
+/calendar-disconnect
+/calendars
+/calendar-use <calendar-id>
+/calendar-events [<calendar-id>]
+/calendar-event <calendar-id-or-> | <event-id>
+/calendar-freebusy <calendar-id-or-> | <YYYY-MM-DD HH:MM> | <YYYY-MM-DD HH:MM>
+/calendar-create <calendar-id-or-> | <title> | <YYYY-MM-DD HH:MM> | <YYYY-MM-DD HH:MM>
+/calendar-reschedule <calendar-id-or-> | <event-id> | <YYYY-MM-DD HH:MM> | <YYYY-MM-DD HH:MM>
+/calendar-cancel <calendar-id-or-> | <event-id>
+/calendar-confirm <proposal-id>
+```
+
+M18 guidance only (exact phrases; no operational execution): `show my calendar`, `schedule a meeting`.
+
+Network trust: Cortana delegates Google endpoint selection and TLS validation to the official Google SDKs. Calendar network code is not registered as a defensive tool and does not accept arbitrary user URLs.
 
 ### Unified assistant orchestration (Milestone 18)
 
@@ -439,8 +482,9 @@ Guidance-only routes (static text; no executors, no AI, no request construction)
 - Workflows → points to controlled `/playbook-*`
 - Analyst assistance → points to controlled `/incident-analysis-*` and existing feature gates
 - Reminders → points to controlled `/reminder-add` / `/reminders` (exact phrases only)
+- Calendar → points to controlled `/calendar-events` or `/calendar-create` + `/calendar-confirm` (exact phrases only)
 
-Not routed by natural language in this milestone: evidence-search request construction, ask-docs, ingestion/deletion, tool/workflow/AI analysis execution, note saving, reminder creation/mutation, shell/network/remediation, and other consequential flows remain explicit controlled commands.
+Not routed by natural language in this milestone: evidence-search request construction, ask-docs, ingestion/deletion, tool/workflow/AI analysis execution, note saving, reminder creation/mutation, calendar reads/writes, shell/network/remediation, and other consequential flows remain explicit controlled commands.
 
 ### Evidence text search and bounded incident context (Milestone 17)
 

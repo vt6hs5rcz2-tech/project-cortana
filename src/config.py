@@ -244,6 +244,33 @@ MAX_REMINDER_LIST_PREVIEW_CHARS = 120
 MAX_REMINDER_SHOW_AUDIT_ENTRIES = 10
 MAX_REMINDER_RECURRENCE_SEARCH_STEPS = 10_000
 
+# Calendar integration (Milestone 20)
+CALENDAR_REPOSITORY_ENABLED = True
+CALENDAR_REPOSITORY_PERSISTENCE_ENABLED = True
+CALENDAR_REPOSITORY_SCHEMA_VERSION = 1
+CALENDAR_REPOSITORY_FILENAME = "calendar_control.json"
+
+GOOGLE_CALENDAR_SCOPES: tuple[str, ...] = (
+    "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.freebusy",
+)
+
+MAX_CALENDAR_ACCOUNT_DISPLAY_LABEL_LENGTH = 200
+MAX_CALENDAR_ID_LENGTH = 200
+MAX_CALENDAR_EVENT_ID_LENGTH = 1024
+MAX_CALENDAR_EVENT_TITLE_LENGTH = 200
+MAX_CALENDAR_EVENT_DESCRIPTION_LENGTH = 2_000
+MAX_CALENDAR_PROPOSALS = 200
+MAX_CALENDAR_AUDIT_ENTRIES = 5_000
+CALENDAR_PROPOSAL_TTL_SECONDS = 15 * 60
+MAX_CALENDAR_LIST_RESULTS = 50
+MAX_CALENDAR_LIST_PREVIEW_CHARS = 120
+MAX_CALENDAR_FREEBUSY_CALENDARS = 10
+MAX_CALENDAR_EVENT_WINDOW_DAYS = 31
+MAX_CALENDAR_ERROR_MESSAGE_LENGTH = 500
+SECRET_STORE_SERVICE_NAME = "ProjectCortana"
+
 
 def _default_app_data_dir() -> Path:
     """Return the user-local application data directory for Project Cortana."""
@@ -293,6 +320,11 @@ def get_default_workflow_repository_file_path() -> Path:
 def get_default_reminder_repository_file_path() -> Path:
     """Return the default user-local path for the reminder repository JSON file."""
     return _default_app_data_dir() / REMINDER_REPOSITORY_FILENAME
+
+
+def get_default_calendar_repository_file_path() -> Path:
+    """Return the default user-local path for the calendar control JSON file."""
+    return _default_app_data_dir() / CALENDAR_REPOSITORY_FILENAME
 
 
 def get_default_tool_process_scratch_dir_path() -> Path:

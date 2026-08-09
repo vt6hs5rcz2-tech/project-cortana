@@ -84,6 +84,16 @@ _REMINDER_LIST_GUIDANCE_PHRASES = frozenset(
         "list reminders",
     }
 )
+_CALENDAR_SHOW_GUIDANCE_PHRASES = frozenset(
+    {
+        "show my calendar",
+    }
+)
+_CALENDAR_SCHEDULE_GUIDANCE_PHRASES = frozenset(
+    {
+        "schedule a meeting",
+    }
+)
 _MEMORY_READ_PHRASES_NORMALIZED = frozenset(
     phrase.casefold() for phrase in _MEMORY_READ_PHRASES
 )
@@ -104,6 +114,12 @@ _REMINDER_SET_GUIDANCE_PHRASES_NORMALIZED = frozenset(
 )
 _REMINDER_LIST_GUIDANCE_PHRASES_NORMALIZED = frozenset(
     phrase.casefold() for phrase in _REMINDER_LIST_GUIDANCE_PHRASES
+)
+_CALENDAR_SHOW_GUIDANCE_PHRASES_NORMALIZED = frozenset(
+    phrase.casefold() for phrase in _CALENDAR_SHOW_GUIDANCE_PHRASES
+)
+_CALENDAR_SCHEDULE_GUIDANCE_PHRASES_NORMALIZED = frozenset(
+    phrase.casefold() for phrase in _CALENDAR_SCHEDULE_GUIDANCE_PHRASES
 )
 
 _MEMORY_MISSING_TEXT = (
@@ -163,6 +179,16 @@ _REMINDER_LIST_GUIDANCE = (
     "/reminders command. Natural-language input cannot list or modify "
     "reminders."
 )
+_CALENDAR_SHOW_GUIDANCE = (
+    "Cortana: Calendar events are listed only through the controlled "
+    "/calendar-events command. Natural-language input cannot read or "
+    "modify calendar data."
+)
+_CALENDAR_SCHEDULE_GUIDANCE = (
+    "Cortana: Calendar events are created only through the controlled "
+    "/calendar-create command followed by explicit /calendar-confirm. "
+    "Natural-language input cannot schedule or modify calendar events."
+)
 
 
 @dataclass(frozen=True)
@@ -210,6 +236,8 @@ class UnifiedAssistantOrchestrator:
             self._try_analyst_guidance,
             self._try_reminder_set_guidance,
             self._try_reminder_list_guidance,
+            self._try_calendar_show_guidance,
+            self._try_calendar_schedule_guidance,
         )
         for handler in handlers:
             result = handler(message)
@@ -495,6 +523,31 @@ class UnifiedAssistantOrchestrator:
             confidence="high",
             missing_fields=(),
             safe_user_message=_REMINDER_LIST_GUIDANCE,
+        )
+
+    def _try_calendar_show_guidance(self, message: str) -> OrchestrationResult | None:
+        if message.casefold() not in _CALENDAR_SHOW_GUIDANCE_PHRASES_NORMALIZED:
+            return None
+        return OrchestrationResult(
+            domain="guidance",
+            action="calendar_show",
+            confidence="high",
+            missing_fields=(),
+            safe_user_message=_CALENDAR_SHOW_GUIDANCE,
+        )
+
+    def _try_calendar_schedule_guidance(
+        self,
+        message: str,
+    ) -> OrchestrationResult | None:
+        if message.casefold() not in _CALENDAR_SCHEDULE_GUIDANCE_PHRASES_NORMALIZED:
+            return None
+        return OrchestrationResult(
+            domain="guidance",
+            action="calendar_schedule",
+            confidence="high",
+            missing_fields=(),
+            safe_user_message=_CALENDAR_SCHEDULE_GUIDANCE,
         )
 
 

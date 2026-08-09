@@ -20,6 +20,7 @@ from src.incident_analysis_audit import InMemoryIncidentAnalysisAuditLog
 from src.incident_analysis_repository import InMemoryIncidentAnalysisRepository
 from src.incident_repository import IncidentRepository, JsonIncidentRepository
 from src.memory_store import JsonMemoryStore, MemoryStore
+from src.calendar_service import CalendarService
 from src.reminder_service import ReminderService
 from src.retrieval_session import RetrievalSession
 from src.settings import Settings
@@ -542,6 +543,7 @@ def test_main_orchestrates_conversation_loop(
     tool_path = tmp_path / "tool_control.json"
     workflow_path = tmp_path / "workflow_runs.json"
     reminder_path = tmp_path / "reminders.json"
+    calendar_path = tmp_path / "calendar_control.json"
     received_client: OpenAIClient | None = None
     received_settings: Settings | None = None
     received_logger: logging.Logger | None = None
@@ -563,6 +565,7 @@ def test_main_orchestrates_conversation_loop(
     received_analysis_repository: InMemoryIncidentAnalysisRepository | None = None
     received_analysis_audit_log: InMemoryIncidentAnalysisAuditLog | None = None
     received_reminder_service: ReminderService | None = None
+    received_calendar_service: CalendarService | None = None
 
     monkeypatch.setattr(main_module, "setup_logging", lambda: logger)
     monkeypatch.setattr(
@@ -605,6 +608,11 @@ def test_main_orchestrates_conversation_loop(
         "get_default_reminder_repository_file_path",
         lambda: reminder_path,
     )
+    monkeypatch.setattr(
+        main_module,
+        "get_default_calendar_repository_file_path",
+        lambda: calendar_path,
+    )
 
     def fake_run_conversation_loop(
         *,
@@ -629,6 +637,7 @@ def test_main_orchestrates_conversation_loop(
         analysis_repository: InMemoryIncidentAnalysisRepository,
         analysis_audit_log: InMemoryIncidentAnalysisAuditLog,
         reminder_service: ReminderService,
+        calendar_service: CalendarService,
     ) -> None:
         nonlocal received_client, received_settings, received_logger, received_memory_store
         nonlocal received_active_memory_context
@@ -640,7 +649,7 @@ def test_main_orchestrates_conversation_loop(
         nonlocal received_workflow_registry, received_workflow_run_repository
         nonlocal received_workflow_executor
         nonlocal received_analysis_repository, received_analysis_audit_log
-        nonlocal received_reminder_service
+        nonlocal received_reminder_service, received_calendar_service
         received_client = client
         received_settings = settings
         received_logger = logger
@@ -662,6 +671,7 @@ def test_main_orchestrates_conversation_loop(
         received_analysis_repository = analysis_repository
         received_analysis_audit_log = analysis_audit_log
         received_reminder_service = reminder_service
+        received_calendar_service = calendar_service
 
     monkeypatch.setattr(
         main_module,
@@ -703,5 +713,8 @@ def test_main_orchestrates_conversation_loop(
     assert isinstance(received_analysis_audit_log, InMemoryIncidentAnalysisAuditLog)
     assert isinstance(received_reminder_service, ReminderService)
     assert received_reminder_service.count_all() == 0
+    assert isinstance(received_calendar_service, CalendarService)
+    assert received_calendar_service.status_view().connection_state == "not_connected"
     assert reminder_path.parent.exists()
+    assert calendar_path.parent.exists()
     assert received_workflow_registry.count() >= 2
