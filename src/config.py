@@ -150,6 +150,81 @@ DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"
 DEFAULT_TTS_VOICE = "coral"
 VOICE_CAPTURE_BLOCKSIZE = 1024
 
+# Realtime Voice Conversation (Milestone 25)
+# Explicit /voice-realtime session. No wake word, ambient listen, or auto-reconnect.
+REALTIME_VOICE_ENABLED = True
+REALTIME_VOICE_SAMPLE_RATE_HZ = 24_000
+REALTIME_VOICE_CHANNELS = 1
+REALTIME_VOICE_SAMPLE_WIDTH_BYTES = 2
+REALTIME_VOICE_FRAME_MS = 20
+REALTIME_VOICE_FRAME_SAMPLES = (
+    REALTIME_VOICE_SAMPLE_RATE_HZ * REALTIME_VOICE_FRAME_MS // 1000
+)
+REALTIME_VOICE_FRAME_BYTES = (
+    REALTIME_VOICE_FRAME_SAMPLES
+    * REALTIME_VOICE_CHANNELS
+    * REALTIME_VOICE_SAMPLE_WIDTH_BYTES
+)
+# ~1 second of 20 ms frames.
+REALTIME_VOICE_INPUT_QUEUE_MS = 1_000
+REALTIME_VOICE_INPUT_QUEUE_FRAMES = (
+    REALTIME_VOICE_INPUT_QUEUE_MS // REALTIME_VOICE_FRAME_MS
+)
+REALTIME_VOICE_INPUT_QUEUE_BYTES = (
+    REALTIME_VOICE_INPUT_QUEUE_FRAMES * REALTIME_VOICE_FRAME_BYTES
+)
+# ~2 seconds of assistant audio buffering.
+REALTIME_VOICE_OUTPUT_QUEUE_MS = 2_000
+REALTIME_VOICE_OUTPUT_QUEUE_FRAMES = (
+    REALTIME_VOICE_OUTPUT_QUEUE_MS // REALTIME_VOICE_FRAME_MS
+)
+REALTIME_VOICE_OUTPUT_QUEUE_BYTES = (
+    REALTIME_VOICE_OUTPUT_QUEUE_FRAMES * REALTIME_VOICE_FRAME_BYTES
+)
+MAX_REALTIME_VOICE_SESSION_MINUTES = 20
+MAX_CANCELLED_REALTIME_RESPONSE_IDS = 16
+REALTIME_VOICE_RECV_TIMEOUT_SECONDS = 0.02
+REALTIME_VOICE_CAPTURE_BLOCKSIZE = REALTIME_VOICE_FRAME_SAMPLES
+ALLOWED_REALTIME_MODELS = frozenset(
+    {
+        "gpt-realtime",
+        "gpt-realtime-1.5",
+        "gpt-realtime-2",
+        "gpt-realtime-2.1",
+        "gpt-realtime-2.1-mini",
+        "gpt-realtime-2025-08-28",
+        "gpt-4o-realtime-preview",
+        "gpt-4o-realtime-preview-2024-10-01",
+        "gpt-4o-realtime-preview-2024-12-17",
+        "gpt-4o-realtime-preview-2025-06-03",
+        "gpt-4o-mini-realtime-preview",
+        "gpt-4o-mini-realtime-preview-2024-12-17",
+        "gpt-realtime-mini",
+        "gpt-realtime-mini-2025-10-06",
+        "gpt-realtime-mini-2025-12-15",
+        "gpt-audio-1.5",
+        "gpt-audio-mini",
+        "gpt-audio-mini-2025-10-06",
+        "gpt-audio-mini-2025-12-15",
+    }
+)
+ALLOWED_REALTIME_VOICES = frozenset(
+    {
+        "alloy",
+        "ash",
+        "ballad",
+        "coral",
+        "echo",
+        "sage",
+        "shimmer",
+        "verse",
+        "marin",
+        "cedar",
+    }
+)
+DEFAULT_REALTIME_MODEL = "gpt-realtime-mini"
+DEFAULT_REALTIME_VOICE = "coral"
+
 # Security incident repository and evidence foundation (Milestone 8)
 INCIDENT_REPOSITORY_ENABLED = True
 EVIDENCE_COPY_ENABLED = True

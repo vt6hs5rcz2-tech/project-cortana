@@ -124,12 +124,27 @@ def test_load_settings_voice_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CORTANA_TRANSCRIPTION_MODEL", raising=False)
     monkeypatch.delenv("CORTANA_TTS_MODEL", raising=False)
     monkeypatch.delenv("CORTANA_TTS_VOICE", raising=False)
+    monkeypatch.delenv("CORTANA_REALTIME_MODEL", raising=False)
+    monkeypatch.delenv("CORTANA_REALTIME_VOICE", raising=False)
 
     settings = load_settings()
 
     assert settings.transcription_model == "gpt-4o-mini-transcribe"
     assert settings.tts_model == "gpt-4o-mini-tts"
     assert settings.tts_voice == "coral"
+    assert settings.realtime_model == "gpt-realtime-mini"
+    assert settings.realtime_voice == "coral"
+
+
+def test_load_settings_rejects_disallowed_realtime_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setenv("CORTANA_REALTIME_MODEL", "gpt-5")
+
+    with pytest.raises(ValueError, match="CORTANA_REALTIME_MODEL"):
+        load_settings()
 
 
 def test_load_settings_rejects_disallowed_tts_voice(

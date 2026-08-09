@@ -1,4 +1,5 @@
 openai==2.52.0
+websockets>=13,<16
 python-dotenv==1.2.2
 pypdf==6.14.2
 Pillow==11.3.0

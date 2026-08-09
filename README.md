@@ -17,6 +17,7 @@ Project Cortana is an early software milestone focused on:
 - Session-scoped Study Partner for grounded explanations, practice questions, graded answers, and progress over authorized documents
 - Static visual understanding for authorized local images (describe, ask, and local validation/info)
 - Explicit push-to-talk natural voice conversation for one spoken turn at a time
+- Explicit realtime spoken conversation with barge-in/interruption
 - Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 - Optional process-isolated execution for a tiny allowlisted defensive tool subset
@@ -48,6 +49,7 @@ Project Cortana is an early software milestone focused on:
 | Study Partner sessions, questions, attempts, and chunk stats | Survives restarts | Created only through explicit local Milestone 22 `/study-*` commands | Only selected study chunks / short-answer grading inputs through study AI commands |
 | Visual analysis images | Ephemeral for one command only | Loaded only through explicit local Milestone 23 `/vision-*` commands | Only a normalized in-memory PNG plus the explicit visual task through `/vision-describe` or `/vision-ask` |
 | Voice microphone/TTS audio | Ephemeral for one `/voice-turn` only | Captured/synthesized only through explicit local Milestone 24 `/voice-turn` | Bounded mic WAV for transcription; ordinary chat text for the reply; reply text for TTS. Raw audio is never stored |
+| Realtime voice audio | Ephemeral for one `/voice-realtime` session only | Streamed only while an explicit Milestone 25 realtime session is active | Bounded PCM frames to the OpenAI Realtime API; finalized transcripts only may enter local conversation history. Raw audio is never stored |
 
 Persistent memories, Knowledge Vault documents, incident records, evidence copies, and Study Partner state are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories. Visual analysis does not persist image bytes. Voice capture and TTS audio are ephemeral and are not archived.
 
@@ -134,7 +136,8 @@ Feature flags:
 - `SEMANTIC_RETRIEVAL_ENABLED` remains false and unimplemented
 - `STUDY_PARTNER_ENABLED` gates all `/study-*` commands
 - `VISION_ANALYSIS_ENABLED` gates all `/vision-*` commands
-- `VOICE_INTERACTION_ENABLED` gates `/voice-turn` and `/voice-status`
+- `VOICE_INTERACTION_ENABLED` gates `/voice-turn`, `/voice-status`, and parent-gates realtime voice
+- `REALTIME_VOICE_ENABLED` gates `/voice-realtime` (requires the parent voice gate too)
 
 ## Source-grounded answers
 
@@ -250,7 +253,7 @@ Behavior and limits:
 - The text response is authoritative: TTS or playback failure still keeps the visible/history-committed conversational turn
 - Voice is a transport into ordinary conversation (`generate_response` + history + active memory)
 - Spoken transcripts intentionally have less operational authority than typed input in M24: they do not execute slash commands and do not enter Milestone 18 natural-language routing
-- M24 is sequential push-to-talk. No full-duplex realtime, wake word, always-on listening, barge-in, or speaking over Cortana during playback
+- M24 is sequential push-to-talk. No wake word and no always-on listening. For interruptible realtime conversation, use Milestone 25 `/voice-realtime`.
 
 Centralized limits:
 
@@ -265,6 +268,41 @@ Centralized limits:
 Feature flag:
 
 - `VOICE_INTERACTION_ENABLED` gates `/voice-turn` and `/voice-status`
+
+## Realtime voice conversation
+
+Milestone 25 adds an explicitly activated realtime spoken conversation session with genuine barge-in.
+
+Commands:
+
+- `/voice-realtime` — start one bounded realtime session; ordinary CLI input is paused until Ctrl+C or session end
+- `/voice-status` — also reports realtime gate/model/voice configuration (never opens the microphone)
+- `/voice-turn` remains the simple push-to-talk fallback
+
+Behavior and limits:
+
+- Realtime never starts automatically; `/voice-realtime` is required
+- Microphone opens only after a successful Realtime API connect and session configuration
+- Audio is raw PCM 16-bit mono 24 kHz in 20 ms frames (960 bytes); no WAV wrapping and no disk archive
+- Uses OpenAI synchronous `client.realtime.connect(..., max_retries=0)` — no automatic reconnect
+- Server VAD with `create_response=true` and `interrupt_response=true`; no local VAD; no per-utterance Enter-to-stop
+- Assistant audio plays through `sounddevice.RawOutputStream`; barge-in uses `abort()` for immediate local silence
+- Input transcription (`gpt-4o-mini-transcribe` by default) is guidance of input audio content rather than precisely what the realtime model heard
+- Local `ConversationHistory` remains canonical; only finalized transcripts are committed. Interrupted assistant text is not committed
+- Spoken realtime content remains conversational only: no slash-command, M18, calendar/reminder, tool/workflow, or memory-write authority
+- Realtime function/tool calling is disabled (`tools=[]`, `tool_choice=none`)
+- Hard session cap: 20 minutes
+- On failure/unavailable: report clearly; do not silently fall back to `/voice-turn`
+
+Feature flags:
+
+- `VOICE_INTERACTION_ENABLED` parent gate
+- `REALTIME_VOICE_ENABLED` realtime subset gate (both must be true)
+
+Settings:
+
+- `CORTANA_REALTIME_MODEL` (default `gpt-realtime-mini`)
+- `CORTANA_REALTIME_VOICE` (default `coral`)
 
 Citation labels use a compact deterministic format such as `[DOC-1:C1]`. Each label maps through a session source manifest to:
 
@@ -840,6 +878,7 @@ Centralized defaults:
 | `/vision-ask <path> \| <question>` | Ask a question about one authorized local image |
 | `/vision-info <path>` | Validate/normalize one authorized local image without calling the AI |
 | `/voice-turn` | Capture one spoken utterance and hear Cortana's ordinary conversational reply |
+| `/voice-realtime` | Start an explicit realtime spoken conversation with barge-in; Ctrl+C returns to text mode |
 | `/voice-status` | Show safe voice interaction configuration without opening the microphone |
 | `/event-new <severity> \| <title> \| <description>` | Record one local security event |
 | `/events` | List saved security events |
@@ -906,7 +945,8 @@ Notes:
 - Grounded document commands do not write into ordinary conversation history and do not inject active memory.
 - Vision commands do not write into ordinary conversation history, do not inject active memory, and do not persist image bytes.
 - `/vision-info` never calls the AI service.
-- `/voice-turn` is sequential push-to-talk: capture → STT → ordinary chat → TTS → synchronous playback. It does not open the microphone at startup, does not listen in the background, and does not support barge-in or speaking over Cortana during playback.
+- `/voice-turn` is sequential push-to-talk: capture → STT → ordinary chat → TTS → synchronous playback. It does not open the microphone at startup and does not listen in the background.
+- `/voice-realtime` opens one bounded Realtime API session with server VAD and barge-in. Ordinary CLI input is paused until Ctrl+C or session end. It does not auto-start, auto-reconnect, or grant spoken operational authority.
 - While "Listening..." is shown, pressing Enter ends recording; avoid typing the next command until recording has stopped. Anything typed while "Listening..." is shown is discarded and is not queued for the next command.
 - Spoken transcripts enter ordinary conversation history after a successful chat response, but they do not execute slash commands or Milestone 18 natural-language actions in this milestone.
 - `/voice-status` never opens the microphone and never calls the AI service.

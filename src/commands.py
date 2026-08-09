@@ -65,6 +65,7 @@ from src.config import (
     STUDY_PARTNER_ENABLED,
     VISION_ANALYSIS_ENABLED,
     VOICE_INTERACTION_ENABLED,
+    REALTIME_VOICE_ENABLED,
     SEMANTIC_RETRIEVAL_ENABLED,
     SOURCE_MANIFEST_PERSISTENCE_ENABLED,
     DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED,
@@ -168,6 +169,12 @@ from src.vision_commands import (
 )
 from src.vision_input import VisualInputLoader
 from src.vision_service import VisualAnalysisService
+from src.realtime_voice_commands import (
+    REALTIME_VOICE_COMMAND_NAMES,
+    RealtimeVoiceCommandContext,
+    append_realtime_status_lines,
+    handle_realtime_voice_command,
+)
 from src.voice_commands import (
     VOICE_COMMAND_NAMES,
     VoiceCommandContext,
@@ -270,6 +277,7 @@ SUPPORTED_COMMANDS = frozenset(
         *STUDY_COMMAND_NAMES,
         *VISION_COMMAND_NAMES,
         *VOICE_COMMAND_NAMES,
+        *REALTIME_VOICE_COMMAND_NAMES,
     }
 )
 
@@ -371,6 +379,7 @@ HELP_TEXT = """Cortana: Available commands:
   /vision-ask           - Ask a question about one authorized local image
   /vision-info          - Validate and inspect one authorized local image
   /voice-turn           - Capture one spoken turn and hear Cortana respond
+  /voice-realtime       - Start an explicit realtime spoken conversation
   /voice-status         - Show safe voice interaction configuration
   /about                - Describe Project Cortana and this software milestone
   /exit                 - End the session cleanly"""
@@ -384,7 +393,8 @@ ABOUT_TEXT = (
     "two-document comparison, a session-scoped Study Partner for grounded "
     "practice over authorized documents, static visual understanding for "
     "authorized local images, explicit push-to-talk natural voice "
-    "conversation for one spoken turn at a time, a local "
+    "conversation for one spoken turn at a time, explicit realtime "
+    "spoken conversation with barge-in, a local "
     "human-controlled security event, incident, indicator, evidence, and "
     "chain-of-custody foundation, a human-supervised defensive tool "
     "framework with scope controls and approval, optional process-isolated "
@@ -752,11 +762,12 @@ def handle_slash_command(
     Most commands never call the AI service. Grounded document commands
     (``/ask-docs``, ``/doc-summary``, ``/docs-compare``), Study Partner AI
     commands, visual analysis commands (``/vision-describe``,
-    ``/vision-ask``), voice interaction commands (``/voice-turn``), and
-    explicit incident-analysis run commands are the AI exceptions and
-    require an injected client when used. Milestone 8 security commands,
-    Milestone 9 tool commands, and Milestone 10/11 workflow commands are
-    always local. ``/vision-info`` and ``/voice-status`` remain local-only.
+    ``/vision-ask``), voice interaction commands (``/voice-turn``,
+    ``/voice-realtime``), and explicit incident-analysis run commands are
+    the AI exceptions and require an injected client when used. Milestone 8
+    security commands, Milestone 9 tool commands, and Milestone 10/11
+    workflow commands are always local. ``/vision-info`` and
+    ``/voice-status`` remain local-only.
     """
     command_name = normalize_command_name(message)
 
@@ -1003,9 +1014,33 @@ def handle_slash_command(
             ),
         )
         if voice_result is not None:
+            status_message = voice_result.message
+            if command_name == "voice-status":
+                status_message = append_realtime_status_lines(
+                    status_message,
+                    settings,
+                )
             return CommandResult(
                 outcome=CommandOutcome.CONTINUE,
-                message=voice_result.message,
+                message=status_message,
+            )
+
+    if command_name in REALTIME_VOICE_COMMAND_NAMES:
+        realtime_result = handle_realtime_voice_command(
+            command_name,
+            RealtimeVoiceCommandContext(
+                message=message,
+                settings=settings,
+                client=client,
+                conversation_history=conversation_history,
+                active_memory_context=active_memory_context,
+                logger=logger,
+            ),
+        )
+        if realtime_result is not None:
+            return CommandResult(
+                outcome=CommandOutcome.CONTINUE,
+                message=realtime_result.message,
             )
 
     handler = COMMAND_HANDLERS.get(command_name)
@@ -1861,6 +1896,11 @@ def format_status(
         study_active_session = "yes" if study_service.has_active_session() else "no"
     vision_enabled = "enabled" if VISION_ANALYSIS_ENABLED else "disabled"
     voice_enabled = "enabled" if VOICE_INTERACTION_ENABLED else "disabled"
+    realtime_voice_enabled = (
+        "enabled"
+        if (VOICE_INTERACTION_ENABLED and REALTIME_VOICE_ENABLED)
+        else "disabled"
+    )
 
     registry = tool_registry or build_default_tool_registry()
     registered_tool_count = registry.count()
@@ -2037,7 +2077,8 @@ def format_status(
         f"  Study Partner: {study_enabled}\n"
         f"  Active study session: {study_active_session}\n"
         f"  Visual analysis: {vision_enabled}\n"
-        f"  Voice interaction: {voice_enabled}"
+        f"  Voice interaction: {voice_enabled}\n"
+        f"  Realtime voice: {realtime_voice_enabled}"
     )
 
 

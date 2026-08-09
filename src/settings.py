@@ -7,9 +7,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from src.config import (
+    ALLOWED_REALTIME_MODELS,
+    ALLOWED_REALTIME_VOICES,
     ALLOWED_TRANSCRIPTION_MODELS,
     ALLOWED_TTS_MODELS,
     ALLOWED_TTS_VOICES,
+    DEFAULT_REALTIME_MODEL,
+    DEFAULT_REALTIME_VOICE,
     DEFAULT_TRANSCRIPTION_MODEL,
     DEFAULT_TTS_MODEL,
     DEFAULT_TTS_VOICE,
@@ -26,6 +30,8 @@ class Settings:
     transcription_model: str = DEFAULT_TRANSCRIPTION_MODEL
     tts_model: str = DEFAULT_TTS_MODEL
     tts_voice: str = DEFAULT_TTS_VOICE
+    realtime_model: str = DEFAULT_REALTIME_MODEL
+    realtime_voice: str = DEFAULT_REALTIME_VOICE
 
 
 def load_settings() -> Settings:
@@ -45,6 +51,14 @@ def load_settings() -> Settings:
     tts_voice = (
         os.getenv("CORTANA_TTS_VOICE", DEFAULT_TTS_VOICE).strip() or DEFAULT_TTS_VOICE
     )
+    realtime_model = (
+        os.getenv("CORTANA_REALTIME_MODEL", DEFAULT_REALTIME_MODEL).strip()
+        or DEFAULT_REALTIME_MODEL
+    )
+    realtime_voice = (
+        os.getenv("CORTANA_REALTIME_VOICE", DEFAULT_REALTIME_VOICE).strip()
+        or DEFAULT_REALTIME_VOICE
+    )
 
     if not api_key:
         raise ValueError(
@@ -59,6 +73,14 @@ def load_settings() -> Settings:
         raise ValueError("CORTANA_TTS_MODEL is not an allowed text-to-speech model.")
     if tts_voice not in ALLOWED_TTS_VOICES:
         raise ValueError("CORTANA_TTS_VOICE is not an allowed text-to-speech voice.")
+    if realtime_model not in ALLOWED_REALTIME_MODELS:
+        raise ValueError(
+            "CORTANA_REALTIME_MODEL is not an allowed realtime voice model."
+        )
+    if realtime_voice not in ALLOWED_REALTIME_VOICES:
+        raise ValueError(
+            "CORTANA_REALTIME_VOICE is not an allowed realtime voice."
+        )
 
     oauth_client_file: Path | None = None
     if oauth_client_raw:
@@ -71,4 +93,6 @@ def load_settings() -> Settings:
         transcription_model=transcription_model,
         tts_model=tts_model,
         tts_voice=tts_voice,
+        realtime_model=realtime_model,
+        realtime_voice=realtime_voice,
     )

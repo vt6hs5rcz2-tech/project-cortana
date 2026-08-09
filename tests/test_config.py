@@ -98,6 +98,14 @@ from src.config import (
     MAX_VISION_OUTPUT_CHARS,
     VISION_IMAGE_DETAIL,
     VOICE_INTERACTION_ENABLED,
+    REALTIME_VOICE_ENABLED,
+    REALTIME_VOICE_SAMPLE_RATE_HZ,
+    REALTIME_VOICE_FRAME_BYTES,
+    REALTIME_VOICE_FRAME_MS,
+    REALTIME_VOICE_INPUT_QUEUE_FRAMES,
+    REALTIME_VOICE_OUTPUT_QUEUE_FRAMES,
+    MAX_REALTIME_VOICE_SESSION_MINUTES,
+    DEFAULT_REALTIME_MODEL,
     MAX_VOICE_UTTERANCE_SECONDS,
     MAX_VOICE_PCM_BYTES,
     MAX_VOICE_AUDIO_BYTES,
@@ -222,6 +230,18 @@ def test_voice_interaction_limits_and_capabilities_are_centralized() -> None:
     assert "coral" in ALLOWED_TTS_VOICES
     assert "alloy" in ALLOWED_TTS_VOICES
     assert "voice_1234" not in ALLOWED_TTS_VOICES
+
+
+def test_realtime_voice_limits_and_capabilities_are_centralized() -> None:
+    """Realtime voice configuration should use derived 24 kHz frame bounds."""
+    assert REALTIME_VOICE_ENABLED is True
+    assert REALTIME_VOICE_SAMPLE_RATE_HZ == 24_000
+    assert REALTIME_VOICE_FRAME_MS == 20
+    assert REALTIME_VOICE_FRAME_BYTES == 960
+    assert REALTIME_VOICE_INPUT_QUEUE_FRAMES == 50
+    assert REALTIME_VOICE_OUTPUT_QUEUE_FRAMES == 100
+    assert MAX_REALTIME_VOICE_SESSION_MINUTES == 20
+    assert DEFAULT_REALTIME_MODEL == "gpt-realtime-mini"
 
 
 def test_default_memory_path_is_outside_project_source(
