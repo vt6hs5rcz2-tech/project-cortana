@@ -82,10 +82,16 @@ from src.config import (
     MAX_INCIDENT_ANALYSIS_OUTPUT_CHARS,
     MAX_INCIDENT_ANALYSIS_PACKET_CHARS,
     MAX_RETAINED_INCIDENT_ANALYSES,
+    STUDY_PARTNER_ENABLED,
+    STUDY_REPOSITORY_FILENAME,
+    STUDY_REPOSITORY_SCHEMA_VERSION,
+    MAX_STUDY_DOCUMENTS,
+    MAX_STORED_STUDY_SESSIONS,
     get_default_document_vault_file_path,
     get_default_evidence_store_dir_path,
     get_default_incident_repository_file_path,
     get_default_memory_file_path,
+    get_default_study_repository_file_path,
     get_default_tool_control_repository_file_path,
     get_default_workflow_repository_file_path,
 )
@@ -152,6 +158,22 @@ def test_knowledge_vault_limits_and_capabilities_are_centralized() -> None:
     assert MAX_COMPARE_DOCUMENTS == 2
     assert MAX_COMPARE_CHUNKS_PER_DOCUMENT == 4
     assert MAX_COMPARE_CONTEXT_CHARS == 12_000
+
+
+def test_study_partner_limits_and_capabilities_are_centralized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Study Partner configuration should use centralized constants."""
+    assert STUDY_PARTNER_ENABLED is True
+    assert STUDY_REPOSITORY_SCHEMA_VERSION == 1
+    assert STUDY_REPOSITORY_FILENAME == "study_state.json"
+    assert MAX_STUDY_DOCUMENTS == 5
+    assert MAX_STORED_STUDY_SESSIONS == 50
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Example\AppData\Local")
+    path = get_default_study_repository_file_path()
+    assert path.name == STUDY_REPOSITORY_FILENAME
+    assert "ProjectCortana" in path.parts
+    assert PROJECT_ROOT not in path.parents
 
 
 def test_default_memory_path_is_outside_project_source(

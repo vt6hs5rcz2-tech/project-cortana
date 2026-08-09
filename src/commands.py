@@ -62,6 +62,7 @@ from src.config import (
     MAX_CALENDAR_PROPOSALS,
     MAX_CALENDAR_AUDIT_ENTRIES,
     MAX_STORED_DOCUMENTS,
+    STUDY_PARTNER_ENABLED,
     SEMANTIC_RETRIEVAL_ENABLED,
     SOURCE_MANIFEST_PERSISTENCE_ENABLED,
     DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED,
@@ -150,6 +151,13 @@ from src.reminder_repository import ReminderStorageError
 from src.reminder_service import ReminderService
 from src.secret_store import InMemorySecretStore
 from src.retrieval_session import RetrievalSession
+from src.study_commands import (
+    STUDY_COMMAND_NAMES,
+    StudyCommandContext,
+    create_default_study_service,
+    handle_study_command,
+)
+from src.study_service import StudyPartnerService
 from src.security_commands import (
     SECURITY_COMMAND_NAMES,
     SecurityCommandContext,
@@ -240,6 +248,7 @@ SUPPORTED_COMMANDS = frozenset(
         *INCIDENT_EVIDENCE_COMMAND_NAMES,
         *REMINDER_COMMAND_NAMES,
         *CALENDAR_COMMAND_NAMES,
+        *STUDY_COMMAND_NAMES,
     }
 )
 
@@ -330,6 +339,13 @@ HELP_TEXT = """Cortana: Available commands:
   /calendar-reschedule  - Prepare a timed event reschedule proposal
   /calendar-cancel      - Prepare an event cancel proposal
   /calendar-confirm     - Confirm and execute one calendar proposal
+  /study-start          - Start one study session over authorized documents
+  /study-status         - Show the active study session status
+  /study-explain        - Explain a topic from the active study documents
+  /study-question       - Generate one grounded practice question
+  /study-answer         - Submit an answer to the pending study question
+  /study-progress       - Show honest study progress metrics
+  /study-end            - Complete the active study session
   /about                - Describe Project Cortana and this software milestone
   /exit                 - End the session cleanly"""
 
@@ -339,7 +355,8 @@ ABOUT_TEXT = (
     "focused on identity, local commands, in-session conversation, explicit "
     "user-controlled persistent memory, temporary active memory context, a "
     "local Knowledge Vault, source-grounded document questions, summaries, "
-    "two-document comparison, a local "
+    "two-document comparison, a session-scoped Study Partner for grounded "
+    "practice over authorized documents, a local "
     "human-controlled security event, incident, indicator, evidence, and "
     "chain-of-custody foundation, a human-supervised defensive tool "
     "framework with scope controls and approval, optional process-isolated "
@@ -534,6 +551,7 @@ class CommandContext:
     analysis_audit_log: InMemoryIncidentAnalysisAuditLog
     reminder_service: ReminderService
     calendar_service: CalendarService
+    study_service: StudyPartnerService | None = None
     client: OpenAIClient | None = None
 
 
@@ -609,6 +627,36 @@ def _ephemeral_calendar_service(
     )
 
 
+def _ephemeral_study_service(
+    *,
+    document_vault: DocumentVault,
+    document_retriever: LexicalDocumentRetriever,
+    retrieval_session: RetrievalSession,
+    settings: Settings,
+    client: OpenAIClient | None,
+) -> StudyPartnerService:
+    """Create a disposable study service for tests that omit injection."""
+    root = Path(tempfile.mkdtemp(prefix="cortana-study-"))
+    knowledge = DocumentKnowledgeService(
+        vault=document_vault,
+        retriever=document_retriever,
+        retrieval_session=retrieval_session,
+        settings=settings,
+        client=client,
+        chunker=document_retriever.chunker,
+    )
+    return create_default_study_service(
+        vault=document_vault,
+        knowledge_service=knowledge,
+        settings=settings,
+        client=client,
+        repository_file_path=root / "study_state.json",
+        chunker=document_retriever.chunker,
+        document_retriever=document_retriever,
+        retrieval_session=retrieval_session,
+    )
+
+
 def parse_slash_input(message: str) -> str | None:
     """Return a normalized command name for Cortana slash input, or None for AI content.
 
@@ -670,15 +718,17 @@ def handle_slash_command(
     analysis_audit_log: InMemoryIncidentAnalysisAuditLog | None = None,
     reminder_service: ReminderService | None = None,
     calendar_service: CalendarService | None = None,
+    study_service: StudyPartnerService | None = None,
     client: OpenAIClient | None = None,
 ) -> CommandResult:
     """Handle a slash command locally.
 
     Most commands never call the AI service. Grounded document commands
-    (``/ask-docs``, ``/doc-summary``, ``/docs-compare``) and explicit
-    incident-analysis run commands are the AI exceptions and require an
-    injected client. Milestone 8 security commands, Milestone 9 tool
-    commands, and Milestone 10/11 workflow commands are always local.
+    (``/ask-docs``, ``/doc-summary``, ``/docs-compare``), Study Partner AI
+    commands, and explicit incident-analysis run commands are the AI
+    exceptions and require an injected client when used. Milestone 8
+    security commands, Milestone 9 tool commands, and Milestone 10/11
+    workflow commands are always local.
     """
     command_name = normalize_command_name(message)
 
@@ -723,6 +773,17 @@ def handle_slash_command(
     if calendar_service is None:
         calendar_service = _ephemeral_calendar_service(
             oauth_client_file=settings.google_oauth_client_file,
+        )
+
+    active_retriever = document_retriever or LexicalDocumentRetriever()
+    active_retrieval_session = retrieval_session or RetrievalSession()
+    if study_service is None and STUDY_PARTNER_ENABLED:
+        study_service = _ephemeral_study_service(
+            document_vault=document_vault,
+            document_retriever=active_retriever,
+            retrieval_session=active_retrieval_session,
+            settings=settings,
+            client=client,
         )
 
     if command_name in SECURITY_COMMAND_NAMES:
@@ -843,6 +904,20 @@ def handle_slash_command(
                 message=calendar_result.message,
             )
 
+    if command_name in STUDY_COMMAND_NAMES:
+        study_result = handle_study_command(
+            command_name,
+            StudyCommandContext(
+                message=message,
+                study_service=study_service,
+            ),
+        )
+        if study_result is not None:
+            return CommandResult(
+                outcome=CommandOutcome.CONTINUE,
+                message=study_result.message,
+            )
+
     handler = COMMAND_HANDLERS.get(command_name)
 
     if handler is None:
@@ -859,8 +934,8 @@ def handle_slash_command(
         active_memory_context=active_memory_context,
         document_vault=document_vault,
         document_extractor=document_extractor,
-        document_retriever=document_retriever or LexicalDocumentRetriever(),
-        retrieval_session=retrieval_session or RetrievalSession(),
+        document_retriever=active_retriever,
+        retrieval_session=active_retrieval_session,
         incident_repository=incident_repository,
         evidence_store=evidence_store,
         tool_registry=tool_registry,
@@ -873,6 +948,7 @@ def handle_slash_command(
         analysis_audit_log=analysis_audit_log,
         reminder_service=reminder_service,
         calendar_service=calendar_service,
+        study_service=study_service,
         client=client,
     )
     return handler(context)
@@ -901,6 +977,7 @@ def _handle_status(context: CommandContext) -> CommandResult:
             context.analysis_repository,
             context.reminder_service,
             context.calendar_service,
+            context.study_service,
         )
     except MemoryStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
@@ -1636,6 +1713,7 @@ def format_status(
     analysis_repository: InMemoryIncidentAnalysisRepository | None = None,
     reminder_service: ReminderService | None = None,
     calendar_service: CalendarService | None = None,
+    study_service: StudyPartnerService | None = None,
 ) -> str:
     """Build safe local session status text for /status."""
     completed_turns = conversation_history.completed_turn_count
@@ -1683,6 +1761,12 @@ def format_status(
         calendar_default = calendar_view.default_calendar_id or "-"
         calendar_pending = calendar_view.pending_proposal_count
         calendar_unknown = calendar_view.unknown_outcome_count
+
+    study_enabled = "enabled" if STUDY_PARTNER_ENABLED else "disabled"
+    if study_service is None or not STUDY_PARTNER_ENABLED:
+        study_active_session = "no"
+    else:
+        study_active_session = "yes" if study_service.has_active_session() else "no"
 
     registry = tool_registry or build_default_tool_registry()
     registered_tool_count = registry.count()
@@ -1855,7 +1939,9 @@ def format_status(
         f"  Maximum calendar proposals: {MAX_CALENDAR_PROPOSALS}\n"
         f"  Maximum calendar audit entries: {MAX_CALENDAR_AUDIT_ENTRIES}\n"
         "  Calendar repository persistence: "
-        f"{'enabled' if CALENDAR_REPOSITORY_PERSISTENCE_ENABLED else 'disabled'}"
+        f"{'enabled' if CALENDAR_REPOSITORY_PERSISTENCE_ENABLED else 'disabled'}\n"
+        f"  Study Partner: {study_enabled}\n"
+        f"  Active study session: {study_active_session}"
     )
 
 

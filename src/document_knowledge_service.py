@@ -406,6 +406,76 @@ class DocumentKnowledgeService:
         self._record_success(cleaned, packet)
         return answer
 
+    def ask_within_documents(
+        self,
+        question: str,
+        document_ids: Sequence[str],
+    ) -> GroundedDocumentAnswer:
+        """Answer one grounded question scoped to explicit document IDs."""
+        self._assert_retrieval_enabled()
+        self._assert_document_ai_enabled()
+        cleaned = question.strip()
+        if not cleaned:
+            raise DocumentKnowledgeValidationError(
+                "Cortana: Please provide a topic to explain."
+            )
+        if self._client is None:
+            raise DocumentKnowledgeError(GROUNDED_AI_UNAVAILABLE)
+        if not document_ids:
+            raise DocumentKnowledgeValidationError(
+                "Cortana: Study explanation requires at least one document ID."
+            )
+
+        documents: list[DocumentRecord] = []
+        canonical_ids: list[str] = []
+        for document_id in document_ids:
+            document = self._require_document(document_id)
+            documents.append(document)
+            canonical_ids.append(document.id)
+
+        max_per_document = max(1, MAX_RETRIEVED_CHUNKS // max(1, len(canonical_ids)))
+        try:
+            results = self._retriever.retrieve_within_documents(
+                cleaned,
+                documents,
+                canonical_ids,
+                max_chunks_per_document=max_per_document,
+                max_total_chunks=MAX_RETRIEVED_CHUNKS,
+                max_total_chars=MAX_RETRIEVED_CONTEXT_CHARS,
+            )
+        except BlankRetrievalQueryError as error:
+            raise DocumentKnowledgeValidationError(
+                "Cortana: Please provide a topic to explain."
+            ) from error
+        except (DocumentChunkingError, DocumentRetrievalError, RetrievalContextLimitError) as error:
+            logger.error(
+                "Scoped grounded document retrieval failed error_type=%s",
+                type(error).__name__,
+            )
+            raise DocumentKnowledgeError(
+                "Cortana: Document evidence could not be prepared safely."
+            ) from error
+
+        if not results:
+            raise DocumentKnowledgeError(ASK_NO_EVIDENCE)
+
+        packet = build_grounded_source_packet(
+            task_type="ask",
+            question_or_task=cleaned,
+            results=results,
+            boundary_token=self._retrieval_session.boundary_token,
+        )
+        answer = self._invoke_grounded_ai(
+            task_text=(
+                "Answer the question using only the supplied authorized source "
+                f"passages.\nQuestion: {cleaned}"
+            ),
+            packet=packet,
+            max_answer_chars=MAX_GROUNDED_ANSWER_CHARS,
+        )
+        self._record_success(cleaned, packet)
+        return answer
+
     def summarize(self, document_id: str) -> GroundedDocumentAnswer:
         """Summarize one authorized vault document with bounded map/reduce."""
         self._assert_retrieval_enabled()

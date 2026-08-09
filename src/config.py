@@ -61,6 +61,23 @@ MAX_COMPARE_DOCUMENTS = 2
 MAX_COMPARE_CHUNKS_PER_DOCUMENT = 4
 MAX_COMPARE_CONTEXT_CHARS = 12_000
 
+# Study Partner / Tutor (Milestone 22)
+STUDY_PARTNER_ENABLED = True
+STUDY_REPOSITORY_SCHEMA_VERSION = 1
+STUDY_REPOSITORY_FILENAME = "study_state.json"
+MAX_STUDY_DOCUMENTS = 5
+MAX_STORED_STUDY_SESSIONS = 50
+MAX_STUDY_QUESTIONS_PER_SESSION = 200
+MAX_STUDY_ATTEMPTS_PER_SESSION = 200
+MAX_STUDY_QUESTION_PROMPT_CHARS = 2_000
+MAX_STUDY_CHOICE_CHARS = 500
+MAX_STUDY_CORRECT_ANSWER_CHARS = 1_000
+MAX_STUDY_EXPLANATION_CHARS = 2_000
+MAX_STUDY_FEEDBACK_CHARS = 2_000
+MAX_STUDY_USER_ANSWER_CHARS = 2_000
+MAX_STUDY_TOPIC_CHARS = 500
+MAX_STUDY_PENDING_PROMPT_PREVIEW_CHARS = 200
+
 # Security incident repository and evidence foundation (Milestone 8)
 INCIDENT_REPOSITORY_ENABLED = True
 EVIDENCE_COPY_ENABLED = True
@@ -331,6 +348,11 @@ def get_default_reminder_repository_file_path() -> Path:
 def get_default_calendar_repository_file_path() -> Path:
     """Return the default user-local path for the calendar control JSON file."""
     return _default_app_data_dir() / CALENDAR_REPOSITORY_FILENAME
+
+
+def get_default_study_repository_file_path() -> Path:
+    """Return the default user-local path for the Study Partner JSON file."""
+    return _default_app_data_dir() / STUDY_REPOSITORY_FILENAME
 
 
 def get_default_tool_process_scratch_dir_path() -> Path:

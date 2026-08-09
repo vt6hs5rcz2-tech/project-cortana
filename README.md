@@ -14,6 +14,7 @@ Project Cortana is an early software milestone focused on:
 - Local Knowledge Vault for explicit document ingestion and inspection
 - Deterministic local lexical document retrieval
 - Explicit source-grounded AI questions, document summaries, and two-document comparison over retrieved document passages
+- Session-scoped Study Partner for grounded explanations, practice questions, graded answers, and progress over authorized documents
 - Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 - Optional process-isolated execution for a tiny allowlisted defensive tool subset
@@ -42,8 +43,9 @@ Project Cortana is an early software milestone focused on:
 | Incident AI analysis preparations and results | Current process only | Created only through explicit local Milestone 12 analysis commands | Only through `/incident-analysis-run`, as a sanitized allowlisted packet |
 | Reminders | Survives restarts | Created only through explicit local Milestone 19 reminder commands | Never in this milestone |
 | Calendar account metadata, proposals, and calendar audits | Survives restarts | Connected/changed only through explicit local Milestone 20 calendar commands | Never in this milestone |
+| Study Partner sessions, questions, attempts, and chunk stats | Survives restarts | Created only through explicit local Milestone 22 `/study-*` commands | Only selected study chunks / short-answer grading inputs through study AI commands |
 
-Persistent memories, Knowledge Vault documents, incident records, and evidence copies are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories.
+Persistent memories, Knowledge Vault documents, incident records, evidence copies, and Study Partner state are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories.
 
 Saved memories remain inactive by default. Nothing from persistent memory is sent to the AI model unless the user explicitly activates it with `/recall` for the current session.
 
@@ -124,8 +126,9 @@ Lexical retrieval matches words and phrases present in stored text. Semantic ret
 Feature flags:
 
 - `LOCAL_DOCUMENT_RETRIEVAL_ENABLED` gates `/search-docs`, M18 lexical document-search routing, and grounded operations that depend on local retrieval
-- `DOCUMENT_CONTEXT_INJECTION_ENABLED` gates `/ask-docs`, `/doc-summary`, and `/docs-compare`
+- `DOCUMENT_CONTEXT_INJECTION_ENABLED` gates `/ask-docs`, `/doc-summary`, `/docs-compare`, and Study Partner AI operations
 - `SEMANTIC_RETRIEVAL_ENABLED` remains false and unimplemented
+- `STUDY_PARTNER_ENABLED` gates all `/study-*` commands
 
 ## Source-grounded answers
 
@@ -144,6 +147,36 @@ Grounded model output must be one JSON object:
 ```
 
 `support="supported"` means the model declared the answer source-supported and every citation label it used was present in the supplied source packet after local structural validation. It does **not** mean Cortana independently proved that every sentence is logically entailed by the cited source text. M21 does not implement an NLI/entailment engine.
+
+## Study Partner / Tutor
+
+Milestone 22 adds a session-scoped Study Partner on top of Milestone 21 grounded document intelligence.
+
+M21 answers “what do these documents say?”
+M22 helps the user learn and practice what authorized study documents say.
+
+Commands:
+
+- `/study-start <doc-id>[,<doc-id>...]` — start one active session over 1–5 explicit Knowledge Vault documents
+- `/study-status` — show active session details and pending prompt preview (never the answer key)
+- `/study-explain <topic>` — scoped grounded explanation via `DocumentKnowledgeService.ask_within_documents`
+- `/study-question <mcq|short|-> | <topic-or->` — generate one grounded practice question
+- `/study-answer <answer>` — grade the pending question
+- `/study-progress` — honest counts/accuracy/weak source refs
+- `/study-end` — complete the active session (allowed even with a pending question)
+
+Study behavior:
+
+- Exactly one active study session globally
+- Study state persists in local `study_state.json` (sessions, questions, attempts, chunk stats)
+- Answer keys persist for restart safety but are never shown by `/study-question`, `/study-status`, `/status`, logs, or ordinary history before grading
+- MCQ grading is deterministic (`A`/`a`/`A)`/`A.` only); no AI call
+- Short-answer grading is AI-assisted evaluation over rehydrated source evidence; it is not objective proof
+- Valid study citations do **not** prove semantic entailment of questions or answer keys
+- Adaptation prefers weak primary source chunks, then unattempted chunks in a deterministic ring, then least-recently-correct chunks
+- Only each question’s `primary_source_ref` updates chunk stats
+- Study operations do not write conversation history, active memory, persistent memory, reminders, or calendar events
+- Guidance phrases `help me study` and `quiz me` point to slash commands only; they never execute study actions
 
 Citation labels use a compact deterministic format such as `[DOC-1:C1]`. Each label maps through a session source manifest to:
 
@@ -480,6 +513,8 @@ Commands:
 
 M18 guidance only (exact phrases; no operational execution): `show my calendar`, `schedule a meeting`.
 
+Study Partner guidance only (exact phrases; no operational execution): `help me study`, `quiz me`.
+
 Network trust: Cortana delegates Google endpoint selection and TLS validation to the official Google SDKs. Calendar network code is not registered as a defensive tool and does not accept arbitrary user URLs.
 
 ### Unified assistant orchestration (Milestone 18)
@@ -510,7 +545,7 @@ Guidance-only routes (static text; no executors, no AI, no request construction)
 - Reminders → points to controlled `/reminder-add` / `/reminders` (exact phrases only)
 - Calendar → points to controlled `/calendar-events` or `/calendar-create` + `/calendar-confirm` (exact phrases only)
 
-Not routed by natural language in this milestone: evidence-search request construction, ask-docs, ingestion/deletion, tool/workflow/AI analysis execution, note saving, reminder creation/mutation, calendar reads/writes, shell/network/remediation, and other consequential flows remain explicit controlled commands.
+Not routed by natural language in this milestone: evidence-search request construction, ask-docs, study explain/question/answer execution, ingestion/deletion, tool/workflow/AI analysis execution, note saving, reminder creation/mutation, calendar reads/writes, shell/network/remediation, and other consequential flows remain explicit controlled commands.
 
 ### Evidence text search and bounded incident context (Milestone 17)
 
@@ -706,6 +741,13 @@ Centralized defaults:
 | `/doc-summary <document-id>` | Summarize one authorized Knowledge Vault document |
 | `/docs-compare <doc-id> \| <doc-id> \| <question>` | Compare two authorized documents for one question |
 | `/sources` | Show sources from the latest successful grounded document request |
+| `/study-start <doc-id>[,<doc-id>...]` | Start one Study Partner session over authorized documents |
+| `/study-status` | Show the active study session status (no answer key) |
+| `/study-explain <topic>` | Explain a topic from the active study documents |
+| `/study-question <mcq\|short\|-> \| <topic-or->` | Generate one grounded practice question |
+| `/study-answer <answer>` | Submit an answer to the pending study question |
+| `/study-progress` | Show honest study progress metrics |
+| `/study-end` | Complete the active study session |
 | `/event-new <severity> \| <title> \| <description>` | Record one local security event |
 | `/events` | List saved security events |
 | `/event <event-id>` | Show one security event |
@@ -766,7 +808,8 @@ Notes:
 - `/remove-document` removes one vault document and invalidates matching source-manifest entries.
 - `/remove-all-documents confirm` deletes all vault documents and clears the source manifest. It does not affect persistent memories, active-memory context, incidents, or evidence.
 - `/search-docs` never calls the AI service.
-- `/ask-docs`, `/doc-summary`, and `/docs-compare` send only selected retrieved/authorized chunks, never the entire vault and never incident records.
+- `/ask-docs`, `/doc-summary`, `/docs-compare`, and Study Partner AI commands send only selected retrieved/authorized chunks, never the entire vault and never incident records.
+- Study Partner never persists raw user answers, generated feedback, or source text in `study_state.json`.
 - Grounded document commands do not write into ordinary conversation history and do not inject active memory.
 - Milestone 8 security commands never call the AI service.
 - Milestone 9 defensive tool commands never call the AI service.

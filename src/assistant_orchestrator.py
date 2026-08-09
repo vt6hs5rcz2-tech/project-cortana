@@ -95,6 +95,18 @@ _CALENDAR_SCHEDULE_GUIDANCE_PHRASES = frozenset(
         "schedule a meeting",
     }
 )
+_STUDY_GUIDANCE_PHRASES = frozenset(
+    {
+        "help me study",
+        "quiz me",
+    }
+)
+_STUDY_GUIDANCE = (
+    "Cortana: Study Partner uses explicit slash commands. "
+    "Start with /study-start <doc-id>[,<doc-id>...], then use "
+    "/study-explain, /study-question, /study-answer, /study-progress, "
+    "and /study-end. Run /help for the full list."
+)
 _MEMORY_READ_PHRASES_NORMALIZED = frozenset(
     phrase.casefold() for phrase in _MEMORY_READ_PHRASES
 )
@@ -121,6 +133,9 @@ _CALENDAR_SHOW_GUIDANCE_PHRASES_NORMALIZED = frozenset(
 )
 _CALENDAR_SCHEDULE_GUIDANCE_PHRASES_NORMALIZED = frozenset(
     phrase.casefold() for phrase in _CALENDAR_SCHEDULE_GUIDANCE_PHRASES
+)
+_STUDY_GUIDANCE_PHRASES_NORMALIZED = frozenset(
+    phrase.casefold() for phrase in _STUDY_GUIDANCE_PHRASES
 )
 
 _MEMORY_MISSING_TEXT = (
@@ -239,6 +254,7 @@ class UnifiedAssistantOrchestrator:
             self._try_reminder_list_guidance,
             self._try_calendar_show_guidance,
             self._try_calendar_schedule_guidance,
+            self._try_study_guidance,
         )
         for handler in handlers:
             result = handler(message)
@@ -560,6 +576,17 @@ class UnifiedAssistantOrchestrator:
             confidence="high",
             missing_fields=(),
             safe_user_message=_CALENDAR_SCHEDULE_GUIDANCE,
+        )
+
+    def _try_study_guidance(self, message: str) -> OrchestrationResult | None:
+        if message.casefold() not in _STUDY_GUIDANCE_PHRASES_NORMALIZED:
+            return None
+        return OrchestrationResult(
+            domain="guidance",
+            action="study_partner",
+            confidence="high",
+            missing_fields=(),
+            safe_user_message=_STUDY_GUIDANCE,
         )
 
 

@@ -7,6 +7,7 @@ from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient
 from src.config import (
     APP_NAME,
+    STUDY_PARTNER_ENABLED,
     VERSION,
     get_default_document_vault_file_path,
     get_default_evidence_store_dir_path,
@@ -14,12 +15,14 @@ from src.config import (
     get_default_memory_file_path,
     get_default_reminder_repository_file_path,
     get_default_calendar_repository_file_path,
+    get_default_study_repository_file_path,
     get_default_tool_control_repository_file_path,
     get_default_workflow_repository_file_path,
 )
 from src.conversation_loop import run_conversation_loop
 from src.document_chunker import DocumentChunker
 from src.document_extractor import DefaultTextExtractor
+from src.document_knowledge_service import DocumentKnowledgeService
 from src.document_retrieval import LexicalDocumentRetriever
 from src.document_vault import JsonDocumentVault
 from src.evidence_store import LocalEvidenceStore
@@ -33,6 +36,8 @@ from src.retrieval_session import RetrievalSession
 from src.settings import Settings, load_settings
 from src.calendar_commands import create_default_calendar_service
 from src.reminder_commands import create_default_reminder_service
+from src.study_commands import create_default_study_service
+from src.study_service import StudyPartnerService
 from src.tool_commands import create_default_tool_services
 from src.tool_repository import JsonToolControlRepository
 from src.workflow_commands import create_default_workflow_services
@@ -109,6 +114,26 @@ def main() -> None:
         repository_file_path=get_default_calendar_repository_file_path(),
         oauth_client_file=settings.google_oauth_client_file,
     )
+    study_service: StudyPartnerService | None = None
+    if STUDY_PARTNER_ENABLED:
+        knowledge_service = DocumentKnowledgeService(
+            vault=document_vault,
+            retriever=document_retriever,
+            retrieval_session=retrieval_session,
+            settings=settings,
+            client=client,
+            chunker=document_chunker,
+        )
+        study_service = create_default_study_service(
+            vault=document_vault,
+            knowledge_service=knowledge_service,
+            settings=settings,
+            client=client,
+            repository_file_path=get_default_study_repository_file_path(),
+            chunker=document_chunker,
+            document_retriever=document_retriever,
+            retrieval_session=retrieval_session,
+        )
 
     run_conversation_loop(
         client=client,
@@ -133,6 +158,7 @@ def main() -> None:
         analysis_audit_log=analysis_audit_log,
         reminder_service=reminder_service,
         calendar_service=calendar_service,
+        study_service=study_service,
     )
 
 
