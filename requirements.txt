@@ -4,4 +4,5 @@ pypdf==6.14.2
 requests==2.34.2
 rich==15.0.0
 pytest==9.1.1
+tzdata
 pywin32==311; sys_platform == "win32"

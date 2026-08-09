@@ -24,6 +24,7 @@ Project Cortana is an early software milestone focused on:
 - Optional controlled security analyst assistance over sanitized single-incident packets
 - Coordinated evidence↔incident linking, incident-scoped evidence text-search request creation, and AI-off bounded incident context display
 - Deterministic ordinary-language routing for a small high-confidence set of existing capabilities (slash commands remain privileged)
+- Local timezone-aware reminder scheduling foundation separate from persistent memory
 
 ## Conversation history, persistent memory, active context, and documents
 
@@ -38,6 +39,7 @@ Project Cortana is an early software milestone focused on:
 | Defensive tool scopes, requests, approvals, results, and audits | Survives restarts | Created only through explicit local Milestone 9 commands | Never in this milestone |
 | Workflow/playbook run state and workflow audits | Survives restarts when persistence is enabled; otherwise current process only | Created only through explicit local Milestone 10/11 commands | Never in this milestone |
 | Incident AI analysis preparations and results | Current process only | Created only through explicit local Milestone 12 analysis commands | Only through `/incident-analysis-run`, as a sanitized allowlisted packet |
+| Reminders | Survives restarts | Created only through explicit local Milestone 19 reminder commands | Never in this milestone |
 
 Persistent memories, Knowledge Vault documents, incident records, and evidence copies are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories.
 
@@ -377,6 +379,40 @@ Security properties:
 - Match previews may appear only in the intended tool result `matches` list, not in audit logs
 - In-process open remains in `tool_safe_files.py`; isolated open remains in `tool_process_safe_open.py`
 
+### Personal assistant scheduling core (Milestone 19)
+
+Milestone 19 adds a local persistent reminder/scheduling foundation for one-time and bounded recurring obligations. Reminders are not memories: they are time-bound scheduled records stored separately from `MemoryStore` and never injected into ordinary AI conversation context.
+
+Behavior:
+
+- Persist reminders in user-local `reminders.json` with atomic writes and sticky fail-closed corruption handling
+- Require explicit local wall time plus an IANA timezone on create (no guessed timezone; abbreviations such as EST/PST are rejected)
+- Persist absolute instants as UTC ISO-8601 with trailing `Z`; store the intended IANA timezone separately
+- Persist only three statuses: `scheduled`, `completed`, `cancelled`
+- Derive overdue as `status == scheduled` and `due_at <= now` (no persisted `due` status; no write-on-read reconciliation)
+- Support recurrence: `none`, `daily[:interval]`, `weekly[:interval][:weekdays]`, `monthly[:interval]`
+- Anchor recurring series to `recurrence_anchor_at` and preserve local wall-clock time across DST
+- Snooze moves only the current occurrence; reschedule resets the series anchor for recurring reminders
+- Completing a recurring reminder jumps to the first occurrence strictly after now
+- Lifecycle mutations and their audit entries are persisted together in one atomic replace
+- Explicit slash control plane only; no background delivery, OS notifications, calendar sync, or free-form temporal parsing
+
+Commands:
+
+```text
+/reminder-add <title> | <YYYY-MM-DD HH:MM> | <IANA-timezone> | <recurrence> | <message>
+/reminders
+/reminder-show <reminder-id>
+/reminder-complete <reminder-id>
+/reminder-cancel <reminder-id>
+/reminder-snooze <reminder-id> | <YYYY-MM-DD HH:MM>
+/reminder-reschedule <reminder-id> | <YYYY-MM-DD HH:MM> | <IANA-timezone-or->
+```
+
+M18 guidance only (exact phrases; no operational execution): `set a reminder`, `list reminders`.
+
+Not in this milestone: push/email/SMS/voice delivery, Google Calendar or other providers, appointments/bookings/payments, yearly/COUNT/UNTIL/RRULE engines, background schedulers, AI scheduling, or reminder↔memory linkage.
+
 ### Unified assistant orchestration (Milestone 18)
 
 Milestone 18 adds a small deterministic natural-language orchestration layer for high-confidence ordinary-language requests. It is integration only: no autonomous agent, no AI intent classifier, and no replacement for the slash-command control plane.
@@ -402,8 +438,9 @@ Guidance-only routes (static text; no executors, no AI, no request construction)
 - Tools → points to controlled `/tool-*`
 - Workflows → points to controlled `/playbook-*`
 - Analyst assistance → points to controlled `/incident-analysis-*` and existing feature gates
+- Reminders → points to controlled `/reminder-add` / `/reminders` (exact phrases only)
 
-Not routed by natural language in this milestone: evidence-search request construction, ask-docs, ingestion/deletion, tool/workflow/AI analysis execution, note saving, shell/network/remediation, and other consequential flows remain explicit controlled commands.
+Not routed by natural language in this milestone: evidence-search request construction, ask-docs, ingestion/deletion, tool/workflow/AI analysis execution, note saving, reminder creation/mutation, shell/network/remediation, and other consequential flows remain explicit controlled commands.
 
 ### Evidence text search and bounded incident context (Milestone 17)
 

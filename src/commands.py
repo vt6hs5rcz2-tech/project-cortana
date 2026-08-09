@@ -44,10 +44,14 @@ from src.config import (
     MAX_ACTIVE_MEMORIES,
     MAX_ACTIVE_MEMORY_CHARS,
     MAX_MEMORY_TEXT_LENGTH,
+    MAX_REMINDER_AUDIT_ENTRIES,
     MAX_RETRIEVED_CHUNKS,
     MAX_RETRIEVED_CONTEXT_CHARS,
     MAX_SEARCH_DOCS_RESULTS,
     MAX_SEARCH_RESULT_PREVIEW_CHARS,
+    MAX_STORED_REMINDERS,
+    REMINDER_REPOSITORY_ENABLED,
+    REMINDER_REPOSITORY_PERSISTENCE_ENABLED,
     MAX_STORED_DOCUMENTS,
     SEMANTIC_RETRIEVAL_ENABLED,
     SOURCE_MANIFEST_PERSISTENCE_ENABLED,
@@ -116,6 +120,14 @@ from src.incident_repository import (
 )
 from src.memory import MemoryRecord, MemoryTextTooLongError, MemoryValidationError
 from src.memory_store import MemoryStorageError, MemoryStore
+from src.reminder_commands import (
+    REMINDER_COMMAND_NAMES,
+    ReminderCommandContext,
+    create_default_reminder_service,
+    handle_reminder_command,
+)
+from src.reminder_repository import ReminderStorageError
+from src.reminder_service import ReminderService
 from src.retrieval_session import RetrievalSession
 from src.security_commands import (
     SECURITY_COMMAND_NAMES,
@@ -201,6 +213,7 @@ SUPPORTED_COMMANDS = frozenset(
         *WORKFLOW_COMMAND_NAMES,
         *INCIDENT_ANALYSIS_COMMAND_NAMES,
         *INCIDENT_EVIDENCE_COMMAND_NAMES,
+        *REMINDER_COMMAND_NAMES,
     }
 )
 
@@ -271,6 +284,13 @@ HELP_TEXT = """Cortana: Available commands:
   /incident-analysis-run - Confirm and run AI analysis for one prepared request
   /incident-analysis-show - Show one in-memory incident analysis result
   /incident-analysis-save-note - Save one analysis verbatim as an incident note
+  /reminder-add         - Create one persistent local reminder
+  /reminders            - List scheduled reminders
+  /reminder-show        - Show one reminder by ID
+  /reminder-complete    - Complete one reminder or advance a recurring series
+  /reminder-cancel      - Cancel one reminder
+  /reminder-snooze      - Snooze the current reminder occurrence
+  /reminder-reschedule  - Reschedule one reminder
   /about                - Describe Project Cortana and this software milestone
   /exit                 - End the session cleanly"""
 
@@ -289,8 +309,10 @@ ABOUT_TEXT = (
     "text-search using the Windows safe-open foundation, trusted "
     "defensive playbook orchestration over "
     "allowlisted tools, durable workflow-run history, optional authorized "
-    "incident linkage for completed playbook runs, and optional controlled "
-    "security analyst assistance over sanitized single-incident packets."
+    "incident linkage for completed playbook runs, optional controlled "
+    "security analyst assistance over sanitized single-incident packets, "
+    "and a local timezone-aware reminder scheduling foundation separate "
+    "from persistent memory."
 )
 
 CLEAR_CONFIRMATION = (
@@ -457,6 +479,7 @@ class CommandContext:
     workflow_executor: WorkflowExecutor
     analysis_repository: InMemoryIncidentAnalysisRepository
     analysis_audit_log: InMemoryIncidentAnalysisAuditLog
+    reminder_service: ReminderService
     client: OpenAIClient | None = None
 
 
@@ -508,6 +531,14 @@ def _ephemeral_analysis_services() -> tuple[
     return (
         InMemoryIncidentAnalysisRepository(),
         InMemoryIncidentAnalysisAuditLog(),
+    )
+
+
+def _ephemeral_reminder_service() -> ReminderService:
+    """Create a disposable reminder service for tests that omit injection."""
+    root = Path(tempfile.mkdtemp(prefix="cortana-reminders-"))
+    return create_default_reminder_service(
+        repository_file_path=root / "reminders.json",
     )
 
 
@@ -570,6 +601,7 @@ def handle_slash_command(
     workflow_executor: WorkflowExecutor | None = None,
     analysis_repository: InMemoryIncidentAnalysisRepository | None = None,
     analysis_audit_log: InMemoryIncidentAnalysisAuditLog | None = None,
+    reminder_service: ReminderService | None = None,
     client: OpenAIClient | None = None,
 ) -> CommandResult:
     """Handle a slash command locally.
@@ -615,6 +647,9 @@ def handle_slash_command(
     # pair an analysis repository with a different audit log than later commands.
     if analysis_repository is None or analysis_audit_log is None:
         analysis_repository, analysis_audit_log = _ephemeral_analysis_services()
+
+    if reminder_service is None:
+        reminder_service = _ephemeral_reminder_service()
 
     if command_name in SECURITY_COMMAND_NAMES:
         security_result = handle_security_command(
@@ -706,6 +741,20 @@ def handle_slash_command(
                 message=analysis_result.message,
             )
 
+    if command_name in REMINDER_COMMAND_NAMES:
+        reminder_result = handle_reminder_command(
+            command_name,
+            ReminderCommandContext(
+                message=message,
+                reminder_service=reminder_service,
+            ),
+        )
+        if reminder_result is not None:
+            return CommandResult(
+                outcome=CommandOutcome.CONTINUE,
+                message=reminder_result.message,
+            )
+
     handler = COMMAND_HANDLERS.get(command_name)
 
     if handler is None:
@@ -734,6 +783,7 @@ def handle_slash_command(
         workflow_executor=workflow_executor,
         analysis_repository=analysis_repository,
         analysis_audit_log=analysis_audit_log,
+        reminder_service=reminder_service,
         client=client,
     )
     return handler(context)
@@ -760,6 +810,7 @@ def _handle_status(context: CommandContext) -> CommandResult:
             context.workflow_registry,
             context.workflow_run_repository,
             context.analysis_repository,
+            context.reminder_service,
         )
     except MemoryStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
@@ -768,6 +819,8 @@ def _handle_status(context: CommandContext) -> CommandResult:
     except IncidentStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
     except ToolStorageError as error:
+        return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
+    except ReminderStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
 
     return CommandResult(outcome=CommandOutcome.CONTINUE, message=status_text)
@@ -1510,6 +1563,7 @@ def format_status(
     workflow_registry: WorkflowRegistry | None = None,
     workflow_run_repository: WorkflowRunRepository | None = None,
     analysis_repository: InMemoryIncidentAnalysisRepository | None = None,
+    reminder_service: ReminderService | None = None,
 ) -> str:
     """Build safe local session status text for /status."""
     completed_turns = conversation_history.completed_turn_count
@@ -1536,6 +1590,13 @@ def format_status(
         saved_incident_count = incident_repository.incident_count()
         saved_indicator_count = incident_repository.indicator_count()
         saved_evidence_count = incident_repository.evidence_count()
+
+    if reminder_service is None:
+        stored_reminder_count = 0
+        scheduled_reminder_count = 0
+    else:
+        stored_reminder_count = reminder_service.count_all()
+        scheduled_reminder_count = reminder_service.count_scheduled()
 
     registry = tool_registry or build_default_tool_registry()
     registered_tool_count = registry.count()
@@ -1681,7 +1742,15 @@ def format_status(
         "  Maximum incident analysis packet characters: "
         f"{MAX_INCIDENT_ANALYSIS_PACKET_CHARS}\n"
         "  Maximum incident analysis output characters: "
-        f"{MAX_INCIDENT_ANALYSIS_OUTPUT_CHARS}"
+        f"{MAX_INCIDENT_ANALYSIS_OUTPUT_CHARS}\n"
+        "  Reminder repository: "
+        f"{'enabled' if REMINDER_REPOSITORY_ENABLED else 'disabled'}\n"
+        f"  Stored reminders: {stored_reminder_count}\n"
+        f"  Scheduled reminders: {scheduled_reminder_count}\n"
+        f"  Maximum stored reminders: {MAX_STORED_REMINDERS}\n"
+        f"  Maximum reminder audit entries: {MAX_REMINDER_AUDIT_ENTRIES}\n"
+        "  Reminder repository persistence: "
+        f"{'enabled' if REMINDER_REPOSITORY_PERSISTENCE_ENABLED else 'disabled'}"
     )
 
 

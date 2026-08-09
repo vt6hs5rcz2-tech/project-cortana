@@ -74,6 +74,16 @@ _ANALYST_GUIDANCE_PHRASES = frozenset(
         "analyze this incident with ai",
     }
 )
+_REMINDER_SET_GUIDANCE_PHRASES = frozenset(
+    {
+        "set a reminder",
+    }
+)
+_REMINDER_LIST_GUIDANCE_PHRASES = frozenset(
+    {
+        "list reminders",
+    }
+)
 _MEMORY_READ_PHRASES_NORMALIZED = frozenset(
     phrase.casefold() for phrase in _MEMORY_READ_PHRASES
 )
@@ -88,6 +98,12 @@ _WORKFLOW_GUIDANCE_PHRASES_NORMALIZED = frozenset(
 )
 _ANALYST_GUIDANCE_PHRASES_NORMALIZED = frozenset(
     phrase.casefold() for phrase in _ANALYST_GUIDANCE_PHRASES
+)
+_REMINDER_SET_GUIDANCE_PHRASES_NORMALIZED = frozenset(
+    phrase.casefold() for phrase in _REMINDER_SET_GUIDANCE_PHRASES
+)
+_REMINDER_LIST_GUIDANCE_PHRASES_NORMALIZED = frozenset(
+    phrase.casefold() for phrase in _REMINDER_LIST_GUIDANCE_PHRASES
 )
 
 _MEMORY_MISSING_TEXT = (
@@ -136,6 +152,17 @@ _ANALYST_GUIDANCE = (
     "/incident-analysis-* flow when analysis features are enabled. "
     "Natural-language input cannot prepare or run AI analysis."
 )
+_REMINDER_SET_GUIDANCE = (
+    "Cortana: Reminders are created only through the controlled "
+    "/reminder-add command with an explicit local time, IANA timezone, "
+    "recurrence, and message fields. Natural-language input cannot create "
+    "or schedule reminders."
+)
+_REMINDER_LIST_GUIDANCE = (
+    "Cortana: Scheduled reminders are listed only through the controlled "
+    "/reminders command. Natural-language input cannot list or modify "
+    "reminders."
+)
 
 
 @dataclass(frozen=True)
@@ -181,6 +208,8 @@ class UnifiedAssistantOrchestrator:
             self._try_tool_guidance,
             self._try_workflow_guidance,
             self._try_analyst_guidance,
+            self._try_reminder_set_guidance,
+            self._try_reminder_list_guidance,
         )
         for handler in handlers:
             result = handler(message)
@@ -444,6 +473,28 @@ class UnifiedAssistantOrchestrator:
             confidence="high",
             missing_fields=(),
             safe_user_message=_ANALYST_GUIDANCE,
+        )
+
+    def _try_reminder_set_guidance(self, message: str) -> OrchestrationResult | None:
+        if message.casefold() not in _REMINDER_SET_GUIDANCE_PHRASES_NORMALIZED:
+            return None
+        return OrchestrationResult(
+            domain="guidance",
+            action="reminder_set",
+            confidence="high",
+            missing_fields=(),
+            safe_user_message=_REMINDER_SET_GUIDANCE,
+        )
+
+    def _try_reminder_list_guidance(self, message: str) -> OrchestrationResult | None:
+        if message.casefold() not in _REMINDER_LIST_GUIDANCE_PHRASES_NORMALIZED:
+            return None
+        return OrchestrationResult(
+            domain="guidance",
+            action="reminder_list",
+            confidence="high",
+            missing_fields=(),
+            safe_user_message=_REMINDER_LIST_GUIDANCE,
         )
 
 

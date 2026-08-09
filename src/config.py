@@ -226,6 +226,24 @@ MAX_WORKFLOW_AUDIT_ENTRIES_RETAINED = 500
 MAX_WORKFLOW_LIST_PREVIEW_CHARS = 120
 MAX_WORKFLOW_AUDIT_DETAILS_LENGTH = 1_000
 
+# Personal assistant scheduling core (Milestone 19)
+REMINDER_REPOSITORY_ENABLED = True
+REMINDER_REPOSITORY_PERSISTENCE_ENABLED = True
+REMINDER_REPOSITORY_SCHEMA_VERSION = 1
+REMINDER_REPOSITORY_FILENAME = "reminders.json"
+
+MAX_REMINDER_TITLE_LENGTH = 200
+MAX_REMINDER_MESSAGE_LENGTH = 2_000
+MAX_STORED_REMINDERS = 500
+MAX_REMINDER_AUDIT_ENTRIES = 5_000
+MAX_REMINDER_DAILY_INTERVAL = 365
+MAX_REMINDER_WEEKLY_INTERVAL = 52
+MAX_REMINDER_MONTHLY_INTERVAL = 24
+MAX_REMINDER_LIST_RESULTS = 100
+MAX_REMINDER_LIST_PREVIEW_CHARS = 120
+MAX_REMINDER_SHOW_AUDIT_ENTRIES = 10
+MAX_REMINDER_RECURRENCE_SEARCH_STEPS = 10_000
+
 
 def _default_app_data_dir() -> Path:
     """Return the user-local application data directory for Project Cortana."""
@@ -270,6 +288,11 @@ def get_default_tool_control_repository_file_path() -> Path:
 def get_default_workflow_repository_file_path() -> Path:
     """Return the default user-local path for the workflow repository JSON file."""
     return _default_app_data_dir() / WORKFLOW_REPOSITORY_FILENAME
+
+
+def get_default_reminder_repository_file_path() -> Path:
+    """Return the default user-local path for the reminder repository JSON file."""
+    return _default_app_data_dir() / REMINDER_REPOSITORY_FILENAME
 
 
 def get_default_tool_process_scratch_dir_path() -> Path:

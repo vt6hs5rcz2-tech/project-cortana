@@ -12,6 +12,7 @@ from src.config import (
     get_default_evidence_store_dir_path,
     get_default_incident_repository_file_path,
     get_default_memory_file_path,
+    get_default_reminder_repository_file_path,
     get_default_tool_control_repository_file_path,
     get_default_workflow_repository_file_path,
 )
@@ -29,6 +30,7 @@ from src.memory_store import JsonMemoryStore
 from src.openai_client import create_openai_client
 from src.retrieval_session import RetrievalSession
 from src.settings import Settings, load_settings
+from src.reminder_commands import create_default_reminder_service
 from src.tool_commands import create_default_tool_services
 from src.tool_repository import JsonToolControlRepository
 from src.workflow_commands import create_default_workflow_services
@@ -98,6 +100,9 @@ def main() -> None:
     )
     analysis_repository = InMemoryIncidentAnalysisRepository()
     analysis_audit_log = InMemoryIncidentAnalysisAuditLog()
+    reminder_service = create_default_reminder_service(
+        repository_file_path=get_default_reminder_repository_file_path(),
+    )
 
     run_conversation_loop(
         client=client,
@@ -120,6 +125,7 @@ def main() -> None:
         workflow_executor=workflow_executor,
         analysis_repository=analysis_repository,
         analysis_audit_log=analysis_audit_log,
+        reminder_service=reminder_service,
     )
 
 
