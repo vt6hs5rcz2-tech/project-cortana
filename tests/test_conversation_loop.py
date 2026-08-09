@@ -27,6 +27,8 @@ from src.settings import Settings
 from src.study_service import StudyPartnerService
 from src.vision_input import VisualInputLoader
 from src.vision_service import VisualAnalysisService
+from src.voice_input import MicrophoneCaptureAdapter
+from src.voice_service import VoiceService
 from src.tool_executor import DefensiveToolExecutor
 from src.tool_registry import ToolRegistry
 from src.tool_repository import JsonToolControlRepository, ToolControlRepository
@@ -165,6 +167,37 @@ def test_handle_message_updates_conversation_history(
     assert len(turns) == 2
     assert turns[0].content == "What is MFA?"
     assert turns[1].content == "Here is the answer."
+
+
+def test_process_conversation_turn_returns_answer_without_printing(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Voice/chat reuse path should return text and not print it."""
+    from src.conversation_loop import process_conversation_turn
+
+    logger = FakeLogger()
+    history = ConversationHistory()
+    monkeypatch.setattr(
+        "src.conversation_loop.generate_response",
+        lambda **kwargs: "Silent answer.",
+    )
+
+    answer = process_conversation_turn(
+        client=FAKE_CLIENT,
+        settings=Settings(
+            openai_api_key="test-api-key",
+            openai_model="test-model",
+        ),
+        user_message="Hello",
+        logger=logger,
+        conversation_history=history,
+    )
+
+    output = capsys.readouterr().out
+    assert answer == "Silent answer."
+    assert output == ""
+    assert len(history.turns) == 2
 
 
 def test_handle_message_does_not_update_history_on_error(
@@ -573,6 +606,8 @@ def test_main_orchestrates_conversation_loop(
     received_study_service: StudyPartnerService | None = None
     received_vision_loader: VisualInputLoader | None = None
     received_vision_service: VisualAnalysisService | None = None
+    received_voice_capture: MicrophoneCaptureAdapter | None = None
+    received_voice_service: VoiceService | None = None
 
     monkeypatch.setattr(main_module, "setup_logging", lambda: logger)
     monkeypatch.setattr(
@@ -653,6 +688,8 @@ def test_main_orchestrates_conversation_loop(
         study_service: StudyPartnerService | None = None,
         vision_loader: VisualInputLoader | None = None,
         vision_service: VisualAnalysisService | None = None,
+        voice_capture: MicrophoneCaptureAdapter | None = None,
+        voice_service: VoiceService | None = None,
     ) -> None:
         nonlocal received_client, received_settings, received_logger, received_memory_store
         nonlocal received_active_memory_context
@@ -667,6 +704,7 @@ def test_main_orchestrates_conversation_loop(
         nonlocal received_reminder_service, received_calendar_service
         nonlocal received_study_service
         nonlocal received_vision_loader, received_vision_service
+        nonlocal received_voice_capture, received_voice_service
         received_client = client
         received_settings = settings
         received_logger = logger
@@ -692,6 +730,8 @@ def test_main_orchestrates_conversation_loop(
         received_study_service = study_service
         received_vision_loader = vision_loader
         received_vision_service = vision_service
+        received_voice_capture = voice_capture
+        received_voice_service = voice_service
 
     monkeypatch.setattr(
         main_module,
@@ -738,6 +778,8 @@ def test_main_orchestrates_conversation_loop(
     assert isinstance(received_study_service, StudyPartnerService)
     assert isinstance(received_vision_loader, VisualInputLoader)
     assert isinstance(received_vision_service, VisualAnalysisService)
+    assert isinstance(received_voice_capture, MicrophoneCaptureAdapter)
+    assert isinstance(received_voice_service, VoiceService)
     assert reminder_path.parent.exists()
     assert calendar_path.parent.exists()
     assert study_path.parent.exists()

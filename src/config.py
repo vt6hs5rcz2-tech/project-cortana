@@ -92,6 +92,64 @@ MAX_VISION_QUESTION_CHARS = 2_000
 MAX_VISION_OUTPUT_CHARS = 4_000
 VISION_IMAGE_DETAIL = "auto"
 
+# Natural Voice Conversation (Milestone 24)
+# Explicit push-to-talk / one utterance. No realtime, wake word, or barge-in.
+VOICE_INTERACTION_ENABLED = True
+VOICE_SAMPLE_RATE_HZ = 16_000
+VOICE_CHANNELS = 1
+VOICE_SAMPLE_WIDTH_BYTES = 2
+MAX_VOICE_UTTERANCE_SECONDS = 30
+MIN_VOICE_UTTERANCE_MS = 250
+# PCM capacity for one max-length utterance:
+# rate * channels * sample_width * seconds = 16000 * 1 * 2 * 30 = 960000
+MAX_VOICE_PCM_BYTES = (
+    VOICE_SAMPLE_RATE_HZ
+    * VOICE_CHANNELS
+    * VOICE_SAMPLE_WIDTH_BYTES
+    * MAX_VOICE_UTTERANCE_SECONDS
+)
+# stdlib wave writes a stable 44-byte RIFF header for this canonical PCM shape.
+VOICE_WAV_HEADER_BYTES = 44
+MAX_VOICE_AUDIO_BYTES = MAX_VOICE_PCM_BYTES + VOICE_WAV_HEADER_BYTES
+MAX_VOICE_TRANSCRIPT_CHARS = 4_000
+MAX_TTS_CHARS = 4_096
+ALLOWED_TRANSCRIPTION_MODELS = frozenset(
+    {
+        "whisper-1",
+        "gpt-transcribe",
+        "gpt-4o-transcribe",
+        "gpt-4o-mini-transcribe",
+        "gpt-4o-mini-transcribe-2025-12-15",
+        "gpt-4o-transcribe-diarize",
+    }
+)
+ALLOWED_TTS_MODELS = frozenset(
+    {
+        "tts-1",
+        "tts-1-hd",
+        "gpt-4o-mini-tts",
+        "gpt-4o-mini-tts-2025-12-15",
+    }
+)
+ALLOWED_TTS_VOICES = frozenset(
+    {
+        "alloy",
+        "ash",
+        "ballad",
+        "coral",
+        "echo",
+        "sage",
+        "shimmer",
+        "verse",
+        "marin",
+        "cedar",
+    }
+)
+DEFAULT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
+DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"
+DEFAULT_TTS_VOICE = "coral"
+VOICE_CAPTURE_BLOCKSIZE = 1024
+
 # Security incident repository and evidence foundation (Milestone 8)
 INCIDENT_REPOSITORY_ENABLED = True
 EVIDENCE_COPY_ENABLED = True

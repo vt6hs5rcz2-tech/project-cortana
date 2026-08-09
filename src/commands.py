@@ -64,6 +64,7 @@ from src.config import (
     MAX_STORED_DOCUMENTS,
     STUDY_PARTNER_ENABLED,
     VISION_ANALYSIS_ENABLED,
+    VOICE_INTERACTION_ENABLED,
     SEMANTIC_RETRIEVAL_ENABLED,
     SOURCE_MANIFEST_PERSISTENCE_ENABLED,
     DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED,
@@ -167,6 +168,14 @@ from src.vision_commands import (
 )
 from src.vision_input import VisualInputLoader
 from src.vision_service import VisualAnalysisService
+from src.voice_commands import (
+    VOICE_COMMAND_NAMES,
+    VoiceCommandContext,
+    create_default_voice_services,
+    handle_voice_command,
+)
+from src.voice_input import MicrophoneCaptureAdapter, poll_windows_console_enter_stop
+from src.voice_service import VoiceService
 from src.command_argument_utils import extract_command_argument
 from src.security_commands import (
     SECURITY_COMMAND_NAMES,
@@ -260,6 +269,7 @@ SUPPORTED_COMMANDS = frozenset(
         *CALENDAR_COMMAND_NAMES,
         *STUDY_COMMAND_NAMES,
         *VISION_COMMAND_NAMES,
+        *VOICE_COMMAND_NAMES,
     }
 )
 
@@ -360,6 +370,8 @@ HELP_TEXT = """Cortana: Available commands:
   /vision-describe      - Describe one authorized local image
   /vision-ask           - Ask a question about one authorized local image
   /vision-info          - Validate and inspect one authorized local image
+  /voice-turn           - Capture one spoken turn and hear Cortana respond
+  /voice-status         - Show safe voice interaction configuration
   /about                - Describe Project Cortana and this software milestone
   /exit                 - End the session cleanly"""
 
@@ -371,7 +383,8 @@ ABOUT_TEXT = (
     "local Knowledge Vault, source-grounded document questions, summaries, "
     "two-document comparison, a session-scoped Study Partner for grounded "
     "practice over authorized documents, static visual understanding for "
-    "authorized local images, a local "
+    "authorized local images, explicit push-to-talk natural voice "
+    "conversation for one spoken turn at a time, a local "
     "human-controlled security event, incident, indicator, evidence, and "
     "chain-of-custody foundation, a human-supervised defensive tool "
     "framework with scope controls and approval, optional process-isolated "
@@ -729,6 +742,9 @@ def handle_slash_command(
     study_service: StudyPartnerService | None = None,
     vision_loader: VisualInputLoader | None = None,
     vision_service: VisualAnalysisService | None = None,
+    voice_capture: MicrophoneCaptureAdapter | None = None,
+    voice_service: VoiceService | None = None,
+    stop_signal: Callable[[], bool] | None = None,
     client: OpenAIClient | None = None,
 ) -> CommandResult:
     """Handle a slash command locally.
@@ -736,11 +752,11 @@ def handle_slash_command(
     Most commands never call the AI service. Grounded document commands
     (``/ask-docs``, ``/doc-summary``, ``/docs-compare``), Study Partner AI
     commands, visual analysis commands (``/vision-describe``,
-    ``/vision-ask``), and explicit incident-analysis run commands are the AI
-    exceptions and require an injected client when used. Milestone 8
-    security commands, Milestone 9 tool commands, and Milestone 10/11
-    workflow commands are always local. ``/vision-info`` is local-only after
-    the same safe image validation/normalization pipeline.
+    ``/vision-ask``), voice interaction commands (``/voice-turn``), and
+    explicit incident-analysis run commands are the AI exceptions and
+    require an injected client when used. Milestone 8 security commands,
+    Milestone 9 tool commands, and Milestone 10/11 workflow commands are
+    always local. ``/vision-info`` and ``/voice-status`` remain local-only.
     """
     command_name = normalize_command_name(message)
 
@@ -808,6 +824,19 @@ def handle_slash_command(
         )
         vision_loader = vision_loader or default_loader
         vision_service = vision_service or default_vision
+
+    if (
+        (voice_capture is None or voice_service is None)
+        and VOICE_INTERACTION_ENABLED
+    ):
+        default_capture, default_voice = create_default_voice_services(
+            settings=settings,
+            client=client,
+        )
+        voice_capture = voice_capture or default_capture
+        voice_service = voice_service or default_voice
+
+    active_stop_signal = stop_signal or poll_windows_console_enter_stop
 
     if command_name in SECURITY_COMMAND_NAMES:
         security_result = handle_security_command(
@@ -956,6 +985,27 @@ def handle_slash_command(
             return CommandResult(
                 outcome=CommandOutcome.CONTINUE,
                 message=vision_result.message,
+            )
+
+    if command_name in VOICE_COMMAND_NAMES:
+        voice_result = handle_voice_command(
+            command_name,
+            VoiceCommandContext(
+                message=message,
+                settings=settings,
+                client=client,
+                conversation_history=conversation_history,
+                active_memory_context=active_memory_context,
+                logger=logger,
+                stop_signal=active_stop_signal,
+                capture=voice_capture,
+                voice_service=voice_service,
+            ),
+        )
+        if voice_result is not None:
+            return CommandResult(
+                outcome=CommandOutcome.CONTINUE,
+                message=voice_result.message,
             )
 
     handler = COMMAND_HANDLERS.get(command_name)
@@ -1810,6 +1860,7 @@ def format_status(
     else:
         study_active_session = "yes" if study_service.has_active_session() else "no"
     vision_enabled = "enabled" if VISION_ANALYSIS_ENABLED else "disabled"
+    voice_enabled = "enabled" if VOICE_INTERACTION_ENABLED else "disabled"
 
     registry = tool_registry or build_default_tool_registry()
     registered_tool_count = registry.count()
@@ -1985,7 +2036,8 @@ def format_status(
         f"{'enabled' if CALENDAR_REPOSITORY_PERSISTENCE_ENABLED else 'disabled'}\n"
         f"  Study Partner: {study_enabled}\n"
         f"  Active study session: {study_active_session}\n"
-        f"  Visual analysis: {vision_enabled}"
+        f"  Visual analysis: {vision_enabled}\n"
+        f"  Voice interaction: {voice_enabled}"
     )
 
 

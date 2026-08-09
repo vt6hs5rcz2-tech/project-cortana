@@ -97,6 +97,15 @@ from src.config import (
     MAX_VISION_QUESTION_CHARS,
     MAX_VISION_OUTPUT_CHARS,
     VISION_IMAGE_DETAIL,
+    VOICE_INTERACTION_ENABLED,
+    MAX_VOICE_UTTERANCE_SECONDS,
+    MAX_VOICE_PCM_BYTES,
+    MAX_VOICE_AUDIO_BYTES,
+    VOICE_WAV_HEADER_BYTES,
+    MAX_TTS_CHARS,
+    MAX_VOICE_TRANSCRIPT_CHARS,
+    ALLOWED_TTS_VOICES,
+    DEFAULT_TTS_VOICE,
     get_default_document_vault_file_path,
     get_default_evidence_store_dir_path,
     get_default_incident_repository_file_path,
@@ -198,6 +207,21 @@ def test_vision_analysis_limits_and_capabilities_are_centralized() -> None:
     assert MAX_VISION_QUESTION_CHARS == 2_000
     assert MAX_VISION_OUTPUT_CHARS == 4_000
     assert VISION_IMAGE_DETAIL == "auto"
+
+
+def test_voice_interaction_limits_and_capabilities_are_centralized() -> None:
+    """Voice interaction configuration should use centralized derived bounds."""
+    assert VOICE_INTERACTION_ENABLED is True
+    assert MAX_VOICE_UTTERANCE_SECONDS == 30
+    assert MAX_VOICE_PCM_BYTES == 960_000
+    assert VOICE_WAV_HEADER_BYTES == 44
+    assert MAX_VOICE_AUDIO_BYTES == 960_044
+    assert MAX_VOICE_TRANSCRIPT_CHARS == 4_000
+    assert MAX_TTS_CHARS == 4_096
+    assert DEFAULT_TTS_VOICE == "coral"
+    assert "coral" in ALLOWED_TTS_VOICES
+    assert "alloy" in ALLOWED_TTS_VOICES
+    assert "voice_1234" not in ALLOWED_TTS_VOICES
 
 
 def test_default_memory_path_is_outside_project_source(

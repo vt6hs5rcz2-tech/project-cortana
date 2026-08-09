@@ -16,6 +16,7 @@ Project Cortana is an early software milestone focused on:
 - Explicit source-grounded AI questions, document summaries, and two-document comparison over retrieved document passages
 - Session-scoped Study Partner for grounded explanations, practice questions, graded answers, and progress over authorized documents
 - Static visual understanding for authorized local images (describe, ask, and local validation/info)
+- Explicit push-to-talk natural voice conversation for one spoken turn at a time
 - Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 - Optional process-isolated execution for a tiny allowlisted defensive tool subset
@@ -46,8 +47,9 @@ Project Cortana is an early software milestone focused on:
 | Calendar account metadata, proposals, and calendar audits | Survives restarts | Connected/changed only through explicit local Milestone 20 calendar commands | Never in this milestone |
 | Study Partner sessions, questions, attempts, and chunk stats | Survives restarts | Created only through explicit local Milestone 22 `/study-*` commands | Only selected study chunks / short-answer grading inputs through study AI commands |
 | Visual analysis images | Ephemeral for one command only | Loaded only through explicit local Milestone 23 `/vision-*` commands | Only a normalized in-memory PNG plus the explicit visual task through `/vision-describe` or `/vision-ask` |
+| Voice microphone/TTS audio | Ephemeral for one `/voice-turn` only | Captured/synthesized only through explicit local Milestone 24 `/voice-turn` | Bounded mic WAV for transcription; ordinary chat text for the reply; reply text for TTS. Raw audio is never stored |
 
-Persistent memories, Knowledge Vault documents, incident records, evidence copies, and Study Partner state are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories. Visual analysis does not persist image bytes.
+Persistent memories, Knowledge Vault documents, incident records, evidence copies, and Study Partner state are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories. Visual analysis does not persist image bytes. Voice capture and TTS audio are ephemeral and are not archived.
 
 Saved memories remain inactive by default. Nothing from persistent memory is sent to the AI model unless the user explicitly activates it with `/recall` for the current session.
 
@@ -132,6 +134,7 @@ Feature flags:
 - `SEMANTIC_RETRIEVAL_ENABLED` remains false and unimplemented
 - `STUDY_PARTNER_ENABLED` gates all `/study-*` commands
 - `VISION_ANALYSIS_ENABLED` gates all `/vision-*` commands
+- `VOICE_INTERACTION_ENABLED` gates `/voice-turn` and `/voice-status`
 
 ## Source-grounded answers
 
@@ -224,6 +227,44 @@ Centralized limits:
 Feature flag:
 
 - `VISION_ANALYSIS_ENABLED` gates `/vision-describe`, `/vision-ask`, and `/vision-info`
+
+## Natural voice conversation
+
+Milestone 24 adds explicit push-to-talk natural voice conversation for one spoken utterance at a time.
+
+Commands:
+
+- `/voice-turn` — record one bounded utterance, transcribe it, generate an ordinary Cortana chat reply, synthesize speech, and play it synchronously
+- `/voice-status` — show safe voice configuration without opening the microphone
+
+Behavior and limits:
+
+- Microphone capture requires an explicit `/voice-turn`; startup, construction, import, and `/voice-status` never open the mic
+- Recording stops when Enter is pressed or when the 30-second maximum is reached
+- Enter-to-stop uses non-blocking Windows console polling on the capture thread (no background `input()` waiter)
+- While "Listening..." is shown, pressing Enter ends recording; avoid typing the next command until recording has stopped
+- Anything typed while "Listening..." is shown is discarded and is not queued for the next command
+- Canonical audio is in-memory PCM WAV, 16-bit mono 16 kHz; no temp files and no audio archive
+- Speech-to-text uses OpenAI transcriptions (`CORTANA_TRANSCRIPTION_MODEL`, default `gpt-4o-mini-transcribe`) with provider language auto-detection
+- Text-to-speech uses OpenAI speech (`CORTANA_TTS_MODEL` / `CORTANA_TTS_VOICE`, defaults `gpt-4o-mini-tts` / `coral`) and returns WAV for Windows `winsound` playback
+- The text response is authoritative: TTS or playback failure still keeps the visible/history-committed conversational turn
+- Voice is a transport into ordinary conversation (`generate_response` + history + active memory)
+- Spoken transcripts intentionally have less operational authority than typed input in M24: they do not execute slash commands and do not enter Milestone 18 natural-language routing
+- M24 is sequential push-to-talk. No full-duplex realtime, wake word, always-on listening, barge-in, or speaking over Cortana during playback
+
+Centralized limits:
+
+- Maximum utterance duration: 30 seconds
+- Sample rate: 16,000 Hz mono 16-bit
+- Maximum PCM bytes: 960,000 (`16000 * 1 * 2 * 30`)
+- Maximum WAV bytes: 960,044 (PCM + stable 44-byte stdlib WAV header)
+- Minimum utterance: 250 ms
+- Maximum transcript characters: 4,000
+- Maximum TTS characters: 4,096 (no silent truncation)
+
+Feature flag:
+
+- `VOICE_INTERACTION_ENABLED` gates `/voice-turn` and `/voice-status`
 
 Citation labels use a compact deterministic format such as `[DOC-1:C1]`. Each label maps through a session source manifest to:
 
@@ -798,6 +839,8 @@ Centralized defaults:
 | `/vision-describe <path>` | Describe one authorized local image |
 | `/vision-ask <path> \| <question>` | Ask a question about one authorized local image |
 | `/vision-info <path>` | Validate/normalize one authorized local image without calling the AI |
+| `/voice-turn` | Capture one spoken utterance and hear Cortana's ordinary conversational reply |
+| `/voice-status` | Show safe voice interaction configuration without opening the microphone |
 | `/event-new <severity> \| <title> \| <description>` | Record one local security event |
 | `/events` | List saved security events |
 | `/event <event-id>` | Show one security event |
@@ -863,6 +906,10 @@ Notes:
 - Grounded document commands do not write into ordinary conversation history and do not inject active memory.
 - Vision commands do not write into ordinary conversation history, do not inject active memory, and do not persist image bytes.
 - `/vision-info` never calls the AI service.
+- `/voice-turn` is sequential push-to-talk: capture → STT → ordinary chat → TTS → synchronous playback. It does not open the microphone at startup, does not listen in the background, and does not support barge-in or speaking over Cortana during playback.
+- While "Listening..." is shown, pressing Enter ends recording; avoid typing the next command until recording has stopped. Anything typed while "Listening..." is shown is discarded and is not queued for the next command.
+- Spoken transcripts enter ordinary conversation history after a successful chat response, but they do not execute slash commands or Milestone 18 natural-language actions in this milestone.
+- `/voice-status` never opens the microphone and never calls the AI service.
 - Milestone 8 security commands never call the AI service.
 - Milestone 9 defensive tool commands never call the AI service.
 - Milestone 10/11 workflow/playbook commands never call the AI service.

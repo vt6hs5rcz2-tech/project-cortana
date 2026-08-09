@@ -115,3 +115,41 @@ def test_load_settings_omits_blank_google_oauth_client_file(
     settings = load_settings()
 
     assert settings.google_oauth_client_file is None
+
+
+def test_load_settings_voice_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Voice model/voice settings should default to the Milestone 24 values."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.delenv("CORTANA_TRANSCRIPTION_MODEL", raising=False)
+    monkeypatch.delenv("CORTANA_TTS_MODEL", raising=False)
+    monkeypatch.delenv("CORTANA_TTS_VOICE", raising=False)
+
+    settings = load_settings()
+
+    assert settings.transcription_model == "gpt-4o-mini-transcribe"
+    assert settings.tts_model == "gpt-4o-mini-tts"
+    assert settings.tts_voice == "coral"
+
+
+def test_load_settings_rejects_disallowed_tts_voice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Custom/cloned voices must be rejected at settings load."""
+    monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setenv("CORTANA_TTS_VOICE", "voice_1234")
+
+    with pytest.raises(ValueError, match="CORTANA_TTS_VOICE"):
+        load_settings()
+
+
+def test_load_settings_rejects_disallowed_transcription_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-api-key")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+    monkeypatch.setenv("CORTANA_TRANSCRIPTION_MODEL", "gpt-5")
+
+    with pytest.raises(ValueError, match="CORTANA_TRANSCRIPTION_MODEL"):
+        load_settings()

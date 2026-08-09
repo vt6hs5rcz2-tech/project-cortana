@@ -29,6 +29,8 @@ from src.settings import Settings
 from src.study_service import StudyPartnerService
 from src.vision_input import VisualInputLoader
 from src.vision_service import VisualAnalysisService
+from src.voice_input import MicrophoneCaptureAdapter, poll_windows_console_enter_stop
+from src.voice_service import VoiceService
 from src.tool_executor import DefensiveToolExecutor
 from src.tool_registry import ToolRegistry
 from src.tool_repository import ToolControlRepository
@@ -37,6 +39,16 @@ from src.workflow_registry import WorkflowRegistry
 from src.workflow_repository import WorkflowRunRepository
 
 BLANK_INPUT_MESSAGE = "Cortana: Please enter a message."
+
+
+def default_voice_stop_signal() -> bool:
+    """Poll for Enter on the Windows console during a voice-turn listen phase.
+
+    Distinct from the conversation loop ``read_input`` seam so scripted outer
+    loop inputs are never consumed as the voice stop signal. Uses non-blocking
+    console polling so no stdin waiter can outlive ``capture()``.
+    """
+    return poll_windows_console_enter_stop()
 
 
 def end_conversation(*, logger: logging.Logger) -> None:
@@ -53,7 +65,7 @@ def read_session_input(input_reader: Callable[[], str]) -> str | None:
         return None
 
 
-def handle_message(
+def process_conversation_turn(
     *,
     client: OpenAIClient,
     settings: Settings,
@@ -61,8 +73,13 @@ def handle_message(
     logger: logging.Logger,
     conversation_history: ConversationHistory | None = None,
     active_memory_context: ActiveMemoryContext | None = None,
-) -> None:
-    """Generate and display one Cortana response."""
+) -> str | None:
+    """Generate one ordinary conversational answer without printing it.
+
+    On success, writes the user message and assistant answer to history when a
+    history object is provided. On failure, returns None and leaves history
+    unchanged.
+    """
     active_memories = (
         active_memory_context.list_active()
         if active_memory_context is not None
@@ -88,15 +105,39 @@ def handle_message(
             "The OpenAI request failed with error type: %s",
             type(error).__name__,
         )
-        print("Cortana: I could not complete that request.")
-        return
+        return None
 
     if conversation_history is not None:
         conversation_history.add_user_message(user_message.strip())
         conversation_history.add_assistant_message(answer)
 
-    print(f"Cortana: {answer}")
     logger.info("Response completed.")
+    return answer
+
+
+def handle_message(
+    *,
+    client: OpenAIClient,
+    settings: Settings,
+    user_message: str,
+    logger: logging.Logger,
+    conversation_history: ConversationHistory | None = None,
+    active_memory_context: ActiveMemoryContext | None = None,
+) -> None:
+    """Generate and display one Cortana response."""
+    answer = process_conversation_turn(
+        client=client,
+        settings=settings,
+        user_message=user_message,
+        logger=logger,
+        conversation_history=conversation_history,
+        active_memory_context=active_memory_context,
+    )
+    if answer is None:
+        print("Cortana: I could not complete that request.")
+        return
+
+    print(f"Cortana: {answer}")
 
 
 def run_conversation_loop(
@@ -126,11 +167,15 @@ def run_conversation_loop(
     study_service: StudyPartnerService | None = None,
     vision_loader: VisualInputLoader | None = None,
     vision_service: VisualAnalysisService | None = None,
+    voice_capture: MicrophoneCaptureAdapter | None = None,
+    voice_service: VoiceService | None = None,
     read_input: Callable[[], str] | None = None,
+    stop_signal: Callable[[], bool] | None = None,
     conversation_history: ConversationHistory | None = None,
 ) -> None:
     """Run the interactive conversation until the user exits."""
     input_reader = read_input or (lambda: input("You: "))
+    voice_stop_signal = stop_signal or default_voice_stop_signal
     history = conversation_history or ConversationHistory()
     chunker = document_chunker or DocumentChunker()
     retriever = document_retriever or LexicalDocumentRetriever(chunker=chunker)
@@ -185,6 +230,9 @@ def run_conversation_loop(
                 study_service=study_service,
                 vision_loader=vision_loader,
                 vision_service=vision_service,
+                voice_capture=voice_capture,
+                voice_service=voice_service,
+                stop_signal=voice_stop_signal,
                 client=client,
             )
             if command_result.message:
