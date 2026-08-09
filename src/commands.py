@@ -66,6 +66,7 @@ from src.config import (
     VISION_ANALYSIS_ENABLED,
     VOICE_INTERACTION_ENABLED,
     REALTIME_VOICE_ENABLED,
+    REALTIME_MULTIMODAL_ENABLED,
     SEMANTIC_RETRIEVAL_ENABLED,
     SOURCE_MANIFEST_PERSISTENCE_ENABLED,
     DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED,
@@ -175,6 +176,12 @@ from src.realtime_voice_commands import (
     append_realtime_status_lines,
     handle_realtime_voice_command,
 )
+from src.realtime_multimodal_commands import (
+    REALTIME_MULTIMODAL_COMMAND_NAMES,
+    RealtimeMultimodalCommandContext,
+    append_multimodal_status_lines,
+    handle_realtime_multimodal_command,
+)
 from src.voice_commands import (
     VOICE_COMMAND_NAMES,
     VoiceCommandContext,
@@ -278,6 +285,7 @@ SUPPORTED_COMMANDS = frozenset(
         *VISION_COMMAND_NAMES,
         *VOICE_COMMAND_NAMES,
         *REALTIME_VOICE_COMMAND_NAMES,
+        *REALTIME_MULTIMODAL_COMMAND_NAMES,
     }
 )
 
@@ -380,6 +388,7 @@ HELP_TEXT = """Cortana: Available commands:
   /vision-info          - Validate and inspect one authorized local image
   /voice-turn           - Capture one spoken turn and hear Cortana respond
   /voice-realtime       - Start an explicit realtime spoken conversation
+  /multimodal-realtime  - Start realtime voice with live camera context
   /voice-status         - Show safe voice interaction configuration
   /about                - Describe Project Cortana and this software milestone
   /exit                 - End the session cleanly"""
@@ -394,7 +403,8 @@ ABOUT_TEXT = (
     "practice over authorized documents, static visual understanding for "
     "authorized local images, explicit push-to-talk natural voice "
     "conversation for one spoken turn at a time, explicit realtime "
-    "spoken conversation with barge-in, a local "
+    "spoken conversation with barge-in, explicit realtime multimodal "
+    "perception combining voice with bounded live camera context, a local "
     "human-controlled security event, incident, indicator, evidence, and "
     "chain-of-custody foundation, a human-supervised defensive tool "
     "framework with scope controls and approval, optional process-isolated "
@@ -1020,6 +1030,10 @@ def handle_slash_command(
                     status_message,
                     settings,
                 )
+                status_message = append_multimodal_status_lines(
+                    status_message,
+                    settings,
+                )
             return CommandResult(
                 outcome=CommandOutcome.CONTINUE,
                 message=status_message,
@@ -1041,6 +1055,24 @@ def handle_slash_command(
             return CommandResult(
                 outcome=CommandOutcome.CONTINUE,
                 message=realtime_result.message,
+            )
+
+    if command_name in REALTIME_MULTIMODAL_COMMAND_NAMES:
+        multimodal_result = handle_realtime_multimodal_command(
+            command_name,
+            RealtimeMultimodalCommandContext(
+                message=message,
+                settings=settings,
+                client=client,
+                conversation_history=conversation_history,
+                active_memory_context=active_memory_context,
+                logger=logger,
+            ),
+        )
+        if multimodal_result is not None:
+            return CommandResult(
+                outcome=CommandOutcome.CONTINUE,
+                message=multimodal_result.message,
             )
 
     handler = COMMAND_HANDLERS.get(command_name)
@@ -1901,6 +1933,16 @@ def format_status(
         if (VOICE_INTERACTION_ENABLED and REALTIME_VOICE_ENABLED)
         else "disabled"
     )
+    multimodal_enabled = (
+        "enabled"
+        if (
+            VOICE_INTERACTION_ENABLED
+            and REALTIME_VOICE_ENABLED
+            and VISION_ANALYSIS_ENABLED
+            and REALTIME_MULTIMODAL_ENABLED
+        )
+        else "disabled"
+    )
 
     registry = tool_registry or build_default_tool_registry()
     registered_tool_count = registry.count()
@@ -2078,7 +2120,8 @@ def format_status(
         f"  Active study session: {study_active_session}\n"
         f"  Visual analysis: {vision_enabled}\n"
         f"  Voice interaction: {voice_enabled}\n"
-        f"  Realtime voice: {realtime_voice_enabled}"
+        f"  Realtime voice: {realtime_voice_enabled}\n"
+        f"  Realtime multimodal: {multimodal_enabled}"
     )
 
 

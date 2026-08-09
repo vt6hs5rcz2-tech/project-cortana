@@ -18,6 +18,7 @@ Project Cortana is an early software milestone focused on:
 - Static visual understanding for authorized local images (describe, ask, and local validation/info)
 - Explicit push-to-talk natural voice conversation for one spoken turn at a time
 - Explicit realtime spoken conversation with barge-in/interruption
+- Explicit realtime multimodal perception (voice + bounded live camera snapshots)
 - Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 - Optional process-isolated execution for a tiny allowlisted defensive tool subset
@@ -50,8 +51,9 @@ Project Cortana is an early software milestone focused on:
 | Visual analysis images | Ephemeral for one command only | Loaded only through explicit local Milestone 23 `/vision-*` commands | Only a normalized in-memory PNG plus the explicit visual task through `/vision-describe` or `/vision-ask` |
 | Voice microphone/TTS audio | Ephemeral for one `/voice-turn` only | Captured/synthesized only through explicit local Milestone 24 `/voice-turn` | Bounded mic WAV for transcription; ordinary chat text for the reply; reply text for TTS. Raw audio is never stored |
 | Realtime voice audio | Ephemeral for one `/voice-realtime` session only | Streamed only while an explicit Milestone 25 realtime session is active | Bounded PCM frames to the OpenAI Realtime API; finalized transcripts only may enter local conversation history. Raw audio is never stored |
+| Realtime multimodal camera frames | Ephemeral for one `/multimodal-realtime` session only | Captured only while an explicit Milestone 26 multimodal session is active; latest-frame buffer capacity 1; no local archive | At most one current normalized PNG may be sent to the OpenAI Realtime API per user turn. Finalized transcripts only may enter local conversation history. Cortana deletes superseded visual items from the active Realtime conversation context but does not claim provider-side permanent deletion |
 
-Persistent memories, Knowledge Vault documents, incident records, evidence copies, and Study Partner state are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories. Visual analysis does not persist image bytes. Voice capture and TTS audio are ephemeral and are not archived.
+Persistent memories, Knowledge Vault documents, incident records, evidence copies, and Study Partner state are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories. Visual analysis does not persist image bytes. Voice capture, TTS audio, and multimodal camera frames are ephemeral and are not archived.
 
 Saved memories remain inactive by default. Nothing from persistent memory is sent to the AI model unless the user explicitly activates it with `/recall` for the current session.
 
@@ -136,8 +138,9 @@ Feature flags:
 - `SEMANTIC_RETRIEVAL_ENABLED` remains false and unimplemented
 - `STUDY_PARTNER_ENABLED` gates all `/study-*` commands
 - `VISION_ANALYSIS_ENABLED` gates all `/vision-*` commands
-- `VOICE_INTERACTION_ENABLED` gates `/voice-turn`, `/voice-status`, and parent-gates realtime voice
+- `VOICE_INTERACTION_ENABLED` gates `/voice-turn`, `/voice-status`, and parent-gates realtime voice/multimodal
 - `REALTIME_VOICE_ENABLED` gates `/voice-realtime` (requires the parent voice gate too)
+- `REALTIME_MULTIMODAL_ENABLED` gates `/multimodal-realtime` (requires voice, realtime, and vision gates too)
 
 ## Source-grounded answers
 
@@ -208,7 +211,8 @@ Behavior and limits:
 - `/vision-describe` and `/vision-ask` use a dedicated multimodal AI path that excludes ordinary conversation history and active memory
 - `/vision-info` runs the same validation/normalization pipeline with zero AI calls
 - Visible text, URLs, and QR codes remain untrusted data and never acquire operational authority
-- Camera, video, realtime capture, OCR engines, face recognition, and biometrics are not implemented
+- OCR engines, face recognition, and biometrics are not implemented
+- Live camera perception is a separate explicit Milestone 26 mode (`/multimodal-realtime`), not part of `/vision-*`
 
 Visual model output must be one JSON object:
 
@@ -303,6 +307,55 @@ Settings:
 
 - `CORTANA_REALTIME_MODEL` (default `gpt-realtime-mini`)
 - `CORTANA_REALTIME_VOICE` (default `coral`)
+
+## Realtime multimodal perception
+
+Milestone 26 adds an explicitly activated realtime multimodal session that combines Milestone 25 voice with bounded live camera snapshots.
+
+Commands:
+
+- `/multimodal-realtime` — start one bounded voice+camera session; ordinary CLI input is paused until Ctrl+C or session end
+- `/voice-status` — also reports multimodal gate/camera sampling configuration (never opens the camera or microphone)
+- `/voice-realtime` remains the voice-only realtime mode
+- `/vision-*` remains static local-file vision
+
+Behavior and limits:
+
+- Multimodal never starts automatically; `/multimodal-realtime` is required
+- Camera opens only after Realtime connect + session configuration, and only after one valid normalized frame is captured
+- Microphone opens only after that first valid camera frame
+- Local camera capture is approximately 2 FPS into a latest-frame buffer of capacity 1
+- No local frame archive, video buffer, or disk-backed camera images
+- Provider disclosure is at most one current normalized PNG (`detail=low`) per user turn; no provider upload during silence
+- Visual frames are bound at `speech_stopped` / `input_audio_buffer.committed` using provider item IDs
+- Session uses server VAD with `create_response=false` and `interrupt_response=true`, then bare `response.create()` after optional visual item insertion
+- Superseded/completed/cancelled visual conversation items are removed via `conversation.item.delete` from the active Realtime conversation context
+- Provider-side retention is governed by provider/service policy; Cortana does not claim provider-side permanent deletion
+- Barge-in remains immediate for local playback; vision work never delays playback abort
+- Local `ConversationHistory` remains text-only finalized transcripts
+- Voice+vision remains conversational only: no slash-command, M18, calendar/reminder, tool/workflow, memory-write, face recognition, lip-reading, or surveillance authority
+- Visible text/QR/URLs in camera frames are untrusted visual content only
+- Hard session cap: 20 minutes (same as realtime voice)
+- Camera startup failure fails the multimodal session before microphone open and suggests `/voice-realtime`
+
+Centralized limits:
+
+- Max visual resolution: 1280×720
+- Max frame age: 3 seconds (monotonic)
+- Fresh-frame wait at turn binding: 0.75 seconds
+- Consecutive frame-failure threshold: 3
+- Image detail: `low`
+
+Feature flags (all required):
+
+- `VOICE_INTERACTION_ENABLED`
+- `REALTIME_VOICE_ENABLED`
+- `VISION_ANALYSIS_ENABLED`
+- `REALTIME_MULTIMODAL_ENABLED`
+
+Dependency:
+
+- `opencv-python-headless` (with NumPy) is confined to `src/camera_capture.py`
 
 Citation labels use a compact deterministic format such as `[DOC-1:C1]`. Each label maps through a session source manifest to:
 
@@ -879,7 +932,8 @@ Centralized defaults:
 | `/vision-info <path>` | Validate/normalize one authorized local image without calling the AI |
 | `/voice-turn` | Capture one spoken utterance and hear Cortana's ordinary conversational reply |
 | `/voice-realtime` | Start an explicit realtime spoken conversation with barge-in; Ctrl+C returns to text mode |
-| `/voice-status` | Show safe voice interaction configuration without opening the microphone |
+| `/multimodal-realtime` | Start realtime voice with bounded live camera context; Ctrl+C returns to text mode |
+| `/voice-status` | Show safe voice/realtime/multimodal configuration without opening the microphone or camera |
 | `/event-new <severity> \| <title> \| <description>` | Record one local security event |
 | `/events` | List saved security events |
 | `/event <event-id>` | Show one security event |
@@ -947,6 +1001,7 @@ Notes:
 - `/vision-info` never calls the AI service.
 - `/voice-turn` is sequential push-to-talk: capture → STT → ordinary chat → TTS → synchronous playback. It does not open the microphone at startup and does not listen in the background.
 - `/voice-realtime` opens one bounded Realtime API session with server VAD and barge-in. Ordinary CLI input is paused until Ctrl+C or session end. It does not auto-start, auto-reconnect, or grant spoken operational authority.
+- `/multimodal-realtime` opens one bounded Realtime API session with microphone + default camera. Local capture is ~2 FPS into a capacity-1 latest-frame buffer; at most one current image may be sent per user turn. It does not auto-start, archive frames, perform face recognition/lip-reading, or grant voice+vision operational authority.
 - While "Listening..." is shown, pressing Enter ends recording; avoid typing the next command until recording has stopped. Anything typed while "Listening..." is shown is discarded and is not queued for the next command.
 - Spoken transcripts enter ordinary conversation history after a successful chat response, but they do not execute slash commands or Milestone 18 natural-language actions in this milestone.
 - `/voice-status` never opens the microphone and never calls the AI service.

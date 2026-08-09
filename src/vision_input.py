@@ -2,28 +2,22 @@
 
 Windows safe-open primitives from ``tool_process_safe_open`` are reused
 directly. Non-Windows platforms fail closed in this milestone.
+
+After verified bytes are read, normalization is delegated to the shared
+in-memory helper in ``vision_normalize``.
 """
 
 from __future__ import annotations
 
 import logging
-import warnings
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 from typing import Literal
 
-from PIL import Image, ImageOps
-from PIL.Image import DecompressionBombError, DecompressionBombWarning
-
 from src.config import (
     ALLOWED_VISION_EXTENSIONS,
-    ALLOWED_VISION_PILLOW_FORMATS,
-    MAX_VISION_HEIGHT,
     MAX_VISION_NORMALIZED_BYTES,
     MAX_VISION_SOURCE_BYTES,
-    MAX_VISION_SOURCE_PIXELS,
-    MAX_VISION_WIDTH,
     VISION_ANALYSIS_ENABLED,
 )
 from src.path_argument_utils import strip_path_argument_quotes
@@ -35,6 +29,7 @@ from src.tool_process_safe_open import (
     read_bytes_from_safe_handle,
     safe_open_for_read,
 )
+from src.vision_normalize import VisionNormalizeError, normalize_encoded_image_bytes
 
 logger = logging.getLogger("ProjectCortana")
 
@@ -74,13 +69,6 @@ VISION_NORMALIZE_TOO_LARGE = (
     "Cortana: The normalized image exceeds the maximum size of "
     f"{MAX_VISION_NORMALIZED_BYTES} bytes."
 )
-
-_EXTENSION_TO_FORMATS: dict[str, frozenset[str]] = {
-    ".png": frozenset({"PNG"}),
-    ".jpg": frozenset({"JPEG"}),
-    ".jpeg": frozenset({"JPEG"}),
-    ".webp": frozenset({"WEBP"}),
-}
 
 
 class VisionInputError(RuntimeError):
@@ -160,9 +148,16 @@ class VisualInputLoader:
             raise VisionInputValidationError(VISION_UNSUPPORTED_TYPE)
 
         raw_bytes = _read_source_bytes(cleaned)
-        detected_format, width, height, normalized = _normalize_image_bytes(
+        detected_format, width, height, png_bytes = _normalize_verified_bytes(
             raw_bytes,
             extension=extension,
+        )
+        normalized = NormalizedVisualInput(
+            mime_type="image/png",
+            image_bytes=png_bytes,
+            width=width,
+            height=height,
+            source_kind="local_file",
         )
         logger.info(
             "Vision input loaded format=%s source_bytes=%s "
@@ -234,104 +229,24 @@ def _read_source_bytes(path_argument: str) -> bytes:
             opened.close()
 
 
-def _normalize_image_bytes(
+def _normalize_verified_bytes(
     raw_bytes: bytes,
     *,
     extension: str,
-) -> tuple[str, int, int, NormalizedVisualInput]:
-    """Validate, orient, strip metadata, and re-encode to PNG in memory."""
-    if len(raw_bytes) > MAX_VISION_SOURCE_BYTES:
-        raise VisionInputValidationError(VISION_FILE_TOO_LARGE)
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", DecompressionBombWarning)
-        try:
-            with Image.open(BytesIO(raw_bytes)) as header_image:
-                detected_format = _validate_header_image(header_image, extension)
-                header_image.verify()
-
-            with Image.open(BytesIO(raw_bytes)) as image:
-                _validate_header_image(image, extension)
-                image.load()
-                oriented = ImageOps.exif_transpose(image)
-                working = oriented if oriented is not None else image
-                normalized_mode = _normalized_mode(working)
-                converted = (
-                    working
-                    if working.mode == normalized_mode
-                    else working.convert(normalized_mode)
-                )
-                fresh = Image.frombytes(
-                    normalized_mode,
-                    converted.size,
-                    converted.tobytes(),
-                )
-                buffer = BytesIO()
-                fresh.save(buffer, format="PNG")
-                png_bytes = buffer.getvalue()
-                width, height = fresh.size
-        except VisionInputError:
-            raise
-        except (DecompressionBombError, DecompressionBombWarning) as error:
-            raise VisionInputValidationError(VISION_IMAGE_TOO_LARGE) from error
-        except Exception as error:
-            logger.error(
-                "Vision image decode/normalize failed error_type=%s",
-                type(error).__name__,
-            )
-            raise VisionInputValidationError(VISION_CORRUPT) from error
-
-    if len(png_bytes) > MAX_VISION_NORMALIZED_BYTES:
-        raise VisionInputValidationError(VISION_NORMALIZE_TOO_LARGE)
-
-    normalized = NormalizedVisualInput(
-        mime_type="image/png",
-        image_bytes=png_bytes,
-        width=width,
-        height=height,
-        source_kind="local_file",
-    )
-    return detected_format, width, height, normalized
-
-
-def _validate_header_image(image: Image.Image, extension: str) -> str:
-    """Validate format, animation, and hard source dimension bounds before load."""
-    detected = image.format
-    if not isinstance(detected, str) or detected not in ALLOWED_VISION_PILLOW_FORMATS:
-        raise VisionInputValidationError(VISION_UNSUPPORTED_TYPE)
-
-    allowed_for_extension = _EXTENSION_TO_FORMATS.get(extension)
-    if allowed_for_extension is None or detected not in allowed_for_extension:
-        raise VisionInputValidationError(VISION_FORMAT_MISMATCH)
-
-    if bool(getattr(image, "is_animated", False)):
-        raise VisionInputValidationError(VISION_ANIMATED)
-    n_frames = getattr(image, "n_frames", 1)
-    if isinstance(n_frames, int) and n_frames > 1:
-        raise VisionInputValidationError(VISION_ANIMATED)
-
-    width, height = image.size
-    if (
-        isinstance(width, bool)
-        or isinstance(height, bool)
-        or not isinstance(width, int)
-        or not isinstance(height, int)
-        or width < 1
-        or height < 1
-    ):
-        raise VisionInputValidationError(VISION_CORRUPT)
-    if width > MAX_VISION_WIDTH or height > MAX_VISION_HEIGHT:
-        raise VisionInputValidationError(VISION_IMAGE_TOO_LARGE)
-    if width * height > MAX_VISION_SOURCE_PIXELS:
-        raise VisionInputValidationError(VISION_IMAGE_TOO_LARGE)
-    return detected
-
-
-def _normalized_mode(image: Image.Image) -> Literal["RGB", "RGBA"]:
-    """Map arbitrary Pillow modes to RGB or RGBA for provider submission."""
-    mode = image.mode
-    if mode in {"RGBA", "LA", "PA"} or "A" in mode:
-        return "RGBA"
-    if mode == "P" and "transparency" in image.info:
-        return "RGBA"
-    return "RGB"
+) -> tuple[str, int, int, bytes]:
+    """Normalize verified encoded bytes through the shared in-memory path."""
+    try:
+        return normalize_encoded_image_bytes(raw_bytes, extension=extension)
+    except VisionNormalizeError as error:
+        mapping = {
+            "file_too_large": VISION_FILE_TOO_LARGE,
+            "unsupported_type": VISION_UNSUPPORTED_TYPE,
+            "format_mismatch": VISION_FORMAT_MISMATCH,
+            "animated": VISION_ANIMATED,
+            "image_too_large": VISION_IMAGE_TOO_LARGE,
+            "normalize_too_large": VISION_NORMALIZE_TOO_LARGE,
+            "corrupt": VISION_CORRUPT,
+        }
+        raise VisionInputValidationError(
+            mapping.get(error.error_type, VISION_CORRUPT)
+        ) from error

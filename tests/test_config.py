@@ -99,6 +99,7 @@ from src.config import (
     VISION_IMAGE_DETAIL,
     VOICE_INTERACTION_ENABLED,
     REALTIME_VOICE_ENABLED,
+    REALTIME_MULTIMODAL_ENABLED,
     REALTIME_VOICE_SAMPLE_RATE_HZ,
     REALTIME_VOICE_FRAME_BYTES,
     REALTIME_VOICE_FRAME_MS,
@@ -106,6 +107,11 @@ from src.config import (
     REALTIME_VOICE_OUTPUT_QUEUE_FRAMES,
     MAX_REALTIME_VOICE_SESSION_MINUTES,
     DEFAULT_REALTIME_MODEL,
+    MAX_REALTIME_VISUAL_WIDTH,
+    MAX_REALTIME_VISUAL_HEIGHT,
+    MAX_REALTIME_VISUAL_FRAME_AGE_SECONDS,
+    REALTIME_VISUAL_SAMPLE_INTERVAL_SECONDS,
+    REALTIME_VISUAL_IMAGE_DETAIL,
     MAX_VOICE_UTTERANCE_SECONDS,
     MAX_VOICE_PCM_BYTES,
     MAX_VOICE_AUDIO_BYTES,
@@ -242,6 +248,16 @@ def test_realtime_voice_limits_and_capabilities_are_centralized() -> None:
     assert REALTIME_VOICE_OUTPUT_QUEUE_FRAMES == 100
     assert MAX_REALTIME_VOICE_SESSION_MINUTES == 20
     assert DEFAULT_REALTIME_MODEL == "gpt-realtime-mini"
+
+
+def test_realtime_multimodal_limits_and_capabilities_are_centralized() -> None:
+    """Realtime multimodal configuration should use bounded live-vision constants."""
+    assert REALTIME_MULTIMODAL_ENABLED is True
+    assert MAX_REALTIME_VISUAL_WIDTH == 1280
+    assert MAX_REALTIME_VISUAL_HEIGHT == 720
+    assert MAX_REALTIME_VISUAL_FRAME_AGE_SECONDS == 3.0
+    assert REALTIME_VISUAL_SAMPLE_INTERVAL_SECONDS == 0.5
+    assert REALTIME_VISUAL_IMAGE_DETAIL == "low"
 
 
 def test_default_memory_path_is_outside_project_source(

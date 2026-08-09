@@ -13,3 +13,4 @@ google-auth==2.40.3
 google-auth-oauthlib==1.2.2
 keyring==25.6.0
 sounddevice==0.5.5
+opencv-python-headless==4.12.0.88
