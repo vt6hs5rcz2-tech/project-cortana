@@ -87,6 +87,16 @@ from src.config import (
     STUDY_REPOSITORY_SCHEMA_VERSION,
     MAX_STUDY_DOCUMENTS,
     MAX_STORED_STUDY_SESSIONS,
+    VISION_ANALYSIS_ENABLED,
+    ALLOWED_VISION_EXTENSIONS,
+    MAX_VISION_SOURCE_BYTES,
+    MAX_VISION_WIDTH,
+    MAX_VISION_HEIGHT,
+    MAX_VISION_SOURCE_PIXELS,
+    MAX_VISION_NORMALIZED_BYTES,
+    MAX_VISION_QUESTION_CHARS,
+    MAX_VISION_OUTPUT_CHARS,
+    VISION_IMAGE_DETAIL,
     get_default_document_vault_file_path,
     get_default_evidence_store_dir_path,
     get_default_incident_repository_file_path,
@@ -174,6 +184,20 @@ def test_study_partner_limits_and_capabilities_are_centralized(
     assert path.name == STUDY_REPOSITORY_FILENAME
     assert "ProjectCortana" in path.parts
     assert PROJECT_ROOT not in path.parents
+
+
+def test_vision_analysis_limits_and_capabilities_are_centralized() -> None:
+    """Visual analysis configuration should use centralized constants."""
+    assert VISION_ANALYSIS_ENABLED is True
+    assert ALLOWED_VISION_EXTENSIONS == frozenset({".png", ".jpg", ".jpeg", ".webp"})
+    assert MAX_VISION_SOURCE_BYTES == 10 * 1024 * 1024
+    assert MAX_VISION_WIDTH == 4096
+    assert MAX_VISION_HEIGHT == 4096
+    assert MAX_VISION_SOURCE_PIXELS == 16_777_216
+    assert MAX_VISION_NORMALIZED_BYTES == 5 * 1024 * 1024
+    assert MAX_VISION_QUESTION_CHARS == 2_000
+    assert MAX_VISION_OUTPUT_CHARS == 4_000
+    assert VISION_IMAGE_DETAIL == "auto"
 
 
 def test_default_memory_path_is_outside_project_source(

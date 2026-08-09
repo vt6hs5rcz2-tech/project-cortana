@@ -17,7 +17,7 @@ from src.document_knowledge_service import DocumentKnowledgeService
 from src.document_retrieval import LexicalDocumentRetriever
 from src.document_vault import DocumentVault
 from src.retrieval_session import RetrievalSession
-from src.security_commands import extract_command_argument
+from src.command_argument_utils import extract_command_argument
 from src.settings import Settings
 from src.study_models import StudyQuestionPublicView
 from src.study_repository import JsonStudyRepository, StudyRepository, StudyStorageError

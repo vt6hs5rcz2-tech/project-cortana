@@ -78,6 +78,20 @@ MAX_STUDY_USER_ANSWER_CHARS = 2_000
 MAX_STUDY_TOPIC_CHARS = 500
 MAX_STUDY_PENDING_PROMPT_PREVIEW_CHARS = 200
 
+# Multimodal Vision / Visual Understanding (Milestone 23)
+# Static authorized local images only. Windows safe-open is required.
+VISION_ANALYSIS_ENABLED = True
+ALLOWED_VISION_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+ALLOWED_VISION_PILLOW_FORMATS = frozenset({"PNG", "JPEG", "WEBP"})
+MAX_VISION_SOURCE_BYTES = 10 * 1024 * 1024
+MAX_VISION_WIDTH = 4096
+MAX_VISION_HEIGHT = 4096
+MAX_VISION_SOURCE_PIXELS = 16_777_216
+MAX_VISION_NORMALIZED_BYTES = 5 * 1024 * 1024
+MAX_VISION_QUESTION_CHARS = 2_000
+MAX_VISION_OUTPUT_CHARS = 4_000
+VISION_IMAGE_DETAIL = "auto"
+
 # Security incident repository and evidence foundation (Milestone 8)
 INCIDENT_REPOSITORY_ENABLED = True
 EVIDENCE_COPY_ENABLED = True

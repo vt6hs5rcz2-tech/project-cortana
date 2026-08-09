@@ -50,18 +50,20 @@ def test_study_service_ast_bans_operational_imports() -> None:
 
 def test_study_commands_ast_bans_operational_imports() -> None:
     # study_commands may import OpenAIClient/settings/vault/knowledge only.
-    # extract_command_argument from security_commands is the sole allowed exception.
+    # Argument parsing uses dependency-free command_argument_utils.
     path = PROJECT_ROOT / "src" / "study_commands.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    imported_command_utils = False
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module:
             parts = node.module.split(".")
             if parts[0] == "src" and len(parts) > 1 and parts[1] in FORBIDDEN_MODULES:
-                if parts[1] == "security_commands":
-                    names = {alias.name for alias in node.names}
-                    assert names <= {"extract_command_argument"}
-                else:
-                    raise AssertionError(node.module)
+                raise AssertionError(node.module)
+            if parts[0] == "src" and len(parts) > 1 and parts[1] == "command_argument_utils":
+                imported_command_utils = True
+            if parts[0] == "src" and len(parts) > 1 and parts[1] == "security_commands":
+                raise AssertionError("study_commands must not import security_commands")
+    assert imported_command_utils
 
 
 def test_public_view_has_no_answer_key_fields() -> None:

@@ -25,6 +25,8 @@ from src.reminder_service import ReminderService
 from src.retrieval_session import RetrievalSession
 from src.settings import Settings
 from src.study_service import StudyPartnerService
+from src.vision_input import VisualInputLoader
+from src.vision_service import VisualAnalysisService
 from src.tool_executor import DefensiveToolExecutor
 from src.tool_registry import ToolRegistry
 from src.tool_repository import JsonToolControlRepository, ToolControlRepository
@@ -569,6 +571,8 @@ def test_main_orchestrates_conversation_loop(
     received_reminder_service: ReminderService | None = None
     received_calendar_service: CalendarService | None = None
     received_study_service: StudyPartnerService | None = None
+    received_vision_loader: VisualInputLoader | None = None
+    received_vision_service: VisualAnalysisService | None = None
 
     monkeypatch.setattr(main_module, "setup_logging", lambda: logger)
     monkeypatch.setattr(
@@ -647,6 +651,8 @@ def test_main_orchestrates_conversation_loop(
         reminder_service: ReminderService,
         calendar_service: CalendarService,
         study_service: StudyPartnerService | None = None,
+        vision_loader: VisualInputLoader | None = None,
+        vision_service: VisualAnalysisService | None = None,
     ) -> None:
         nonlocal received_client, received_settings, received_logger, received_memory_store
         nonlocal received_active_memory_context
@@ -660,6 +666,7 @@ def test_main_orchestrates_conversation_loop(
         nonlocal received_analysis_repository, received_analysis_audit_log
         nonlocal received_reminder_service, received_calendar_service
         nonlocal received_study_service
+        nonlocal received_vision_loader, received_vision_service
         received_client = client
         received_settings = settings
         received_logger = logger
@@ -683,6 +690,8 @@ def test_main_orchestrates_conversation_loop(
         received_reminder_service = reminder_service
         received_calendar_service = calendar_service
         received_study_service = study_service
+        received_vision_loader = vision_loader
+        received_vision_service = vision_service
 
     monkeypatch.setattr(
         main_module,
@@ -727,6 +736,8 @@ def test_main_orchestrates_conversation_loop(
     assert isinstance(received_calendar_service, CalendarService)
     assert received_calendar_service.status_view().connection_state == "not_connected"
     assert isinstance(received_study_service, StudyPartnerService)
+    assert isinstance(received_vision_loader, VisualInputLoader)
+    assert isinstance(received_vision_service, VisualAnalysisService)
     assert reminder_path.parent.exists()
     assert calendar_path.parent.exists()
     assert study_path.parent.exists()

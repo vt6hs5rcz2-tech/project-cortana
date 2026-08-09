@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from uuid import uuid4
 
+from src.command_argument_utils import extract_command_argument
 from src.config import MAX_SECURITY_LIST_PREVIEW_CHARS
 from src.evidence_store import EvidenceStore, EvidenceStoreError
 from src.incident_repository import (
@@ -184,15 +185,6 @@ class SecurityCommandResult:
 
 
 SecurityCommandHandler = Callable[[SecurityCommandContext], SecurityCommandResult]
-
-
-def extract_command_argument(message: str) -> str:
-    """Return the raw argument text after the command token."""
-    stripped = message.strip()
-    parts = stripped.split(maxsplit=1)
-    if len(parts) < 2:
-        return ""
-    return parts[1]
 
 
 def split_delimited_fields(argument: str, expected_count: int) -> list[str] | None:

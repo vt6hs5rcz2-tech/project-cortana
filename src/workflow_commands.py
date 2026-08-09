@@ -14,7 +14,8 @@ from src.config import (
     get_default_workflow_repository_file_path,
 )
 from src.incident_repository import IncidentRepository
-from src.security_commands import extract_command_argument, split_delimited_fields
+from src.command_argument_utils import extract_command_argument
+from src.security_commands import split_delimited_fields
 from src.tool_common import (
     BlankToolFieldError,
     InvalidToolIdError,

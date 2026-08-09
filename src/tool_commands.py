@@ -45,7 +45,8 @@ from src.tool_scope import (
     create_authorized_scope,
     disable_authorized_scope,
 )
-from src.security_commands import extract_command_argument, split_delimited_fields
+from src.command_argument_utils import extract_command_argument
+from src.security_commands import split_delimited_fields
 
 logger = logging.getLogger("ProjectCortana")
 

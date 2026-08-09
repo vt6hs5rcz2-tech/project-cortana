@@ -4,8 +4,13 @@ from dataclasses import dataclass
 
 import pytest
 
-from src.ai_service import AIResponse, ResponsesClient, generate_response
-from src.conversation import ConversationApiInput, ConversationHistory
+from src.ai_service import (
+    AIResponse,
+    ResponsesApiInput,
+    ResponsesClient,
+    generate_response,
+)
+from src.conversation import ConversationHistory
 from src.identity import CORTANA_SYSTEM_INSTRUCTIONS
 from src.settings import Settings
 
@@ -22,14 +27,14 @@ class FakeResponses:
 
     def __init__(self) -> None:
         self.model: str | None = None
-        self.input: ConversationApiInput | None = None
+        self.input: ResponsesApiInput | None = None
         self.instructions: str | None = None
 
     def create(
         self,
         *,
         model: str,
-        input: ConversationApiInput,
+        input: ResponsesApiInput,
         instructions: str | None = None,
     ) -> AIResponse:
         """Record the request and return a fake response."""

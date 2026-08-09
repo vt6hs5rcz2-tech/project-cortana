@@ -26,7 +26,7 @@ from src.config import (
 )
 from src.reminder_commands import split_delimited_fields
 from src.secret_store import KeyringSecretStore, SecretStore, SecretStoreError
-from src.security_commands import extract_command_argument
+from src.command_argument_utils import extract_command_argument
 
 logger = logging.getLogger("ProjectCortana")
 

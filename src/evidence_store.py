@@ -11,7 +11,7 @@ from typing import Protocol
 from uuid import UUID
 
 from src.config import MAX_EVIDENCE_SOURCE_BYTES
-from src.document_ingestion import strip_path_argument_quotes
+from src.path_argument_utils import strip_path_argument_quotes
 from src.security_common import InvalidSecurityIdError, validate_security_id
 
 logger = logging.getLogger("ProjectCortana")

@@ -9,7 +9,7 @@ import stat
 from pathlib import Path
 
 from src.config import MAX_TOOL_FILE_BYTES
-from src.document_ingestion import strip_path_argument_quotes
+from src.path_argument_utils import strip_path_argument_quotes
 from src.tool_common import ToolValidationError
 
 logger = logging.getLogger("ProjectCortana")

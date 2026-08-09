@@ -20,7 +20,8 @@ from src.incident_evidence_search import (
     create_evidence_text_search_request,
 )
 from src.incident_repository import IncidentRepository, IncidentStorageError
-from src.security_commands import extract_command_argument, split_delimited_fields
+from src.command_argument_utils import extract_command_argument
+from src.security_commands import split_delimited_fields
 from src.tool_common import (
     BlankToolFieldError,
     InvalidToolIdError,

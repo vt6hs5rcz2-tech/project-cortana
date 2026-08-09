@@ -26,7 +26,8 @@ from src.incident_analysis_common import (
 from src.incident_analysis_repository import InMemoryIncidentAnalysisRepository
 from src.incident_analysis_service import IncidentAnalysisService
 from src.incident_repository import IncidentRepository, IncidentStorageError
-from src.security_commands import extract_command_argument, split_delimited_fields
+from src.command_argument_utils import extract_command_argument
+from src.security_commands import split_delimited_fields
 from src.settings import Settings
 from src.tool_common import (
     BlankToolFieldError,

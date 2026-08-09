@@ -27,6 +27,7 @@ from src.document_vault import (
     DocumentVault,
     DuplicateDocumentHashError,
 )
+from src.path_argument_utils import strip_path_argument_quotes
 
 logger = logging.getLogger("ProjectCortana")
 
@@ -37,14 +38,6 @@ class DocumentIngestionError(RuntimeError):
     def __init__(self, user_message: str) -> None:
         super().__init__(user_message)
         self.user_message = user_message
-
-
-def strip_path_argument_quotes(argument: str) -> str:
-    """Remove a single matching pair of surrounding quotes from a path argument."""
-    stripped = argument.strip()
-    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {'"', "'"}:
-        return stripped[1:-1]
-    return stripped
 
 
 def ingest_local_document(

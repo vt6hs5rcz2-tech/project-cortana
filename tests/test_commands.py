@@ -25,12 +25,12 @@ from src.commands import (
     REMEMBER_TOO_LONG,
     CommandOutcome,
     clear_conversation_history,
-    extract_command_argument,
     format_status,
     handle_slash_command,
     normalize_command_name,
     parse_slash_input,
 )
+from src.command_argument_utils import extract_command_argument
 from src.config import (
     ACTIVE_MEMORY_PERSISTENCE_ENABLED,
     EXPLICIT_PERSISTENT_MEMORY_ENABLED,

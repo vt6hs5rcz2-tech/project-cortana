@@ -15,6 +15,7 @@ Project Cortana is an early software milestone focused on:
 - Deterministic local lexical document retrieval
 - Explicit source-grounded AI questions, document summaries, and two-document comparison over retrieved document passages
 - Session-scoped Study Partner for grounded explanations, practice questions, graded answers, and progress over authorized documents
+- Static visual understanding for authorized local images (describe, ask, and local validation/info)
 - Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 - Optional process-isolated execution for a tiny allowlisted defensive tool subset
@@ -44,8 +45,9 @@ Project Cortana is an early software milestone focused on:
 | Reminders | Survives restarts | Created only through explicit local Milestone 19 reminder commands | Never in this milestone |
 | Calendar account metadata, proposals, and calendar audits | Survives restarts | Connected/changed only through explicit local Milestone 20 calendar commands | Never in this milestone |
 | Study Partner sessions, questions, attempts, and chunk stats | Survives restarts | Created only through explicit local Milestone 22 `/study-*` commands | Only selected study chunks / short-answer grading inputs through study AI commands |
+| Visual analysis images | Ephemeral for one command only | Loaded only through explicit local Milestone 23 `/vision-*` commands | Only a normalized in-memory PNG plus the explicit visual task through `/vision-describe` or `/vision-ask` |
 
-Persistent memories, Knowledge Vault documents, incident records, evidence copies, and Study Partner state are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories.
+Persistent memories, Knowledge Vault documents, incident records, evidence copies, and Study Partner state are stored locally by Project Cortana in user-local application data locations. They are not placed in Git-tracked source directories. Visual analysis does not persist image bytes.
 
 Saved memories remain inactive by default. Nothing from persistent memory is sent to the AI model unless the user explicitly activates it with `/recall` for the current session.
 
@@ -129,6 +131,7 @@ Feature flags:
 - `DOCUMENT_CONTEXT_INJECTION_ENABLED` gates `/ask-docs`, `/doc-summary`, `/docs-compare`, and Study Partner AI operations
 - `SEMANTIC_RETRIEVAL_ENABLED` remains false and unimplemented
 - `STUDY_PARTNER_ENABLED` gates all `/study-*` commands
+- `VISION_ANALYSIS_ENABLED` gates all `/vision-*` commands
 
 ## Source-grounded answers
 
@@ -177,6 +180,50 @@ Study behavior:
 - Only each question’s `primary_source_ref` updates chunk stats
 - Study operations do not write conversation history, active memory, persistent memory, reminders, or calendar events
 - Guidance phrases `help me study` and `quiz me` point to slash commands only; they never execute study actions
+
+## Static visual understanding
+
+Milestone 23 adds safe static visual understanding for one authorized local image at a time.
+
+Supported source types:
+
+- `.png`
+- `.jpg` / `.jpeg`
+- `.webp`
+
+Behavior and limits:
+
+- Windows local drive-letter paths only, using the existing hardened safe-open / identity-verification boundary
+- Extension allowlist plus Pillow-detected format agreement; mismatched containers are rejected
+- Hard source dimension/pixel bounds are enforced before full decode
+- Animated / multi-frame images are rejected
+- Images are oriented with EXIF Orientation locally, then re-encoded to a metadata-free PNG in memory
+- Raw and normalized image bytes are ephemeral; no vision repository, Document Vault image ingestion, or Study Partner image integration
+- `/vision-describe` and `/vision-ask` use a dedicated multimodal AI path that excludes ordinary conversation history and active memory
+- `/vision-info` runs the same validation/normalization pipeline with zero AI calls
+- Visible text, URLs, and QR codes remain untrusted data and never acquire operational authority
+- Camera, video, realtime capture, OCR engines, face recognition, and biometrics are not implemented
+
+Visual model output must be one JSON object:
+
+```json
+{"answer":"...","visibility":"observed|mixed|undetermined","warning":null}
+```
+
+`visibility` is the model's self-reported characterization of its visual basis after local structural validation. It does **not** mean Cortana independently verified the claim against image pixels. No numeric confidence score is used.
+
+Centralized limits:
+
+- Maximum source file size: 10 MB
+- Maximum width/height: 4,096
+- Maximum source pixels: 16,777,216
+- Maximum normalized PNG size: 5 MB
+- Maximum question characters: 2,000
+- Maximum output characters: 4,000
+
+Feature flag:
+
+- `VISION_ANALYSIS_ENABLED` gates `/vision-describe`, `/vision-ask`, and `/vision-info`
 
 Citation labels use a compact deterministic format such as `[DOC-1:C1]`. Each label maps through a session source manifest to:
 
@@ -748,6 +795,9 @@ Centralized defaults:
 | `/study-answer <answer>` | Submit an answer to the pending study question |
 | `/study-progress` | Show honest study progress metrics |
 | `/study-end` | Complete the active study session |
+| `/vision-describe <path>` | Describe one authorized local image |
+| `/vision-ask <path> \| <question>` | Ask a question about one authorized local image |
+| `/vision-info <path>` | Validate/normalize one authorized local image without calling the AI |
 | `/event-new <severity> \| <title> \| <description>` | Record one local security event |
 | `/events` | List saved security events |
 | `/event <event-id>` | Show one security event |
@@ -811,6 +861,8 @@ Notes:
 - `/ask-docs`, `/doc-summary`, `/docs-compare`, and Study Partner AI commands send only selected retrieved/authorized chunks, never the entire vault and never incident records.
 - Study Partner never persists raw user answers, generated feedback, or source text in `study_state.json`.
 - Grounded document commands do not write into ordinary conversation history and do not inject active memory.
+- Vision commands do not write into ordinary conversation history, do not inject active memory, and do not persist image bytes.
+- `/vision-info` never calls the AI service.
 - Milestone 8 security commands never call the AI service.
 - Milestone 9 defensive tool commands never call the AI service.
 - Milestone 10/11 workflow/playbook commands never call the AI service.

@@ -27,6 +27,8 @@ from src.reminder_service import ReminderService
 from src.retrieval_session import RetrievalSession
 from src.settings import Settings
 from src.study_service import StudyPartnerService
+from src.vision_input import VisualInputLoader
+from src.vision_service import VisualAnalysisService
 from src.tool_executor import DefensiveToolExecutor
 from src.tool_registry import ToolRegistry
 from src.tool_repository import ToolControlRepository
@@ -122,6 +124,8 @@ def run_conversation_loop(
     reminder_service: ReminderService | None = None,
     calendar_service: CalendarService | None = None,
     study_service: StudyPartnerService | None = None,
+    vision_loader: VisualInputLoader | None = None,
+    vision_service: VisualAnalysisService | None = None,
     read_input: Callable[[], str] | None = None,
     conversation_history: ConversationHistory | None = None,
 ) -> None:
@@ -179,6 +183,8 @@ def run_conversation_loop(
                 reminder_service=reminder_service,
                 calendar_service=calendar_service,
                 study_service=study_service,
+                vision_loader=vision_loader,
+                vision_service=vision_service,
                 client=client,
             )
             if command_result.message:

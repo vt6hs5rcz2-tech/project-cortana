@@ -8,6 +8,7 @@ from src.ai_service import OpenAIClient
 from src.config import (
     APP_NAME,
     STUDY_PARTNER_ENABLED,
+    VISION_ANALYSIS_ENABLED,
     VERSION,
     get_default_document_vault_file_path,
     get_default_evidence_store_dir_path,
@@ -38,6 +39,9 @@ from src.calendar_commands import create_default_calendar_service
 from src.reminder_commands import create_default_reminder_service
 from src.study_commands import create_default_study_service
 from src.study_service import StudyPartnerService
+from src.vision_commands import create_default_vision_services
+from src.vision_input import VisualInputLoader
+from src.vision_service import VisualAnalysisService
 from src.tool_commands import create_default_tool_services
 from src.tool_repository import JsonToolControlRepository
 from src.workflow_commands import create_default_workflow_services
@@ -135,6 +139,14 @@ def main() -> None:
             retrieval_session=retrieval_session,
         )
 
+    vision_loader: VisualInputLoader | None = None
+    vision_service: VisualAnalysisService | None = None
+    if VISION_ANALYSIS_ENABLED:
+        vision_loader, vision_service = create_default_vision_services(
+            settings=settings,
+            client=client,
+        )
+
     run_conversation_loop(
         client=client,
         settings=settings,
@@ -159,6 +171,8 @@ def main() -> None:
         reminder_service=reminder_service,
         calendar_service=calendar_service,
         study_service=study_service,
+        vision_loader=vision_loader,
+        vision_service=vision_service,
     )
 
 

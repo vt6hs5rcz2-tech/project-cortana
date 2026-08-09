@@ -31,7 +31,7 @@ from src.reminder_service import (
     ReminderServiceError,
     ReminderView,
 )
-from src.security_commands import extract_command_argument
+from src.command_argument_utils import extract_command_argument
 
 logger = logging.getLogger("ProjectCortana")
 

@@ -63,6 +63,7 @@ from src.config import (
     MAX_CALENDAR_AUDIT_ENTRIES,
     MAX_STORED_DOCUMENTS,
     STUDY_PARTNER_ENABLED,
+    VISION_ANALYSIS_ENABLED,
     SEMANTIC_RETRIEVAL_ENABLED,
     SOURCE_MANIFEST_PERSISTENCE_ENABLED,
     DEFENSIVE_WORKFLOW_ORCHESTRATION_ENABLED,
@@ -158,6 +159,15 @@ from src.study_commands import (
     handle_study_command,
 )
 from src.study_service import StudyPartnerService
+from src.vision_commands import (
+    VISION_COMMAND_NAMES,
+    VisionCommandContext,
+    create_default_vision_services,
+    handle_vision_command,
+)
+from src.vision_input import VisualInputLoader
+from src.vision_service import VisualAnalysisService
+from src.command_argument_utils import extract_command_argument
 from src.security_commands import (
     SECURITY_COMMAND_NAMES,
     SecurityCommandContext,
@@ -249,6 +259,7 @@ SUPPORTED_COMMANDS = frozenset(
         *REMINDER_COMMAND_NAMES,
         *CALENDAR_COMMAND_NAMES,
         *STUDY_COMMAND_NAMES,
+        *VISION_COMMAND_NAMES,
     }
 )
 
@@ -346,6 +357,9 @@ HELP_TEXT = """Cortana: Available commands:
   /study-answer         - Submit an answer to the pending study question
   /study-progress       - Show honest study progress metrics
   /study-end            - Complete the active study session
+  /vision-describe      - Describe one authorized local image
+  /vision-ask           - Ask a question about one authorized local image
+  /vision-info          - Validate and inspect one authorized local image
   /about                - Describe Project Cortana and this software milestone
   /exit                 - End the session cleanly"""
 
@@ -356,7 +370,8 @@ ABOUT_TEXT = (
     "user-controlled persistent memory, temporary active memory context, a "
     "local Knowledge Vault, source-grounded document questions, summaries, "
     "two-document comparison, a session-scoped Study Partner for grounded "
-    "practice over authorized documents, a local "
+    "practice over authorized documents, static visual understanding for "
+    "authorized local images, a local "
     "human-controlled security event, incident, indicator, evidence, and "
     "chain-of-custody foundation, a human-supervised defensive tool "
     "framework with scope controls and approval, optional process-isolated "
@@ -552,6 +567,8 @@ class CommandContext:
     reminder_service: ReminderService
     calendar_service: CalendarService
     study_service: StudyPartnerService | None = None
+    vision_loader: VisualInputLoader | None = None
+    vision_service: VisualAnalysisService | None = None
     client: OpenAIClient | None = None
 
 
@@ -686,15 +703,6 @@ def normalize_command_name(message: str) -> str:
     return parsed_command
 
 
-def extract_command_argument(message: str) -> str:
-    """Return the raw argument text after the command token, preserving capitalization."""
-    stripped = message.strip()
-    parts = stripped.split(maxsplit=1)
-    if len(parts) < 2:
-        return ""
-    return parts[1]
-
-
 def handle_slash_command(
     message: str,
     *,
@@ -719,16 +727,20 @@ def handle_slash_command(
     reminder_service: ReminderService | None = None,
     calendar_service: CalendarService | None = None,
     study_service: StudyPartnerService | None = None,
+    vision_loader: VisualInputLoader | None = None,
+    vision_service: VisualAnalysisService | None = None,
     client: OpenAIClient | None = None,
 ) -> CommandResult:
     """Handle a slash command locally.
 
     Most commands never call the AI service. Grounded document commands
     (``/ask-docs``, ``/doc-summary``, ``/docs-compare``), Study Partner AI
-    commands, and explicit incident-analysis run commands are the AI
+    commands, visual analysis commands (``/vision-describe``,
+    ``/vision-ask``), and explicit incident-analysis run commands are the AI
     exceptions and require an injected client when used. Milestone 8
     security commands, Milestone 9 tool commands, and Milestone 10/11
-    workflow commands are always local.
+    workflow commands are always local. ``/vision-info`` is local-only after
+    the same safe image validation/normalization pipeline.
     """
     command_name = normalize_command_name(message)
 
@@ -785,6 +797,17 @@ def handle_slash_command(
             settings=settings,
             client=client,
         )
+
+    if (
+        (vision_loader is None or vision_service is None)
+        and VISION_ANALYSIS_ENABLED
+    ):
+        default_loader, default_vision = create_default_vision_services(
+            settings=settings,
+            client=client,
+        )
+        vision_loader = vision_loader or default_loader
+        vision_service = vision_service or default_vision
 
     if command_name in SECURITY_COMMAND_NAMES:
         security_result = handle_security_command(
@@ -918,6 +941,23 @@ def handle_slash_command(
                 message=study_result.message,
             )
 
+    if command_name in VISION_COMMAND_NAMES:
+        vision_result = handle_vision_command(
+            command_name,
+            VisionCommandContext(
+                message=message,
+                settings=settings,
+                client=client,
+                loader=vision_loader,
+                analysis_service=vision_service,
+            ),
+        )
+        if vision_result is not None:
+            return CommandResult(
+                outcome=CommandOutcome.CONTINUE,
+                message=vision_result.message,
+            )
+
     handler = COMMAND_HANDLERS.get(command_name)
 
     if handler is None:
@@ -949,6 +989,8 @@ def handle_slash_command(
         reminder_service=reminder_service,
         calendar_service=calendar_service,
         study_service=study_service,
+        vision_loader=vision_loader,
+        vision_service=vision_service,
         client=client,
     )
     return handler(context)
@@ -1767,6 +1809,7 @@ def format_status(
         study_active_session = "no"
     else:
         study_active_session = "yes" if study_service.has_active_session() else "no"
+    vision_enabled = "enabled" if VISION_ANALYSIS_ENABLED else "disabled"
 
     registry = tool_registry or build_default_tool_registry()
     registered_tool_count = registry.count()
@@ -1941,7 +1984,8 @@ def format_status(
         "  Calendar repository persistence: "
         f"{'enabled' if CALENDAR_REPOSITORY_PERSISTENCE_ENABLED else 'disabled'}\n"
         f"  Study Partner: {study_enabled}\n"
-        f"  Active study session: {study_active_session}"
+        f"  Active study session: {study_active_session}\n"
+        f"  Visual analysis: {vision_enabled}"
     )
 
 

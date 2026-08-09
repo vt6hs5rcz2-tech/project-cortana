@@ -384,12 +384,13 @@ def test_no_tool_dispatch_in_safe_open_module() -> None:
 
 
 def test_safe_open_callers_are_allowlisted() -> None:
-    """Only reviewed Milestone 15/16 modules may import the safe-open foundation."""
+    """Only reviewed modules may import the safe-open foundation."""
     allowed = {
         Path("src") / "tool_process_file_auth.py",
         Path("src") / "tool_process_file_tools.py",
         Path("src") / "tool_process_adapter.py",
         Path("src") / "tool_process_text_search.py",
+        Path("src") / "vision_input.py",
     }
     callers: list[Path] = []
     for path in Path("src").rglob("*.py"):
