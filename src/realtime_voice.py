@@ -34,6 +34,12 @@ from src.config import (
     REALTIME_VOICE_SAMPLE_WIDTH_BYTES,
 )
 from src.conversation import ConversationHistory
+from src.conversation_intelligence import (
+    ConversationIntelligence,
+    append_style_policy,
+    safe_interpret,
+)
+from src.conversation_state import ConversationState
 from src.identity import CORTANA_SYSTEM_INSTRUCTIONS
 from src.memory_context import format_active_memory_context
 from src.realtime_voice_input import (
@@ -256,7 +262,7 @@ def build_realtime_instructions(
     active_memory_context: ActiveMemoryContext | None,
 ) -> str:
     """Build session instructions including optional active-memory snapshot."""
-    parts = [REALTIME_CONVERSATION_INSTRUCTIONS]
+    parts = [append_style_policy(REALTIME_CONVERSATION_INSTRUCTIONS)]
     if active_memory_context is not None:
         memories = active_memory_context.list_active()
         if memories:
@@ -510,11 +516,14 @@ class RealtimeVoiceSession:
         print_fn: Callable[[str], None] = print,
         monotonic_fn: Callable[[], float] = time.monotonic,
         sleep_fn: Callable[[float], None] = time.sleep,
+        conversation_state: ConversationState | None = None,
     ) -> None:
         self._settings = settings
         self._client = client
         self._history = conversation_history
         self._active_memory = active_memory_context
+        self._conversation_state = conversation_state
+        self._conversation_intelligence = ConversationIntelligence()
         self._logger = logger_ or logger
         self._connect_factory = connect_factory
         self._microphone_factory = microphone_factory
@@ -1069,30 +1078,69 @@ class RealtimeVoiceSession:
         status_text = str(status or "")
         if self._is_cancelled(response_id) or status_text == "cancelled":
             self._mark_response_cancelled(response_id)
-            self._assembler.on_response_done(
+            outcome = self._assembler.on_response_done(
                 response_id=response_id,
                 status="cancelled",
             )
         elif status_text == "completed":
-            self._assembler.on_response_done(
+            outcome = self._assembler.on_response_done(
                 response_id=response_id,
                 status="completed",
             )
         elif status_text == "failed":
-            self._assembler.on_response_done(
+            outcome = self._assembler.on_response_done(
                 response_id=response_id,
                 status="failed",
             )
             self.request_stop(error_type="response_failed")
         else:
-            self._assembler.on_response_done(
+            outcome = self._assembler.on_response_done(
                 response_id=response_id,
                 status=status_text or "incomplete",
             )
+        if outcome == "pair":
+            self._observe_completed_turn()
         if self._active_response_id == response_id:
             self._active_response_id = None
             self._responding = False
             self._set_state(RealtimeSessionState.LISTENING)
+
+    def _observe_completed_turn(self) -> None:
+        """M27: locally interpret/observe one fully finalized realtime turn.
+
+        Runs only after the turn assembler has committed both a final user
+        transcript and a final assistant transcript to ``ConversationHistory``
+        as a matched pair. Never touches the realtime connection and never
+        triggers a second response — this is pure local state observation.
+        """
+        state = self._conversation_state
+        if state is None:
+            return
+        if len(self._history.turns) < 2:
+            return
+        user_turn = self._history.turns[-2]
+        assistant_turn = self._history.turns[-1]
+        if user_turn.role != "user" or assistant_turn.role != "assistant":
+            return
+        try:
+            state.set_interaction_mode("realtime")
+            guidance = safe_interpret(
+                self._conversation_intelligence,
+                user_turn.content,
+                state,
+            )
+            if guidance is not None:
+                self._conversation_intelligence.observe_assistant_reply(
+                    assistant_turn.content,
+                    state,
+                    guidance,
+                )
+        except Exception as error:
+            self._logger.error(
+                "Realtime conversational intelligence observe failed "
+                "error_type=%s",
+                type(error).__name__,
+            )
 
     def _discard_playback_for_response(self, response_id: str) -> None:
         retained: list[PlaybackChunk] = []
@@ -1376,6 +1424,7 @@ def run_realtime_voice_session(
     print_fn: Callable[[str], None] = print,
     monotonic_fn: Callable[[], float] = time.monotonic,
     sleep_fn: Callable[[float], None] = time.sleep,
+    conversation_state: ConversationState | None = None,
 ) -> str:
     """Run one explicit realtime voice session and return the status message."""
     session = RealtimeVoiceSession(
@@ -1390,5 +1439,6 @@ def run_realtime_voice_session(
         print_fn=print_fn,
         monotonic_fn=monotonic_fn,
         sleep_fn=sleep_fn,
+        conversation_state=conversation_state,
     )
     return session.run()

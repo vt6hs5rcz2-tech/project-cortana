@@ -15,6 +15,7 @@ from src.active_memory import (
     normalize_memory_id,
 )
 from src.ai_service import OpenAIClient
+from src.conversation_state import ConversationState
 from src.config import (
     ACTIVE_MEMORY_PERSISTENCE_ENABLED,
     ALLOWED_DOCUMENT_EXTENSIONS,
@@ -404,7 +405,10 @@ ABOUT_TEXT = (
     "authorized local images, explicit push-to-talk natural voice "
     "conversation for one spoken turn at a time, explicit realtime "
     "spoken conversation with barge-in, explicit realtime multimodal "
-    "perception combining voice with bounded live camera context, a local "
+    "perception combining voice with bounded live camera context, bounded "
+    "conversational intelligence for continuity, follow-ups, corrections, "
+    "response-depth selection, and consistent style without privileged "
+    "authority, a local "
     "human-controlled security event, incident, indicator, evidence, and "
     "chain-of-custody foundation, a human-supervised defensive tool "
     "framework with scope controls and approval, optional process-isolated "
@@ -422,13 +426,14 @@ ABOUT_TEXT = (
 )
 
 CLEAR_CONFIRMATION = (
-    "Cortana: Conversation history and the latest grounded source manifest "
-    "have been cleared. Incident records and evidence were left unchanged."
+    "Cortana: Conversation history, conversational state, and the latest "
+    "grounded source manifest have been cleared. Incident records and "
+    "evidence were left unchanged."
 )
 CLEAR_ALREADY_EMPTY = (
     "Cortana: Conversation history is already empty. "
-    "Any grounded source manifest has also been cleared. "
-    "Incident records and evidence were left unchanged."
+    "Conversational state and any grounded source manifest have also been "
+    "cleared. Incident records and evidence were left unchanged."
 )
 
 REMEMBER_MISSING_TEXT = "Cortana: Please provide text to remember. Usage: /remember <text>"
@@ -603,6 +608,7 @@ class CommandContext:
     vision_loader: VisualInputLoader | None = None
     vision_service: VisualAnalysisService | None = None
     client: OpenAIClient | None = None
+    conversation_state: ConversationState | None = None
 
 
 CommandHandler = Callable[[CommandContext], CommandResult]
@@ -766,6 +772,7 @@ def handle_slash_command(
     voice_service: VoiceService | None = None,
     stop_signal: Callable[[], bool] | None = None,
     client: OpenAIClient | None = None,
+    conversation_state: ConversationState | None = None,
 ) -> CommandResult:
     """Handle a slash command locally.
 
@@ -1021,6 +1028,7 @@ def handle_slash_command(
                 stop_signal=active_stop_signal,
                 capture=voice_capture,
                 voice_service=voice_service,
+                conversation_state=conversation_state,
             ),
         )
         if voice_result is not None:
@@ -1049,6 +1057,7 @@ def handle_slash_command(
                 conversation_history=conversation_history,
                 active_memory_context=active_memory_context,
                 logger=logger,
+                conversation_state=conversation_state,
             ),
         )
         if realtime_result is not None:
@@ -1067,6 +1076,7 @@ def handle_slash_command(
                 conversation_history=conversation_history,
                 active_memory_context=active_memory_context,
                 logger=logger,
+                conversation_state=conversation_state,
             ),
         )
         if multimodal_result is not None:
@@ -1109,6 +1119,7 @@ def handle_slash_command(
         vision_loader=vision_loader,
         vision_service=vision_service,
         client=client,
+        conversation_state=conversation_state,
     )
     return handler(context)
 
@@ -1159,6 +1170,7 @@ def _handle_clear(context: CommandContext) -> CommandResult:
         message=clear_conversation_history(
             context.conversation_history,
             retrieval_session=context.retrieval_session,
+            conversation_state=context.conversation_state,
         ),
     )
 
@@ -2129,12 +2141,15 @@ def clear_conversation_history(
     conversation_history: ConversationHistory,
     *,
     retrieval_session: RetrievalSession | None = None,
+    conversation_state: ConversationState | None = None,
 ) -> str:
     """Clear in-memory history and grounded source manifest for the session."""
     history_was_empty = not conversation_history.turns
     conversation_history.clear()
     if retrieval_session is not None:
         retrieval_session.clear()
+    if conversation_state is not None:
+        conversation_state.reset()
 
     if history_was_empty:
         return CLEAR_ALREADY_EMPTY

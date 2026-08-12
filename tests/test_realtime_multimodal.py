@@ -21,6 +21,7 @@ from src.config import (
     REALTIME_VOICE_SAMPLE_RATE_HZ,
 )
 from src.conversation import ConversationHistory
+from src.conversation_state import ConversationState
 from src.realtime_multimodal import (
     MULTIMODAL_CAMERA_START_FAILED,
     MULTIMODAL_STARTED_MESSAGE,
@@ -348,6 +349,7 @@ def _run_session(
     *,
     printed: list[str] | None = None,
     camera_fail: bool = False,
+    conversation_state: ConversationState | None = None,
 ) -> tuple[threading.Thread, RealtimeMultimodalSession, dict[str, str], list[str]]:
     FakePlaybackStream.instances.clear()
     lines = printed if printed is not None else []
@@ -400,6 +402,7 @@ def _run_session(
         camera_factory=camera_factory,
         capture_factory=capture_factory,
         print_fn=lines.append,
+        conversation_state=conversation_state,
     )
 
     # Patch open order tracking.
@@ -770,3 +773,114 @@ def test_rapid_double_turn_response_linkage_fifo() -> None:
 
     session.request_stop(error_type="cancelled")
     thread.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# M27-F1: lightweight per-completed-turn conversational-intelligence tests.
+# ---------------------------------------------------------------------------
+
+
+def test_finalized_multimodal_turn_updates_state_without_extra_response() -> None:
+    """C + H: a completed multimodal turn observes state locally and issues
+
+    exactly one response.create() — the local hook never competes with the
+    provider for response generation.
+    """
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    assert _wait_until(lambda: connection.response.response_creates >= 1, timeout=5)
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_1",
+            transcript="How should I organize my desk photos?",
+        )
+    )
+    assert _wait_until(lambda: session._active_response_id is not None, timeout=5)
+    active = session._active_response_id
+    assert isinstance(active, str)
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio_transcript.done",
+            response_id=active,
+            transcript="You could group them by date or by event.",
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.done",
+            response=FakeResponse(id=active, status="completed"),
+        )
+    )
+    assert _wait_until(lambda: state.active_goal is not None, timeout=5)
+
+    assert state.recent_interaction_mode == "multimodal"
+    assert "desk photos" in (state.active_goal or "").casefold()
+    # Exactly one response.create() call occurred for this one turn — the
+    # local observe hook did not trigger a second/competing response.
+    assert connection.response.response_creates == 1
+    assert connection.response.cancels == []
+
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+    assert thread.is_alive() is False
+
+
+# ---------------------------------------------------------------------------
+# M27-F2: stale visual-referent cleanup race regression.
+# ---------------------------------------------------------------------------
+
+
+def test_late_visual_ack_during_shutdown_cannot_resurrect_stale_ref() -> None:
+    """A late in-flight visual item write during the session-worker join
+
+    window must not leave ``visual_context_ref_id`` populated after
+    ``_cleanup()`` returns.
+    """
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    session = RealtimeMultimodalSession(
+        settings=_settings(),
+        client=object(),  # type: ignore[arg-type]
+        conversation_history=history,
+        active_memory_context=ActiveMemoryContext(),
+        logger_=logging.getLogger("test"),
+        connect_factory=lambda: FakeManager(connection),
+        conversation_state=state,
+    )
+    # Simulate: a visual item was authorized and acked before shutdown began.
+    session._current_remote_visual_item_id = "visual_x"
+    state.set_visual_context_ref("visual_x")
+    session._connection = connection
+
+    class LateWritingThread:
+        """Simulates the session worker processing one more in-flight ack
+
+        during its own shutdown window, resurrecting a (now stale) ref,
+        before the join call observes it has actually finished.
+        """
+
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+            state.set_visual_context_ref("late_resurrected_item")
+
+        def is_alive(self) -> bool:
+            return False
+
+    session._session_thread = LateWritingThread()  # type: ignore[assignment]
+    session._playback_thread = None
+    session._cleanup()
+
+    # The final unconditional clear runs only after the session worker join,
+    # so it always wins over any late in-flight write during that window.
+    assert state.visual_context_ref_id is None

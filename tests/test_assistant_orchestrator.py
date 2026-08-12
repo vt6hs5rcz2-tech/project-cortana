@@ -235,6 +235,7 @@ def test_unmatched_message_falls_through_to_handle_message(
         logger: logging.Logger,
         conversation_history: ConversationHistory | None = None,
         active_memory_context: ActiveMemoryContext | None = None,
+        **_kwargs: object,
     ) -> None:
         handled.append(user_message)
         assert conversation_history is history

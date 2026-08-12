@@ -10,9 +10,15 @@ from src.commands import CommandOutcome, handle_slash_command, parse_slash_input
 from src.conversation import (
     STARTUP_GREETING,
     SHUTDOWN_MESSAGE,
+    ApiInputMessage,
     ConversationHistory,
     is_exit_command,
 )
+from src.conversation_intelligence import (
+    ConversationIntelligence,
+    safe_interpret,
+)
+from src.conversation_state import ConversationState, InteractionMode
 from src.document_chunker import DocumentChunker
 from src.document_extractor import TextExtractor
 from src.document_retrieval import LexicalDocumentRetriever
@@ -73,12 +79,18 @@ def process_conversation_turn(
     logger: logging.Logger,
     conversation_history: ConversationHistory | None = None,
     active_memory_context: ActiveMemoryContext | None = None,
+    conversation_state: ConversationState | None = None,
+    conversation_intelligence: ConversationIntelligence | None = None,
+    interaction_mode: InteractionMode = "text",
 ) -> str | None:
     """Generate one ordinary conversational answer without printing it.
 
     On success, writes the user message and assistant answer to history when a
     history object is provided. On failure, returns None and leaves history
     unchanged.
+
+    Milestone 27 conversational intelligence is advisory only. Internal
+    failures degrade to the ordinary conversation path.
     """
     active_memories = (
         active_memory_context.list_active()
@@ -91,6 +103,21 @@ def process_conversation_turn(
         else None
     )
 
+    guidance = None
+    context_messages: list[ApiInputMessage] | None = None
+    intelligence = conversation_intelligence
+    state = conversation_state
+    if state is not None:
+        if intelligence is None:
+            intelligence = ConversationIntelligence()
+        state.set_interaction_mode(interaction_mode)
+        guidance = safe_interpret(intelligence, user_message, state)
+        if guidance is not None:
+            context_messages = [
+                {"role": message["role"], "content": message["content"]}
+                for message in intelligence.build_context_messages(guidance, state)
+            ]
+
     try:
         answer = generate_response(
             client=client,
@@ -99,6 +126,7 @@ def process_conversation_turn(
             conversation_history=conversation_history,
             active_memories=active_memories,
             memory_boundary_token=memory_boundary_token,
+            conversational_context_messages=context_messages,
         )
     except Exception as error:
         logger.error(
@@ -110,6 +138,14 @@ def process_conversation_turn(
     if conversation_history is not None:
         conversation_history.add_user_message(user_message.strip())
         conversation_history.add_assistant_message(answer)
+
+    if state is not None and intelligence is not None and guidance is not None:
+        try:
+            intelligence.observe_assistant_reply(answer, state, guidance)
+        except Exception:
+            logger.error(
+                "Conversational intelligence observe failed error_type=Exception"
+            )
 
     logger.info("Response completed.")
     return answer
@@ -123,6 +159,8 @@ def handle_message(
     logger: logging.Logger,
     conversation_history: ConversationHistory | None = None,
     active_memory_context: ActiveMemoryContext | None = None,
+    conversation_state: ConversationState | None = None,
+    conversation_intelligence: ConversationIntelligence | None = None,
 ) -> None:
     """Generate and display one Cortana response."""
     answer = process_conversation_turn(
@@ -132,6 +170,8 @@ def handle_message(
         logger=logger,
         conversation_history=conversation_history,
         active_memory_context=active_memory_context,
+        conversation_state=conversation_state,
+        conversation_intelligence=conversation_intelligence,
     )
     if answer is None:
         print("Cortana: I could not complete that request.")
@@ -172,11 +212,19 @@ def run_conversation_loop(
     read_input: Callable[[], str] | None = None,
     stop_signal: Callable[[], bool] | None = None,
     conversation_history: ConversationHistory | None = None,
+    conversation_state: ConversationState | None = None,
+    conversation_intelligence: ConversationIntelligence | None = None,
 ) -> None:
     """Run the interactive conversation until the user exits."""
     input_reader = read_input or (lambda: input("You: "))
     voice_stop_signal = stop_signal or default_voice_stop_signal
     history = conversation_history or ConversationHistory()
+    state = conversation_state if conversation_state is not None else ConversationState()
+    intelligence = (
+        conversation_intelligence
+        if conversation_intelligence is not None
+        else ConversationIntelligence()
+    )
     chunker = document_chunker or DocumentChunker()
     retriever = document_retriever or LexicalDocumentRetriever(chunker=chunker)
     session = retrieval_session or RetrievalSession()
@@ -234,6 +282,7 @@ def run_conversation_loop(
                 voice_service=voice_service,
                 stop_signal=voice_stop_signal,
                 client=client,
+                conversation_state=state,
             )
             if command_result.message:
                 print(command_result.message)
@@ -254,4 +303,6 @@ def run_conversation_loop(
             logger=logger,
             conversation_history=history,
             active_memory_context=active_memory_context,
+            conversation_state=state,
+            conversation_intelligence=intelligence,
         )

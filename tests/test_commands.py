@@ -841,6 +841,7 @@ def test_run_conversation_loop_normal_message_still_calls_ai(
         logger: logging.Logger,
         conversation_history: ConversationHistory | None = None,
         active_memory_context: ActiveMemoryContext | None = None,
+        **_kwargs: object,
     ) -> None:
         handled_messages.append(user_message)
         print("Cortana: AI response")
@@ -894,6 +895,7 @@ def test_run_conversation_loop_path_like_messages_call_ai(
         logger: logging.Logger,
         conversation_history: ConversationHistory | None = None,
         active_memory_context: ActiveMemoryContext | None = None,
+        **_kwargs: object,
     ) -> None:
         handled_messages.append(user_message)
         if conversation_history is not None:

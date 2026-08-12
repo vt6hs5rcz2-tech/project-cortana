@@ -386,11 +386,15 @@ def generate_response(
     conversation_history: ConversationHistory | None = None,
     active_memories: Sequence[MemoryRecord] | None = None,
     memory_boundary_token: str | None = None,
+    conversational_context_messages: Sequence[ApiInputMessage] | None = None,
 ) -> str:
     """Generate a text response for ordinary conversation only.
 
     Document context is never accepted here. Grounded document questions use
     ``generate_grounded_document_response`` exclusively.
+
+    Optional Milestone 27 conversational metadata is injected only as
+    developer-role context and never as user-authored text.
     """
     cleaned_message = user_message.strip()
 
@@ -402,6 +406,7 @@ def generate_response(
         conversation_history=conversation_history,
         active_memories=active_memories,
         memory_boundary_token=memory_boundary_token,
+        conversational_context_messages=conversational_context_messages,
     )
 
     response = client.responses.create(
@@ -419,16 +424,19 @@ def _build_ai_input(
     conversation_history: ConversationHistory | None,
     active_memories: Sequence[MemoryRecord] | None,
     memory_boundary_token: str | None,
+    conversational_context_messages: Sequence[ApiInputMessage] | None = None,
 ) -> ConversationApiInput:
     """Build API input with intentional context ordering.
 
     Order when context is present:
     1. active-memory developer context
-    2. conversation history
-    3. current user question
+    2. conversational-intelligence developer context (Milestone 27)
+    3. conversation history
+    4. current user question
 
     Identity instructions remain in the separate ``instructions`` field.
     Document context is never included on this ordinary-chat path.
+    Conversational metadata is never merged into the user message text.
     """
     prefix_messages: list[ApiInputMessage] = []
 
@@ -446,6 +454,16 @@ def _build_ai_input(
             {"role": message["role"], "content": message["content"]}
             for message in memory_messages
         )
+
+    if conversational_context_messages:
+        for message in conversational_context_messages:
+            if message["role"] != "developer":
+                raise ValueError(
+                    "Conversational intelligence context must use developer role."
+                )
+            prefix_messages.append(
+                {"role": "developer", "content": message["content"]}
+            )
 
     conversation_input: ConversationApiInput
     if conversation_history is not None:

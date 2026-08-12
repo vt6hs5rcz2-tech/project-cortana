@@ -20,6 +20,7 @@ from src.config import (
     VOICE_INTERACTION_ENABLED,
 )
 from src.conversation import ConversationHistory
+from src.conversation_state import ConversationState
 from src.realtime_multimodal import (
     MULTIMODAL_UNAVAILABLE,
     format_multimodal_status_lines,
@@ -55,6 +56,7 @@ class RealtimeMultimodalCommandContext:
     playback_stream_factory: Callable[[], Any] | None = None
     camera_factory: Callable[[], Any] | None = None
     print_fn: Callable[[str], None] = print
+    conversation_state: ConversationState | None = None
 
 
 @dataclass(frozen=True)
@@ -117,5 +119,6 @@ def _handle_multimodal_realtime(
         playback_stream_factory=context.playback_stream_factory,
         camera_factory=context.camera_factory,
         print_fn=context.print_fn,
+        conversation_state=context.conversation_state,
     )
     return RealtimeMultimodalCommandResult(message=message)

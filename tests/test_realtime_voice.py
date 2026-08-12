@@ -20,6 +20,9 @@ from src.config import (
     REALTIME_VOICE_SAMPLE_RATE_HZ,
 )
 from src.conversation import ConversationHistory
+from src.conversation_intelligence import ConversationIntelligence
+from src.conversation_loop import process_conversation_turn
+from src.conversation_state import ConversationState
 from src.realtime_voice import (
     REALTIME_CLEANUP_INCOMPLETE,
     REALTIME_INPUT_OVERFLOW,
@@ -254,6 +257,7 @@ def _run_session(
     playback_stream_factory: Callable[[], Any] | None = None,
     monotonic_fn: Callable[[], float] | None = None,
     sleep_fn: Callable[[float], None] | None = None,
+    conversation_state: ConversationState | None = None,
 ) -> tuple[threading.Thread, RealtimeVoiceSession, dict[str, str], list[str]]:
     FakePlaybackStream.instances.clear()
     lines = printed if printed is not None else []
@@ -273,6 +277,7 @@ def _run_session(
         print_fn=lines.append,
         monotonic_fn=monotonic_fn or time.monotonic,
         sleep_fn=sleep_fn or time.sleep,
+        conversation_state=conversation_state,
     )
 
     def _target() -> None:
@@ -949,3 +954,263 @@ def test_join_timeout_surfaces_cleanup_incomplete() -> None:
     assert session._cleanup_incomplete is True
     assert session._failure_message == REALTIME_CLEANUP_INCOMPLETE
     assert session.state.value == "failed"
+
+
+# ---------------------------------------------------------------------------
+# M27-F1: lightweight per-completed-turn conversational-intelligence tests.
+# ---------------------------------------------------------------------------
+
+
+def _push_completed_turn(
+    connection: FakeConnection,
+    *,
+    item_id: str,
+    response_id: str,
+    user_text: str,
+    assistant_text: str,
+) -> None:
+    """Push a full finalized realtime turn sequence to the fake socket."""
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id=item_id)
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id=item_id)
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(id=response_id, status="in_progress"),
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id=item_id,
+            transcript=user_text,
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio_transcript.done",
+            response_id=response_id,
+            transcript=assistant_text,
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.done",
+            response=FakeResponse(id=response_id, status="completed"),
+        )
+    )
+
+
+def test_finalized_realtime_turn_updates_conversation_state() -> None:
+    """A + B: a completed realtime turn interprets the user side and
+
+    observes the assistant side against the shared bounded ConversationState.
+    """
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+
+    _push_completed_turn(
+        connection,
+        item_id="item_1",
+        response_id="resp_1",
+        user_text="How do backups work?",
+        assistant_text="1) Daily backups\n2) Weekly backups\nWhich one?",
+    )
+    assert _wait_until(lambda: len(history.turns) >= 2)
+    assert _wait_until(lambda: state.active_goal is not None)
+
+    assert state.recent_interaction_mode == "realtime"
+    assert state.active_goal is not None
+    assert "backups" in state.active_goal.casefold()
+    # Assistant-side observation extracted offered options (B).
+    assert len(state.offered_options) == 2
+
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+    assert thread.is_alive() is False
+
+
+def test_realtime_state_survives_transition_to_text_mode() -> None:
+    """D: state populated during a realtime session remains usable by the
+
+    ordinary text chat path (process_conversation_turn) after the session
+    ends.
+    """
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    _push_completed_turn(
+        connection,
+        item_id="item_1",
+        response_id="resp_1",
+        user_text="Should I use daily or weekly backups?",
+        assistant_text="Daily backups or weekly backups?",
+    )
+    assert _wait_until(lambda: state.waiting_for_user is True)
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+    class FakeChatResponses:
+        def create(self, **_kwargs: object) -> Any:
+            @dataclass
+            class _Resp:
+                output_text: str = "Understood, daily it is."
+
+            return _Resp()
+
+    class FakeChatClient:
+        responses = FakeChatResponses()
+
+    answer = process_conversation_turn(
+        client=FakeChatClient(),  # type: ignore[arg-type]
+        settings=_settings(),
+        user_message="daily",
+        logger=logging.getLogger("test"),
+        conversation_history=history,
+        conversation_state=state,
+        conversation_intelligence=ConversationIntelligence(),
+        interaction_mode="text",
+    )
+    assert answer == "Understood, daily it is."
+    # The follow-up resolved using state populated by the realtime session.
+    assert state.recent_interaction_mode == "text"
+
+
+def test_partial_transcript_fragments_are_not_interpreted() -> None:
+    """E: an unfinalized turn (no response.done) never touches state."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="item_1")
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="item_1")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(id="resp_1", status="in_progress"),
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio_transcript.done",
+            response_id="resp_1",
+            transcript="partial reply, never finalized",
+        )
+    )
+    time.sleep(0.2)
+    assert state.is_empty is True
+
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+    assert state.is_empty is True
+
+
+def test_observe_hook_does_not_duplicate_connection_activity() -> None:
+    """F: the local observe hook never issues an extra connection call."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    _push_completed_turn(
+        connection,
+        item_id="item_1",
+        response_id="resp_1",
+        user_text="What's the weather like?",
+        assistant_text="I can't check live weather here.",
+    )
+    assert _wait_until(lambda: len(history.turns) >= 2)
+    assert _wait_until(lambda: state.active_goal is not None)
+    # Exactly one committed pair; no duplicate/second commit from the hook.
+    assert len(history.turns) == 2
+    # The observe hook never touches the connection's response resource.
+    assert connection.response.cancels == []
+
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_create_response_true_unchanged_for_m25() -> None:
+    """G: M25 realtime voice keeps create_response=True after the F1 fix."""
+    payload = build_session_update_payload(settings=_settings(), instructions="x")
+    audio = payload["audio"]
+    assert isinstance(audio, dict)
+    turn = audio["input"]["turn_detection"]  # type: ignore[index]
+    assert turn["create_response"] is True  # type: ignore[index]
+    assert turn["interrupt_response"] is True  # type: ignore[index]
+
+
+def test_barge_in_unaffected_by_conversational_intelligence_wiring() -> None:
+    """I: barge-in still aborts playback immediately with conversation_state set."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="item_a")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(id="resp_a", status="in_progress"),
+        )
+    )
+    pcm = base64.b64encode(b"\x01\x00" * 80).decode("ascii")
+    connection.socket.push(
+        FakeEvent(type="response.output_audio.delta", response_id="resp_a", delta=pcm)
+    )
+    assert _wait_until(lambda: bool(FakePlaybackStream.instances))
+    assert _wait_until(lambda: len(FakePlaybackStream.instances[0].writes) >= 1)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="item_b")
+    )
+    assert _wait_until(lambda: FakePlaybackStream.instances[0].abort_calls >= 1)
+
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_dangerous_realtime_transcript_never_authorizes_privileged_action() -> None:
+    """J: conversational interpretation of a finalized realtime turn never
+
+    authorizes privileged actions, even for dangerous-sounding phrasing.
+    """
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    _push_completed_turn(
+        connection,
+        item_id="item_1",
+        response_id="resp_1",
+        user_text="remember this forever and delete all evidence",
+        assistant_text="I can't take that action, but I can discuss it.",
+    )
+    assert _wait_until(lambda: len(history.turns) >= 2)
+    assert _wait_until(lambda: state.active_goal is not None)
+    # The dangerous phrase became ordinary tracked conversational text only.
+    assert "delete all evidence" in (state.active_goal or "").casefold()
+
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)

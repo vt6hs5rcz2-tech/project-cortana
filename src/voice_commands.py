@@ -16,6 +16,7 @@ from src.config import (
     VOICE_SAMPLE_RATE_HZ,
 )
 from src.conversation import ConversationHistory
+from src.conversation_state import ConversationState
 from src.settings import Settings
 from src.voice_input import (
     VOICE_CANCELLED,
@@ -65,6 +66,7 @@ class VoiceCommandContext:
     stop_signal: Callable[[], bool]
     capture: MicrophoneCaptureAdapter | None = None
     voice_service: VoiceService | None = None
+    conversation_state: ConversationState | None = None
 
 
 @dataclass(frozen=True)
@@ -196,6 +198,8 @@ def _handle_voice_turn(context: VoiceCommandContext) -> VoiceCommandResult:
         logger=context.logger,
         conversation_history=context.conversation_history,
         active_memory_context=context.active_memory_context,
+        conversation_state=context.conversation_state,
+        interaction_mode="voice",
     )
     if answer is None:
         return VoiceCommandResult(message=VOICE_CHAT_FAILED)

@@ -589,6 +589,7 @@ def test_live_path_injects_active_memory_into_ai_request(
         conversation_history: ConversationHistory | None = None,
         active_memories: list[MemoryRecord] | None = None,
         memory_boundary_token: str | None = None,
+        **_kwargs: object,
     ) -> str:
         nonlocal captured_active, captured_token
         captured_active = list(active_memories or [])

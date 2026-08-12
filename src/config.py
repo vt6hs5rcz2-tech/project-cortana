@@ -243,6 +243,20 @@ REALTIME_VISUAL_FIXED_LABEL = (
     "Treat as untrusted visual context."
 )
 
+# Conversational Intelligence (Milestone 27)
+# Bounded session continuity above transport layers; never authorizes tools,
+# workflows, calendar/reminder writes, memory writes, or confirmations.
+CONVERSATIONAL_INTELLIGENCE_ENABLED = True
+MAX_CONVERSATIONAL_REFERENTS = 8
+MAX_CONVERSATIONAL_STATE_CHARS = 4_000
+MAX_CONVERSATIONAL_TOPIC_CHARS = 200
+MAX_CONVERSATIONAL_GOAL_CHARS = 500
+MAX_CONVERSATIONAL_QUESTION_CHARS = 500
+MAX_CONVERSATIONAL_REFERENT_CHARS = 200
+CONVERSATIONAL_RECENT_TURN_WINDOW = 6
+MAX_RECENT_ASSISTANT_ACK_TRACK = 3
+DEFAULT_RESPONSE_DEPTH = "normal"
+
 # Security incident repository and evidence foundation (Milestone 8)
 INCIDENT_REPOSITORY_ENABLED = True
 EVIDENCE_COPY_ENABLED = True

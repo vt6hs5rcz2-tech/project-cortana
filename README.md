@@ -19,6 +19,7 @@ Project Cortana is an early software milestone focused on:
 - Explicit push-to-talk natural voice conversation for one spoken turn at a time
 - Explicit realtime spoken conversation with barge-in/interruption
 - Explicit realtime multimodal perception (voice + bounded live camera snapshots)
+- Bounded conversational intelligence for continuity, follow-ups, corrections, response depth, and consistent style (no privileged authority)
 - Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 - Optional process-isolated execution for a tiny allowlisted defensive tool subset
@@ -37,6 +38,7 @@ Project Cortana is an early software milestone focused on:
 | Kind | Lifetime | How it changes | Sent to AI? |
 | --- | --- | --- | --- |
 | Temporary conversation history | Current session only | Built from unmatched chat turns; cleared with `/clear`; slash commands and orchestrator-handled routes are excluded | Yes, as prior turns |
+| Session conversational state (M27) | Current session only | Updated by the conversational-intelligence layer for continuity; cleared with `/clear`; bounded; never permanent memory | Yes, as separated developer metadata only |
 | Explicit persistent memory | Survives restarts | Saved only through local `/remember` or explicit NL `remember …` routing | No, unless activated |
 | Active memory context | Current session only | Selected with `/recall`; cleared with `/release`, `/release-all`, or restart | Yes, only while active |
 | Knowledge Vault documents | Survives restarts | Ingested only through local `/add-document` | No by default |
@@ -356,6 +358,49 @@ Feature flags (all required):
 Dependency:
 
 - `opencv-python-headless` (with NumPy) is confined to `src/camera_capture.py`
+
+## Conversational intelligence
+
+Milestone 27 adds a bounded conversational-intelligence layer so Cortana behaves more like one continuous conversational partner rather than isolated replies. It shares one small, session-scoped `ConversationState` (topic, active goal, unresolved question, recent referents, latest correction, waiting-for-user, offered options, recent acknowledgment/restatement tracking, optional M26 visual-context reference id) across every interaction mode, and it never authorizes privileged actions.
+
+What it improves:
+
+- Conversational continuity via small session-scoped state
+- Follow-up resolution for short replies such as yes/no, “the second one”, “that one”, “tomorrow”, “continue”, when recent state provides enough evidence
+- Conversational repair/correction handling (“I meant Tuesday”, “the other one”, “go back”, “that’s not what I asked”, “forget that”)
+- Deterministic response-depth selection: `brief`, `normal`, or `detailed`
+- Repetition control for unnecessary acknowledgments/restatements, without suppressing required safety/policy notices
+- Lightweight acknowledgment policy that prefers starting the answer directly
+- Higher-level turn-taking interpretation (continuation, correction, interruption, complete request, incomplete thought, topic change)
+- Centralized conversational style/personality policy shared by text and voice paths
+- Multimodal conversational references (“what is that?”) resolved only against an authorized current visual-context reference
+
+Behavior differs by mode, and this difference is intentional, not accidental:
+
+| Mode | Follow-up/correction/depth/repetition/topic-change interpretation | When it runs | State shared |
+| --- | --- | --- | --- |
+| Text chat | Full, per-turn | Before each reply is generated, so guidance can shape that reply | Read and written every turn |
+| `/voice-turn` (M24) | Full, per-turn | Before each reply is generated, so guidance can shape that reply | Read and written every turn |
+| `/voice-realtime` (M25) | Bounded, per-**completed**-turn only | After the provider finalizes both the user's and the assistant's text for one turn — never mid-stream, never on partial transcripts, never before the provider has already generated and spoken its reply | Observed and updated once per completed turn |
+| `/multimodal-realtime` (M26) | Bounded, per-**completed**-turn only | Same as `/voice-realtime`, plus the M26 visual-context reference id is set/cleared as the camera-frame lifecycle already dictates | Observed and updated once per completed turn |
+
+For `/voice-realtime` and `/multimodal-realtime`, conversational intelligence **observes** each finalized turn and keeps `ConversationState` coherent (topic/goal tracking, offered-option/referent capture, acknowledgment/repetition tracking) — it does **not** run before the provider responds and does **not** shape that response, because M25/M26 own response generation (`create_response=True` for M25, manual `response.create()` after visual-item insertion for M26) and this layer never competes with the provider for a response. In-session conversational fluency for realtime/multimodal turns relies on the provider's own native realtime conversational behavior, exactly as before M27; what M27 adds there is that the *local, bounded* state stays populated and coherent, so returning from a realtime/multimodal session to ordinary text chat keeps useful recent context (topic, active goal, offered options) rather than starting over. No mode ever generates or triggers a second/duplicate assistant response as a result of this layer.
+
+Security boundaries:
+
+- Conversational inference clarifies meaning and observes finalized turns only; it does not authorize tools, workflows, calendar/reminder writes, memory writes, incident operations, document writes, or confirmation bypass
+- Conversational “forget that” discards local interpretation only and never deletes persistent memory
+- Injected conversational metadata is developer/internal context, structurally separated from the user-authored message; it may contain short excerpts of the user's own prior words for continuity, but never carries elevated authority and cannot authorize privileged actions regardless of its content
+- Visual references remain non-authoritative and do not create competing responses or privileged actions
+- If resolution is uncertain, original user text is preserved; if the intelligence layer fails, ordinary conversation continues
+
+Limits:
+
+- Session-scoped and bounded; not permanent memory
+- No raw camera/audio storage
+- Does not rebuild M25 VAD/barge-in transport, response ownership, or M26's `create_response=False` behavior
+- Realtime/multimodal sessions do not receive full pre-response local guidance (response-depth hints, avoid-repetition phrasing) the way text chat and `/voice-turn` do — only bounded post-turn state observation
+- No wake word, speaker ID, emotion detection, voice cloning, browsing, Bluetooth, translation, lip-reading, autonomous actions, or secretary workflows
 
 Citation labels use a compact deterministic format such as `[DOC-1:C1]`. Each label maps through a session source manifest to:
 

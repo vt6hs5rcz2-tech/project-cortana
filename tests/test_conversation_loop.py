@@ -109,6 +109,7 @@ def test_handle_message_prints_ai_response(
         conversation_history: ConversationHistory | None = None,
         active_memories: object = None,
         memory_boundary_token: object = None,
+        **_kwargs: object,
     ) -> str:
         nonlocal captured_message
         captured_message = user_message
@@ -251,6 +252,7 @@ def test_handle_message_logs_only_safe_error_type(
         conversation_history: ConversationHistory | None = None,
         active_memories: object = None,
         memory_boundary_token: object = None,
+        **_kwargs: object,
     ) -> str:
         raise RuntimeError("Sensitive simulated error details")
 
@@ -431,6 +433,7 @@ def test_run_conversation_loop_processes_multiple_messages(
         logger: logging.Logger,
         conversation_history: ConversationHistory | None = None,
         active_memory_context: ActiveMemoryContext | None = None,
+        **_kwargs: object,
     ) -> None:
         handled_messages.append(user_message)
         print(f"Cortana: Response to {user_message}")

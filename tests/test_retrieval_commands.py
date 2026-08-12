@@ -296,7 +296,14 @@ def test_absolute_path_still_reaches_ordinary_ai_chat(
 
     output = capsys.readouterr().out
     assert client.fake_responses.calls == 1
-    assert client.fake_responses.input == "/etc/passwd"
+    api_input = client.fake_responses.input
+    if isinstance(api_input, str):
+        assert api_input == "/etc/passwd"
+    else:
+        assert isinstance(api_input, list)
+        assert api_input[-1] == {"role": "user", "content": "/etc/passwd"}
+        assert api_input[0]["role"] == "developer"
+        assert "CORTANA_CONVERSATIONAL_INTELLIGENCE" in api_input[0]["content"]
     assert client.fake_responses.instructions == CORTANA_SYSTEM_INSTRUCTIONS
     assert "Path handled" in output
 

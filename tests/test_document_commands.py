@@ -379,6 +379,7 @@ def test_path_like_messages_still_reach_ai(
         conversation_history: ConversationHistory | None = None,
         active_memories: object = None,
         memory_boundary_token: object = None,
+        **_kwargs: object,
     ) -> str:
         received.append(user_message)
         return "path analyzed"

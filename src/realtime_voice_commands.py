@@ -14,6 +14,7 @@ from src.config import (
     VOICE_INTERACTION_ENABLED,
 )
 from src.conversation import ConversationHistory
+from src.conversation_state import ConversationState
 from src.realtime_voice import (
     REALTIME_UNAVAILABLE,
     RealtimeVoiceClient,
@@ -52,6 +53,7 @@ class RealtimeVoiceCommandContext:
     microphone_factory: Callable[..., Any] | None = None
     playback_stream_factory: Callable[[], Any] | None = None
     print_fn: Callable[[str], None] = print
+    conversation_state: ConversationState | None = None
 
 
 @dataclass(frozen=True)
@@ -108,5 +110,6 @@ def _handle_voice_realtime(
         microphone_factory=context.microphone_factory,
         playback_stream_factory=context.playback_stream_factory,
         print_fn=context.print_fn,
+        conversation_state=context.conversation_state,
     )
     return RealtimeVoiceCommandResult(message=message)
