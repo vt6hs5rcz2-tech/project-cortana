@@ -20,6 +20,7 @@ Project Cortana is an early software milestone focused on:
 - Explicit realtime spoken conversation with barge-in/interruption
 - Explicit realtime multimodal perception (voice + bounded live camera snapshots)
 - Bounded conversational intelligence for continuity, follow-ups, corrections, response depth, and consistent style (no privileged authority)
+- Realtime conversational planning that guides `/voice-realtime` and `/multimodal-realtime` from the same bounded session state without taking over response ownership
 - Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 - Optional process-isolated execution for a tiny allowlisted defensive tool subset
@@ -295,6 +296,7 @@ Behavior and limits:
 - Assistant audio plays through `sounddevice.RawOutputStream`; barge-in uses `abort()` for immediate local silence
 - Input transcription (`gpt-4o-mini-transcribe` by default) is guidance of input audio content rather than precisely what the realtime model heard
 - Local `ConversationHistory` remains canonical; only finalized transcripts are committed. Interrupted assistant text is not committed
+- Milestone 28 plans each finalized transcript locally and refreshes next-turn session instructions after a completed pair; it does not change `create_response=true` or add a client `response.create` path
 - Spoken realtime content remains conversational only: no slash-command, M18, calendar/reminder, tool/workflow, or memory-write authority
 - Realtime function/tool calling is disabled (`tools=[]`, `tool_choice=none`)
 - Hard session cap: 20 minutes
@@ -330,7 +332,7 @@ Behavior and limits:
 - No local frame archive, video buffer, or disk-backed camera images
 - Provider disclosure is at most one current normalized PNG (`detail=low`) per user turn; no provider upload during silence
 - Visual frames are bound at `speech_stopped` / `input_audio_buffer.committed` using provider item IDs
-- Session uses server VAD with `create_response=false` and `interrupt_response=true`, then bare `response.create()` after optional visual item insertion
+- Session uses server VAD with `create_response=false` and `interrupt_response=true`, then bare `response.create()` after optional visual item insertion. When the finalized transcript arrives in time, Milestone 28 injects pre-response planning first. If it does not, the same `response.create()` still runs once without transcript-derived M28 guidance.
 - Superseded/completed/cancelled visual conversation items are removed via `conversation.item.delete` from the active Realtime conversation context
 - Provider-side retention is governed by provider/service policy; Cortana does not claim provider-side permanent deletion
 - Barge-in remains immediate for local playback; vision work never delays playback abort
@@ -381,10 +383,14 @@ Behavior differs by mode, and this difference is intentional, not accidental:
 | --- | --- | --- | --- |
 | Text chat | Full, per-turn | Before each reply is generated, so guidance can shape that reply | Read and written every turn |
 | `/voice-turn` (M24) | Full, per-turn | Before each reply is generated, so guidance can shape that reply | Read and written every turn |
-| `/voice-realtime` (M25) | Bounded, per-**completed**-turn only | After the provider finalizes both the user's and the assistant's text for one turn — never mid-stream, never on partial transcripts, never before the provider has already generated and spoken its reply | Observed and updated once per completed turn |
-| `/multimodal-realtime` (M26) | Bounded, per-**completed**-turn only | Same as `/voice-realtime`, plus the M26 visual-context reference id is set/cleared as the camera-frame lifecycle already dictates | Observed and updated once per completed turn |
+| `/voice-realtime` (M25) | Bounded local planning on each **finalized** user transcript; next-turn session instruction refresh after a completed pair | True per-utterance pre-response injection is not available: server VAD with `create_response=true` typically starts the assistant response before the local transcript event arrives. M28 does not change that ownership. | Observed on finalized transcripts; next-turn context refreshed after completed pairs |
+| `/multimodal-realtime` (M26) | Full bounded planning after the finalized user transcript and **before** the existing manual `response.create()`, with a bounded fallback if that transcript does not arrive in time | After visual-frame bind at `speech_stopped`/`committed`; plans when the transcript is final, or falls back to `response.create` without transcript-derived M28 guidance when the wait expires | Planned and injected immediately before the single existing `response.create()` when the transcript arrives in time |
 
-For `/voice-realtime` and `/multimodal-realtime`, conversational intelligence **observes** each finalized turn and keeps `ConversationState` coherent (topic/goal tracking, offered-option/referent capture, acknowledgment/repetition tracking) — it does **not** run before the provider responds and does **not** shape that response, because M25/M26 own response generation (`create_response=True` for M25, manual `response.create()` after visual-item insertion for M26) and this layer never competes with the provider for a response. In-session conversational fluency for realtime/multimodal turns relies on the provider's own native realtime conversational behavior, exactly as before M27; what M27 adds there is that the *local, bounded* state stays populated and coherent, so returning from a realtime/multimodal session to ordinary text chat keeps useful recent context (topic, active goal, offered options) rather than starting over. No mode ever generates or triggers a second/duplicate assistant response as a result of this layer.
+For `/voice-realtime`, Milestone 28 plans each finalized user transcript locally so `ConversationState` stays current (follow-ups, corrections, depth, topic/goal) even while the provider is already producing the current auto-response. Compact next-turn guidance is then applied through the existing `session.update` instruction field after a completed pair. M28 does **not** change `create_response=true`, VAD, barge-in/`abort()` ownership, or add a parallel `response.create` path.
+
+For `/multimodal-realtime`, Milestone 28 computes the same bounded plan after the finalized user transcript and injects compact advisory guidance through `session.update` immediately before the existing manual `response.create()` — still exactly once per turn, still after optional visual-item insertion, still with `create_response=false`. If the transcript does not arrive within the bounded wait, that same `response.create` still runs once without fabricating transcript-derived guidance.
+
+No mode ever generates or triggers a second/duplicate assistant response as a result of this layer.
 
 Security boundaries:
 
@@ -399,8 +405,79 @@ Limits:
 - Session-scoped and bounded; not permanent memory
 - No raw camera/audio storage
 - Does not rebuild M25 VAD/barge-in transport, response ownership, or M26's `create_response=False` behavior
-- Realtime/multimodal sessions do not receive full pre-response local guidance (response-depth hints, avoid-repetition phrasing) the way text chat and `/voice-turn` do — only bounded post-turn state observation
+- `/voice-realtime` still cannot inject per-utterance guidance into the in-flight auto-response; see Realtime conversational planning
 - No wake word, speaker ID, emotion detection, voice cloning, browsing, Bluetooth, translation, lip-reading, autonomous actions, or secretary workflows
+
+## Realtime conversational planning
+
+Milestone 28 closes the Milestone 27 gap between text/`/voice-turn` (which already interpret a user turn before generating a reply) and the realtime sessions (which previously only observed a turn after it completed).
+
+What it does:
+
+- Builds a compact immutable `RealtimeConversationPlan` from existing Milestone 27 `ConversationIntelligence` and `ConversationState` — no second heuristic engine
+- Runs only on **finalized** user transcripts; partial/delta fragments never update planning or state
+- Resolves follow-ups such as yes/no, “the first/second one”, “the other one”, “continue”, “go on”, “Tuesday”, “what you said before”, and “tell me more about that” when bounded state has enough evidence
+- Treats corrections such as “I meant Tuesday”, “no, the other one”, “that’s not what I asked”, “go back”, “forget that”, and “change that” as conversational repair only
+- Selects adaptive response depth (`brief` / `normal` / `detailed`) as guidance, without crude hard token limits
+- Marks clarification needed when a referent is unresolved instead of guessing
+- Reduces repetitive acknowledgments/restatements using recent-assistant state, without suppressing safety notices, authorization prompts, confirmations, uncertainty, or errors
+- Reuses the Milestone 27 centralized style policy; planning may add concise/direct/explanation/clarification hints only
+- Preserves cross-modal continuity on the same session `ConversationState` (text → `/voice-turn` → `/voice-realtime` → `/multimodal-realtime` → text)
+
+What text and `/voice-turn` already do:
+
+- Full per-turn interpretation **before** the ordinary chat/TTS reply is generated
+- Developer-context injection of conversational metadata on that same response path
+
+What `/voice-realtime` can safely do:
+
+- Local planning as soon as a finalized transcript is available
+- Next-turn `session.update` instruction refresh after a completed user/assistant pair
+- Interruption context: a barge-in utterance such as “No, I meant Tuesday” is planned as interruption + correction against current state
+- It cannot inject per-utterance guidance into the **current** auto-response without racing the provider or changing response ownership
+
+What `/multimodal-realtime` can safely do:
+
+- Bind the current camera frame at `speech_stopped` / `committed` as before
+- Wait for the finalized user transcript, with a bounded deadline
+- If the transcript arrives in time: compute the bounded plan (including authorized current visual referent when live), inject compact internal guidance via `session.update`, then call the same existing `response.create()` exactly once
+- If the transcript does not arrive before the deadline: fall back to the same `response.create()` once **without** fabricating transcript text or transcript-derived M28 guidance for that turn
+- Visual context still cannot independently trigger a response or authorize actions
+
+M25 true pre-response guidance:
+
+- **Not architecturally available** while `create_response=true` remains the response owner. The OpenAI Realtime session starts the assistant response from server VAD commit; the local `conversation.item.input_audio_transcription.completed` event typically arrives at the same time as or after `response.created`. Changing `create_response` to `false` would move response ownership and is out of scope for Milestone 28.
+
+Latency:
+
+- Planning is deterministic, in-process, and uses only bounded session state
+- No extra model/network/database/tool calls
+- Failures degrade to the existing response path; they do not crash the session, create a second response, or grant authority
+- `/multimodal-realtime` waits for a finalized transcript so the current turn can receive the same M28 planning used by text and `/voice-turn`
+- That wait is bounded by `REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS` (default 2.5s, clamped to 0.25–8.0s). This is a conservative allowance for provider transcription latency, not a measured end-to-end number
+- If the transcript does not arrive within that deadline, Cortana falls back to response generation without transcript-derived M28 guidance for that turn. This prevents indefinite silence
+- Timeout fallback uses the same existing `response.create` path. It does not create a duplicate response
+- A transcript that arrives after fallback cannot trigger a second `response.create`, cannot attach a stale plan to the already-started response, and is not interpreted into `ConversationState` if that would overwrite a newer turn
+
+Single-response ownership:
+
+- `/voice-realtime` keeps `create_response=true`; Cortana never calls `response.create` on that path
+- `/multimodal-realtime` keeps `create_response=false` and the existing manual `response.create` as the sole owner
+- Planning **guides** those paths; it does not own them
+
+Authority boundaries:
+
+- `RealtimeConversationPlan.authorizes_privileged_action` is structurally false
+- Planning never executes or authorizes tools, workflows, calendar/reminder writes, memory writes, incident/document operations, confirmations, payments, or other side effects
+- “Forget that” remains conversational only
+- User-derived text inside planning metadata is advisory session context, not a trusted instruction
+
+Known limitations:
+
+- `/voice-realtime` cannot shape the in-flight auto-response for the utterance that was just transcribed
+- `/multimodal-realtime` waits for the provider transcript before `response.create` when the transcript arrives in time, which adds transcript latency in exchange for true pre-response guidance
+- If a multimodal transcript does not arrive within the bounded deadline, that turn still gets exactly one `response.create` without transcript-derived M28 guidance. The late transcript is kept for history pairing when it eventually arrives, but it is not used to plan or rewrite that already-started response, and it is not applied to `ConversationState` when a newer turn is already active
+- No wake word, speaker ID, emotion detection, translation, lip-reading, browsing, Bluetooth, or autonomous workflows
 
 Citation labels use a compact deterministic format such as `[DOC-1:C1]`. Each label maps through a session source manifest to:
 

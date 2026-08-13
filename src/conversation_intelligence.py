@@ -125,6 +125,7 @@ _DETAILED_MARKERS = (
     "explain fully",
     "full explanation",
     "go deep",
+    "tell me more",
 )
 _BRIEF_MARKERS = (
     "briefly",
@@ -142,9 +143,21 @@ _VISUAL_REFERENCE_PHRASES = frozenset(
         "whats that",
         "read that",
         "what am i looking at",
-        "tell me more about that",
         "describe that",
         "look at that",
+    }
+)
+_TELL_MORE_PHRASES = frozenset(
+    {
+        "tell me more about that",
+        "tell me more",
+        "more about that",
+    }
+)
+_DO_THAT_PHRASES = frozenset(
+    {
+        "do that",
+        "do it",
     }
 )
 _LIGHTWEIGHT_ACK_CANDIDATES = ("okay", "got it", "yes")
@@ -192,6 +205,11 @@ _CORRECTION_FORGET = re.compile(
 _DATE_WORD = re.compile(
     r"^(?P<when>today|tomorrow|tonight|"
     r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)$",
+    re.IGNORECASE,
+)
+_ANAPHORIC_FOLLOW_UP = re.compile(
+    r"^(?:why|how|what)\s+(?:is|was|are|'s)\s+(?:that|this|it)"
+    r"(?:\s+\w+){0,4}$",
     re.IGNORECASE,
 )
 _INCOMPLETE_TRAILING = re.compile(
@@ -726,6 +744,8 @@ class ConversationIntelligence:
         if not any(marker in normalized for marker in _TOPIC_CHANGE_MARKERS):
             # Heuristic: substantial new question while a prior goal exists and
             # the new text shares almost no tokens with the prior goal.
+            if _ANAPHORIC_FOLLOW_UP.fullmatch(normalized):
+                return None
             if (
                 state.active_goal
                 and self._substantive_request(normalized)
@@ -782,12 +802,18 @@ class ConversationIntelligence:
         *,
         authorized: bool,
     ) -> ConversationalGuidance | None:
-        if normalized not in _VISUAL_REFERENCE_PHRASES:
-            # Allow mild variants like "what is that on the screen"
-            if not any(
-                normalized.startswith(phrase) for phrase in _VISUAL_REFERENCE_PHRASES
-            ):
-                return None
+        tell_more = normalized in _TELL_MORE_PHRASES or any(
+            normalized.startswith(phrase) for phrase in _TELL_MORE_PHRASES
+        )
+        explicit_visual = normalized in _VISUAL_REFERENCE_PHRASES or any(
+            normalized.startswith(phrase) for phrase in _VISUAL_REFERENCE_PHRASES
+        )
+        if tell_more and not (authorized and state.visual_context_ref_id):
+            # Fall through to ordinary follow-up resolution when no live visual
+            # context is authorized.
+            return None
+        if not tell_more and not explicit_visual:
+            return None
 
         if not authorized or not state.visual_context_ref_id:
             return self._build_guidance(
@@ -894,6 +920,60 @@ class ConversationIntelligence:
                 original=original,
                 effective=resolved,
                 depth="normal",
+                turn_taking="continuation",
+                confidence="high",
+                acknowledgment="none",
+                state=state,
+                resolved_follow_up=resolved,
+            )
+
+        if normalized in _TELL_MORE_PHRASES:
+            prior = state.active_goal or state.current_topic
+            if prior is None:
+                return self._ambiguous_follow_up(original, state)
+            resolved = f"User asked to explain further: {prior}"
+            return self._build_guidance(
+                original=original,
+                effective=resolved,
+                depth="detailed",
+                turn_taking="continuation",
+                confidence="high",
+                acknowledgment="none",
+                state=state,
+                resolved_follow_up=resolved,
+            )
+
+        if normalized in _DO_THAT_PHRASES:
+            referent = self._latest_referent(state)
+            target = None
+            if referent is not None:
+                target = referent.description or referent.label
+            elif state.active_goal:
+                target = state.active_goal
+            if target is None:
+                return self._ambiguous_follow_up(original, state)
+            resolved = f"User asked to proceed with: {target}"
+            state.set_active_goal(target)
+            return self._build_guidance(
+                original=original,
+                effective=resolved,
+                depth="brief",
+                turn_taking="continuation",
+                confidence="high",
+                acknowledgment="okay",
+                state=state,
+                resolved_follow_up=resolved,
+            )
+
+        if _ANAPHORIC_FOLLOW_UP.fullmatch(normalized):
+            prior = state.active_goal or state.current_topic
+            if prior is None:
+                return self._ambiguous_follow_up(original, state)
+            resolved = f"User asked a follow-up about: {prior}"
+            return self._build_guidance(
+                original=original,
+                effective=resolved,
+                depth=classify_response_depth(original),
                 turn_taking="continuation",
                 confidence="high",
                 acknowledgment="none",

@@ -237,6 +237,12 @@ REALTIME_VISUAL_SAMPLE_INTERVAL_SECONDS = 0.5
 MAX_REALTIME_VISUAL_FRAME_AGE_SECONDS = 3.0
 REALTIME_VISUAL_FRESH_WAIT_SECONDS = 0.75
 MAX_REALTIME_VISUAL_CONSECUTIVE_FRAME_FAILURES = 3
+# Bounded wait for finalized input transcription before M26 fallback
+# response.create. Typical provider transcription is well under 2s; 2.5s
+# leaves margin without leaving a turn silent indefinitely.
+REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS = 2.5
+MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS = 0.25
+MAX_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS = 8.0
 REALTIME_VISUAL_IMAGE_DETAIL = "low"
 REALTIME_VISUAL_FIXED_LABEL = (
     "Current camera frame for the preceding spoken turn. "
@@ -532,6 +538,28 @@ def get_default_calendar_repository_file_path() -> Path:
 def get_default_study_repository_file_path() -> Path:
     """Return the default user-local path for the Study Partner JSON file."""
     return _default_app_data_dir() / STUDY_REPOSITORY_FILENAME
+
+
+def bounded_realtime_multimodal_transcript_wait_seconds(value: object) -> float:
+    """Normalize the M26 transcript-wait timeout to configured bounds.
+
+    Non-numeric and non-finite values fall back to the default. Finite values
+    outside the min/max range are clamped. This timeout bounds how long a
+    multimodal turn may wait for a finalized transcript before falling back
+    to response.create without transcript-derived M28 guidance.
+    """
+    default = REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
+    try:
+        seconds = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    if seconds != seconds or seconds in {float("inf"), float("-inf")}:
+        return default
+    if seconds < MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS:
+        return MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
+    if seconds > MAX_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS:
+        return MAX_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
+    return seconds
 
 
 def get_default_tool_process_scratch_dir_path() -> Path:

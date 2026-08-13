@@ -31,6 +31,7 @@ from src.camera_capture import (
 from src.config import (
     MAX_CANCELLED_REALTIME_RESPONSE_IDS,
     MAX_REALTIME_VOICE_SESSION_MINUTES,
+    REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
     REALTIME_VISUAL_FIXED_LABEL,
     REALTIME_VISUAL_FRESH_WAIT_SECONDS,
     REALTIME_VISUAL_IMAGE_DETAIL,
@@ -42,16 +43,21 @@ from src.config import (
     REALTIME_VOICE_RECV_TIMEOUT_SECONDS,
     REALTIME_VOICE_SAMPLE_RATE_HZ,
     REALTIME_VOICE_SAMPLE_WIDTH_BYTES,
+    bounded_realtime_multimodal_transcript_wait_seconds,
 )
 from src.conversation import ConversationHistory
 from src.conversation_intelligence import (
     ConversationIntelligence,
     append_style_policy,
-    safe_interpret,
 )
 from src.conversation_state import ConversationState
 from src.identity import CORTANA_SYSTEM_INSTRUCTIONS
 from src.memory_context import format_active_memory_context
+from src.realtime_conversation_plan import (
+    RealtimeConversationPlan,
+    format_realtime_plan_instructions,
+    safe_plan_realtime_turn,
+)
 from src.realtime_voice import (
     EVENT_ALLOWLIST as VOICE_EVENT_ALLOWLIST,
     TOOL_CALL_EVENT_TYPES,
@@ -158,6 +164,7 @@ EVENT_ALLOWLIST = frozenset(
 
 _MAX_ASSEMBLER_COMPLETED_PENDING = 32
 _WORKER_JOIN_TIMEOUT_SECONDS = 5.0
+_MAX_PENDING_REALTIME_PLANS = 8
 
 
 class MultimodalOutboundKind(str, Enum):
@@ -193,6 +200,8 @@ class _VisualTurnState:
     delete_sent: bool = False
     awaiting_remote_id: bool = False
     delete_when_acked: bool = False
+    prepare_enqueued: bool = False
+    transcript_fallback: bool = False
 
 
 def build_multimodal_instructions(
@@ -339,6 +348,7 @@ class RealtimeMultimodalSession:
         monotonic_fn: Callable[[], float] = time.monotonic,
         sleep_fn: Callable[[float], None] = time.sleep,
         conversation_state: ConversationState | None = None,
+        transcript_wait_seconds: float | None = None,
     ) -> None:
         self._settings = settings
         self._client = client
@@ -346,6 +356,19 @@ class RealtimeMultimodalSession:
         self._active_memory = active_memory_context
         self._conversation_state = conversation_state
         self._conversation_intelligence = ConversationIntelligence()
+        self._base_instructions = ""
+        self._interrupted_item_ids: set[str] = set()
+        self._transcript_ready: set[str] = set()
+        self._plans_by_item: dict[str, RealtimeConversationPlan] = {}
+        self._transcript_deadlines: dict[str, float] = {}
+        self._transcript_wait_seconds = (
+            bounded_realtime_multimodal_transcript_wait_seconds(
+                REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
+                if transcript_wait_seconds is None
+                else transcript_wait_seconds
+            )
+        )
+        self._state_writes_closed = threading.Event()
         self._logger = logger_ or logger
         self._connect_factory = connect_factory
         self._microphone_factory = microphone_factory
@@ -562,6 +585,7 @@ class RealtimeMultimodalSession:
         instructions = build_multimodal_instructions(
             active_memory_context=self._active_memory,
         )
+        self._base_instructions = instructions
         payload = build_multimodal_session_update_payload(
             settings=self._settings,
             instructions=instructions,
@@ -664,9 +688,10 @@ class RealtimeMultimodalSession:
                     connection,
                     timeout=REALTIME_VOICE_RECV_TIMEOUT_SECONDS,
                 )
-                if event is None:
-                    continue
-                self._handle_event(event)
+                if event is not None:
+                    self._handle_event(event)
+                self._expire_transcript_waits()
+                self._drain_outbound(connection)
         except Exception as error:
             if not self._stop.is_set():
                 self._logger.error(
@@ -740,9 +765,16 @@ class RealtimeMultimodalSession:
         user_item_id = action.user_item_id
         if not isinstance(user_item_id, str) or not user_item_id:
             return
+        if self._stop.is_set() or not self._conversation_writes_allowed():
+            return
         turn = self._visual_turns.get(user_item_id)
         if turn is None or turn.stale or turn.response_create_sent:
             return
+
+        if turn.transcript_fallback:
+            self._restore_base_session_instructions(connection)
+        else:
+            self._inject_plan_before_response(connection, user_item_id)
 
         visual = action.visual_frame
         if visual is not None:
@@ -871,16 +903,20 @@ class RealtimeMultimodalSession:
                 )
         turn = _VisualTurnState(user_item_id=item_id, visual_frame=visual)
         self._visual_turns[item_id] = turn
-        try:
-            self._outbound.put_nowait(
-                MultimodalOutboundAction(
-                    kind=MultimodalOutboundKind.PREPARE_TURN_RESPONSE,
-                    user_item_id=item_id,
-                    visual_frame=visual,
-                )
+        if (
+            visual is not None
+            and self._conversation_state is not None
+            and self._conversation_writes_allowed()
+        ):
+            pending_ref = f"pending:{item_id}"
+            self._conversation_state.set_visual_context_ref(pending_ref)
+            self._conversation_state.set_interaction_mode("multimodal")
+        if item_id in self._transcript_ready:
+            self._enqueue_prepare_for_turn(item_id, fallback=False)
+        else:
+            self._transcript_deadlines[item_id] = (
+                self._monotonic() + self._transcript_wait_seconds
             )
-        except Full:
-            self.request_stop(error_type="input_overflow")
 
     def _on_conversation_item_ack(self, event: object) -> None:
         item = getattr(event, "item", None)
@@ -905,7 +941,7 @@ class RealtimeMultimodalSession:
         turn.awaiting_remote_id = False
         self._current_remote_visual_item_id = item_id
         self._pending_visual_ack_user_item = None
-        if self._conversation_state is not None:
+        if self._conversation_state is not None and self._conversation_writes_allowed():
             self._conversation_state.set_visual_context_ref(item_id)
             self._conversation_state.set_interaction_mode("multimodal")
         if turn.delete_when_acked and not turn.delete_sent:
@@ -937,11 +973,15 @@ class RealtimeMultimodalSession:
         response_id = self._active_response_id
         # Local interruption first; never wait on vision work.
         self._mark_response_cancelled(response_id)
+        if isinstance(item_id, str) and item_id:
+            self._interrupted_item_ids.add(item_id)
         user_item = self._response_to_user_item.get(response_id)
         if user_item is not None:
             turn = self._visual_turns.get(user_item)
             if turn is not None:
                 turn.stale = True
+                self._clear_transcript_wait(user_item)
+                self._clear_visual_ref_if_matches(turn, user_item)
         self._playback_abort.set()
         self._abort_playback_stream_now()
         self._discard_playback_for_response(response_id)
@@ -960,9 +1000,33 @@ class RealtimeMultimodalSession:
         if not isinstance(item_id, str) or not isinstance(transcript, str):
             return
         cleaned = transcript.strip()
-        if cleaned:
+        turn = self._visual_turns.get(item_id)
+        already_started = turn is not None and (
+            turn.transcript_fallback
+            or turn.response_create_sent
+            or turn.prepare_enqueued
+        )
+        plan: RealtimeConversationPlan | None = None
+        if cleaned and not already_started:
             self._print(f"Cortana: (Heard) {cleaned}")
-        self._assembler.store_user_transcript(item_id, transcript)
+            plan = self._plan_finalized_user_transcript(item_id, cleaned)
+            if plan is not None:
+                self._plans_by_item[item_id] = plan
+                while len(self._plans_by_item) > _MAX_PENDING_REALTIME_PLANS:
+                    oldest = next(iter(self._plans_by_item))
+                    self._plans_by_item.pop(oldest, None)
+        elif cleaned:
+            # Late transcript after fallback or prepare: keep it for history
+            # pairing only. Do not plan, inject, or create another response.
+            self._print(f"Cortana: (Heard) {cleaned}")
+        self._transcript_ready.add(item_id)
+        outcome = self._assembler.store_user_transcript(item_id, transcript)
+        if not already_started:
+            self._enqueue_prepare_for_turn(item_id, fallback=False)
+        if outcome.outcome == "pair":
+            self._observe_completed_turn(user_item_id=outcome.user_item_id)
+        elif outcome.outcome == "user_only" and outcome.user_item_id is not None:
+            self._plans_by_item.pop(outcome.user_item_id, None)
 
     def _on_response_created(self, event: object) -> None:
         response = getattr(event, "response", None)
@@ -1071,24 +1135,25 @@ class RealtimeMultimodalSession:
                 status=status_text or "incomplete",
             )
             self._finalize_visual_for_response(response_id, cancelled=True)
-        if outcome == "pair":
-            self._observe_completed_turn()
+        if outcome.outcome == "pair":
+            self._observe_completed_turn(user_item_id=outcome.user_item_id)
+        elif outcome.outcome == "user_only" and outcome.user_item_id is not None:
+            self._plans_by_item.pop(outcome.user_item_id, None)
         if self._active_response_id == response_id:
             self._active_response_id = None
             self._responding = False
             self._set_state(RealtimeSessionState.LISTENING)
 
-    def _observe_completed_turn(self) -> None:
-        """M27: locally interpret/observe one fully finalized multimodal turn.
+    def _observe_completed_turn(self, *, user_item_id: str | None) -> None:
+        """Observe one fully finalized multimodal turn after the paired commit.
 
-        Runs only after the turn assembler has committed both a final user
-        transcript and a final assistant transcript to ``ConversationHistory``
-        as a matched pair. Never touches the realtime connection, never
-        touches the camera/visual pipeline, and never triggers a second
-        response — this is pure local state observation.
+        M28 planning already ran on the finalized transcript before the existing
+        manual ``response.create``. This hook never creates a second response.
+        Plans are retrieved by the committed user item id, never by transcript
+        text. Late transcripts after timeout fallback are not interpreted here.
         """
         state = self._conversation_state
-        if state is None:
+        if state is None or not self._conversation_writes_allowed():
             return
         if len(self._history.turns) < 2:
             return
@@ -1098,16 +1163,14 @@ class RealtimeMultimodalSession:
             return
         try:
             state.set_interaction_mode("multimodal")
-            guidance = safe_interpret(
-                self._conversation_intelligence,
-                user_turn.content,
-                state,
-            )
-            if guidance is not None:
+            plan = None
+            if user_item_id:
+                plan = self._plans_by_item.pop(user_item_id, None)
+            if plan is not None:
                 self._conversation_intelligence.observe_assistant_reply(
                     assistant_turn.content,
                     state,
-                    guidance,
+                    plan.guidance,
                 )
         except Exception as error:
             self._logger.error(
@@ -1115,6 +1178,150 @@ class RealtimeMultimodalSession:
                 "error_type=%s",
                 type(error).__name__,
             )
+
+    def _plan_finalized_user_transcript(
+        self,
+        item_id: str,
+        user_text: str,
+    ) -> RealtimeConversationPlan | None:
+        state = self._conversation_state
+        if state is None or not self._conversation_writes_allowed():
+            return None
+        interrupted = item_id in self._interrupted_item_ids
+        self._interrupted_item_ids.discard(item_id)
+        turn = self._visual_turns.get(item_id)
+        visual_authorized = bool(
+            (turn is not None and turn.visual_frame is not None and not turn.stale)
+            or state.visual_context_ref_id is not None
+        )
+        if (
+            turn is not None
+            and turn.visual_frame is not None
+            and not turn.stale
+            and state.visual_context_ref_id is None
+        ):
+            state.set_visual_context_ref(
+                turn.remote_visual_item_id or f"pending:{item_id}"
+            )
+        plan = safe_plan_realtime_turn(
+            self._conversation_intelligence,
+            user_text,
+            state,
+            interaction_mode="multimodal",
+            user_interrupted=interrupted,
+            visual_context_authorized=visual_authorized,
+        )
+        return plan
+
+    def _expire_transcript_waits(self) -> None:
+        """Enqueue the existing prepare path if a turn's transcript wait expired.
+
+        Does not fabricate transcript text, does not plan from partial input,
+        and does not sleep the worker. Per-turn deadlines are checked on the
+        existing recv-timeout poll.
+        """
+        if self._stop.is_set() or not self._conversation_writes_allowed():
+            return
+        now = self._monotonic()
+        expired = [
+            item_id
+            for item_id, deadline in self._transcript_deadlines.items()
+            if now >= deadline
+        ]
+        for item_id in expired:
+            self._transcript_deadlines.pop(item_id, None)
+            self._enqueue_prepare_for_turn(item_id, fallback=True)
+
+    def _clear_transcript_wait(self, item_id: str) -> None:
+        self._transcript_deadlines.pop(item_id, None)
+
+    def _enqueue_prepare_for_turn(self, item_id: str, *, fallback: bool) -> None:
+        """Queue the existing M26 response.create path for one bound turn."""
+        turn = self._visual_turns.get(item_id)
+        if turn is None or turn.stale or turn.response_create_sent or turn.prepare_enqueued:
+            self._clear_transcript_wait(item_id)
+            return
+        if self._stop.is_set() or not self._conversation_writes_allowed():
+            return
+        if not fallback and item_id not in self._transcript_ready:
+            return
+        self._clear_transcript_wait(item_id)
+        if fallback:
+            turn.transcript_fallback = True
+        turn.prepare_enqueued = True
+        try:
+            self._outbound.put_nowait(
+                MultimodalOutboundAction(
+                    kind=MultimodalOutboundKind.PREPARE_TURN_RESPONSE,
+                    user_item_id=item_id,
+                    visual_frame=turn.visual_frame,
+                )
+            )
+        except Full:
+            self.request_stop(error_type="input_overflow")
+
+    def _restore_base_session_instructions(
+        self,
+        connection: RealtimeConnectionLike,
+    ) -> None:
+        """Clear per-turn M28 guidance so fallback uses pre-M28 instructions."""
+        if not self._base_instructions:
+            return
+        try:
+            payload = build_multimodal_session_update_payload(
+                settings=self._settings,
+                instructions=self._base_instructions,
+            )
+            connection.session.update(session=payload)
+        except Exception as error:
+            self._logger.error(
+                "Multimodal fallback instruction restore failed error_type=%s",
+                type(error).__name__,
+            )
+
+    def _inject_plan_before_response(
+        self,
+        connection: RealtimeConnectionLike,
+        user_item_id: str,
+    ) -> None:
+        """Guide the existing response owner; never create a competing response."""
+        if self._conversation_state is None or not self._conversation_writes_allowed():
+            return
+        if not self._base_instructions:
+            return
+        plan = self._plans_by_item.get(user_item_id)
+        try:
+            instructions = format_realtime_plan_instructions(
+                self._base_instructions,
+                plan,
+                self._conversation_state,
+            )
+            payload = build_multimodal_session_update_payload(
+                settings=self._settings,
+                instructions=instructions,
+            )
+            connection.session.update(session=payload)
+        except Exception as error:
+            self._logger.error(
+                "Multimodal pre-response plan injection failed error_type=%s",
+                type(error).__name__,
+            )
+
+    def _clear_visual_ref_if_matches(
+        self,
+        turn: _VisualTurnState,
+        user_item_id: str,
+    ) -> None:
+        state = self._conversation_state
+        if state is None or not self._conversation_writes_allowed():
+            return
+        current = state.visual_context_ref_id
+        pending = f"pending:{user_item_id}"
+        if current in {pending, turn.remote_visual_item_id}:
+            state.clear_visual_context_ref()
+
+    def _conversation_writes_allowed(self) -> bool:
+        return not self._state_writes_closed.is_set()
 
     def _finalize_visual_for_response(
         self,
@@ -1331,6 +1538,7 @@ class RealtimeMultimodalSession:
 
     def _cleanup(self) -> None:
         self._set_state(RealtimeSessionState.CLOSING)
+        self._state_writes_closed.set()
         self._stop.set()
         if self._microphone is not None:
             self._microphone.stop()
@@ -1430,6 +1638,9 @@ class RealtimeMultimodalSession:
         with self._playback_bytes_lock:
             self._playback_bytes_queued = 0
         self._visual_turns.clear()
+        self._transcript_deadlines.clear()
+        self._transcript_ready.clear()
+        self._plans_by_item.clear()
 
         if self._failed.is_set():
             self._set_state(RealtimeSessionState.FAILED)
@@ -1479,6 +1690,7 @@ def run_realtime_multimodal_session(
     monotonic_fn: Callable[[], float] = time.monotonic,
     sleep_fn: Callable[[float], None] = time.sleep,
     conversation_state: ConversationState | None = None,
+    transcript_wait_seconds: float | None = None,
 ) -> str:
     """Run one explicit realtime multimodal session and return status text."""
     session = RealtimeMultimodalSession(
@@ -1496,5 +1708,6 @@ def run_realtime_multimodal_session(
         monotonic_fn=monotonic_fn,
         sleep_fn=sleep_fn,
         conversation_state=conversation_state,
+        transcript_wait_seconds=transcript_wait_seconds,
     )
     return session.run()

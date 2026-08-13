@@ -112,6 +112,10 @@ from src.config import (
     MAX_REALTIME_VISUAL_FRAME_AGE_SECONDS,
     REALTIME_VISUAL_SAMPLE_INTERVAL_SECONDS,
     REALTIME_VISUAL_IMAGE_DETAIL,
+    REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    MAX_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    bounded_realtime_multimodal_transcript_wait_seconds,
     CONVERSATIONAL_INTELLIGENCE_ENABLED,
     MAX_CONVERSATIONAL_REFERENTS,
     MAX_CONVERSATIONAL_STATE_CHARS,
@@ -268,6 +272,39 @@ def test_realtime_multimodal_limits_and_capabilities_are_centralized() -> None:
     assert MAX_REALTIME_VISUAL_FRAME_AGE_SECONDS == 3.0
     assert REALTIME_VISUAL_SAMPLE_INTERVAL_SECONDS == 0.5
     assert REALTIME_VISUAL_IMAGE_DETAIL == "low"
+    assert REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS == 2.5
+    assert MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS == 0.25
+    assert MAX_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS == 8.0
+
+
+def test_multimodal_transcript_wait_seconds_are_normalized() -> None:
+    """H: valid waits are accepted; invalid values are safely normalized."""
+    assert bounded_realtime_multimodal_transcript_wait_seconds(2.5) == 2.5
+    assert bounded_realtime_multimodal_transcript_wait_seconds(1.0) == 1.0
+    assert (
+        bounded_realtime_multimodal_transcript_wait_seconds(0.15)
+        == MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
+    )
+    assert (
+        bounded_realtime_multimodal_transcript_wait_seconds(99.0)
+        == MAX_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
+    )
+    assert (
+        bounded_realtime_multimodal_transcript_wait_seconds("nope")
+        == REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
+    )
+    assert (
+        bounded_realtime_multimodal_transcript_wait_seconds(float("nan"))
+        == REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
+    )
+    assert (
+        bounded_realtime_multimodal_transcript_wait_seconds(float("inf"))
+        == REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
+    )
+    assert (
+        bounded_realtime_multimodal_transcript_wait_seconds(None)
+        == REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
+    )
 
 
 def test_conversational_intelligence_limits_are_centralized() -> None:

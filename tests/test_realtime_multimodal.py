@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import logging
 import threading
 import time
@@ -16,12 +17,15 @@ from PIL import Image
 from src.active_memory import ActiveMemoryContext
 from src.camera_capture import CameraCaptureSession, RealtimeVisualFrame
 from src.config import (
+    MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
     REALTIME_VISUAL_FIXED_LABEL,
     REALTIME_VOICE_FRAME_BYTES,
     REALTIME_VOICE_SAMPLE_RATE_HZ,
 )
 from src.conversation import ConversationHistory
+from src.conversation_intelligence import ConversationIntelligence
 from src.conversation_state import ConversationState
+from src.realtime_conversation_plan import REALTIME_PLAN_BEGIN
 from src.realtime_multimodal import (
     MULTIMODAL_CAMERA_START_FAILED,
     MULTIMODAL_STARTED_MESSAGE,
@@ -108,6 +112,7 @@ class FakeResource:
     def update(self, *, session: Any, event_id: str | None = None) -> None:
         del event_id
         self.updates.append(session)
+        self._connection.call_order.append("session.update")
         self._connection.socket.push(FakeEvent(type="session.updated"))
 
     def append(self, *, audio: str, event_id: str | None = None) -> None:
@@ -154,6 +159,7 @@ class FakeResource:
             return
         # Bare response.create()
         self.response_creates += 1
+        self._connection.call_order.append("response.create")
         response_id = f"resp_{self.response_creates}"
         self.pending_response_ids.append(response_id)
         if self._connection.auto_ack_responses:
@@ -187,6 +193,7 @@ class FakeConnection:
         self.input_audio_buffer = FakeResource(self)
         self.conversation = FakeConversation(self)
         self.closed = False
+        self.call_order: list[str] = []
         self.socket.push(FakeEvent(type="session.created"))
 
     def ack_response_created(self, response_id: str) -> None:
@@ -350,6 +357,7 @@ def _run_session(
     printed: list[str] | None = None,
     camera_fail: bool = False,
     conversation_state: ConversationState | None = None,
+    transcript_wait_seconds: float | None = None,
 ) -> tuple[threading.Thread, RealtimeMultimodalSession, dict[str, str], list[str]]:
     FakePlaybackStream.instances.clear()
     lines = printed if printed is not None else []
@@ -403,6 +411,7 @@ def _run_session(
         capture_factory=capture_factory,
         print_fn=lines.append,
         conversation_state=conversation_state,
+        transcript_wait_seconds=transcript_wait_seconds,
     )
 
     # Patch open order tracking.
@@ -520,6 +529,13 @@ def test_turn_binds_visual_creates_response_and_deletes() -> None:
     assert _wait_until(lambda: len(connection.conversation.item.created_items) >= 2)
 
     connection.socket.push(FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1"))
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_1",
+            transcript="What am I looking at?",
+        )
+    )
     assert _wait_until(lambda: connection.response.response_creates >= 1, timeout=5)
     assert _wait_until(
         lambda: any(
@@ -534,13 +550,6 @@ def test_turn_binds_visual_creates_response_and_deletes() -> None:
     )
 
     # Complete response so visual item is deleted.
-    connection.socket.push(
-        FakeEvent(
-            type="conversation.item.input_audio_transcription.completed",
-            item_id="user_1",
-            transcript="What am I looking at?",
-        )
-    )
     # response.created already auto-pushed by FakeResource.create
     assert _wait_until(lambda: session.state.value == "responding", timeout=5)
     active = session._active_response_id
@@ -566,7 +575,6 @@ def test_turn_binds_visual_creates_response_and_deletes() -> None:
 
     # Second turn gets a new visual item; first should already be deleted.
     connection.socket.push(FakeEvent(type="input_audio_buffer.committed", item_id="user_2"))
-    assert _wait_until(lambda: connection.response.response_creates >= 2, timeout=5)
     connection.socket.push(
         FakeEvent(
             type="conversation.item.input_audio_transcription.completed",
@@ -574,6 +582,7 @@ def test_turn_binds_visual_creates_response_and_deletes() -> None:
             transcript="What is this?",
         )
     )
+    assert _wait_until(lambda: connection.response.response_creates >= 2, timeout=5)
     assert _wait_until(lambda: session._active_response_id is not None, timeout=5)
     active2 = session._active_response_id
     assert isinstance(active2, str)
@@ -609,6 +618,13 @@ def test_barge_in_does_not_wait_on_vision() -> None:
     thread, session, _result_box, _lines = _run_session(connection, history)
     assert _wait_until(lambda: session.microphone_opened)
     connection.socket.push(FakeEvent(type="input_audio_buffer.speech_stopped", item_id="u1"))
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="u1",
+            transcript="Describe this",
+        )
+    )
     assert _wait_until(lambda: connection.response.response_creates >= 1)
     assert _wait_until(lambda: session._active_response_id is not None)
     response_id = session._active_response_id
@@ -636,6 +652,13 @@ def test_visual_delete_failure_fails_session() -> None:
     thread, session, result_box, _lines = _run_session(connection, history)
     assert _wait_until(lambda: session.microphone_opened)
     connection.socket.push(FakeEvent(type="input_audio_buffer.speech_stopped", item_id="u1"))
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="u1",
+            transcript="What is that?",
+        )
+    )
     assert _wait_until(lambda: connection.response.response_creates >= 1)
     assert _wait_until(lambda: session._active_response_id is not None)
     active = session._active_response_id
@@ -665,25 +688,46 @@ def test_rapid_double_turn_response_linkage_fifo() -> None:
     thread, session, _result_box, _lines = _run_session(connection, history)
     assert _wait_until(lambda: session.microphone_opened)
 
-    # Turn A then Turn B. Allow visual item acks to settle, but keep both
-    # response.create calls outstanding before any response.created.
+    # Turn A then Turn B. Bind visuals first; M28 waits for each finalized
+    # transcript before the existing manual response.create.
     connection.socket.push(
         FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_a")
     )
-    assert _wait_until(lambda: connection.response.response_creates >= 1, timeout=5)
     assert _wait_until(
-        lambda: session._visual_turns.get("user_a") is not None
-        and session._visual_turns["user_a"].response_create_sent
-        and session._visual_turns["user_a"].remote_visual_item_id is not None,
+        lambda: session._visual_turns.get("user_a") is not None,
         timeout=5,
     )
     connection.socket.push(
         FakeEvent(type="input_audio_buffer.committed", item_id="user_b")
     )
+    assert _wait_until(
+        lambda: session._visual_turns.get("user_b") is not None,
+        timeout=5,
+    )
+    assert connection.response.response_creates == 0
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_a",
+            transcript="What is on the left?",
+        )
+    )
+    assert _wait_until(lambda: connection.response.response_creates >= 1, timeout=5)
+    assert _wait_until(
+        lambda: session._visual_turns["user_a"].response_create_sent
+        and session._visual_turns["user_a"].remote_visual_item_id is not None,
+        timeout=5,
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_b",
+            transcript="What is this?",
+        )
+    )
     assert _wait_until(lambda: connection.response.response_creates >= 2, timeout=5)
     assert _wait_until(
-        lambda: session._visual_turns.get("user_b") is not None
-        and session._visual_turns["user_b"].response_create_sent
+        lambda: session._visual_turns["user_b"].response_create_sent
         and session._visual_turns["user_b"].remote_visual_item_id is not None,
         timeout=5,
     )
@@ -716,13 +760,6 @@ def test_rapid_double_turn_response_linkage_fifo() -> None:
 
     connection.socket.push(
         FakeEvent(
-            type="conversation.item.input_audio_transcription.completed",
-            item_id="user_a",
-            transcript="What is on the left?",
-        )
-    )
-    connection.socket.push(
-        FakeEvent(
             type="response.output_audio_transcript.done",
             response_id="resp_1",
             transcript="A red object.",
@@ -737,13 +774,6 @@ def test_rapid_double_turn_response_linkage_fifo() -> None:
     assert _wait_until(lambda: visual_a in connection.conversation.item.deleted_ids, timeout=5)
     assert visual_b not in connection.conversation.item.deleted_ids
 
-    connection.socket.push(
-        FakeEvent(
-            type="conversation.item.input_audio_transcription.completed",
-            item_id="user_b",
-            transcript="What is this?",
-        )
-    )
     connection.socket.push(
         FakeEvent(
             type="response.output_audio_transcript.done",
@@ -797,7 +827,6 @@ def test_finalized_multimodal_turn_updates_state_without_extra_response() -> Non
     connection.socket.push(
         FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
     )
-    assert _wait_until(lambda: connection.response.response_creates >= 1, timeout=5)
     connection.socket.push(
         FakeEvent(
             type="conversation.item.input_audio_transcription.completed",
@@ -805,6 +834,7 @@ def test_finalized_multimodal_turn_updates_state_without_extra_response() -> Non
             transcript="How should I organize my desk photos?",
         )
     )
+    assert _wait_until(lambda: connection.response.response_creates >= 1, timeout=5)
     assert _wait_until(lambda: session._active_response_id is not None, timeout=5)
     active = session._active_response_id
     assert isinstance(active, str)
@@ -884,3 +914,557 @@ def test_late_visual_ack_during_shutdown_cannot_resurrect_stale_ref() -> None:
     # The final unconditional clear runs only after the session worker join,
     # so it always wins over any late in-flight write during that window.
     assert state.visual_context_ref_id is None
+
+
+# ---------------------------------------------------------------------------
+# Milestone 28 realtime conversational planning
+# ---------------------------------------------------------------------------
+
+
+def test_m26_does_not_create_response_until_final_transcript() -> None:
+    """I: speech_stopped binds visual but waits for the finalized transcript."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    assert _wait_until(lambda: session._visual_turns.get("user_1") is not None, timeout=5)
+    time.sleep(0.15)
+    assert connection.response.response_creates == 0
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_1",
+            transcript="What is that?",
+        )
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert _wait_until(
+        lambda: any(
+            REALTIME_PLAN_BEGIN in str(update.get("instructions", ""))
+            for update in connection.session.updates
+        ),
+        timeout=5,
+    )
+    latest = connection.session.updates[-1]
+    turn = latest["audio"]["input"]["turn_detection"]
+    assert turn["create_response"] is False
+    assert turn["interrupt_response"] is True
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m26_what_is_that_uses_live_visual_and_does_not_authorize() -> None:
+    """G + I: visual referent is planned before the single response.create."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_1",
+            transcript="What is that?",
+        )
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    plan = session._plans_by_item.get("user_1")
+    assert plan is not None
+    assert plan.visual_referent_resolved is True
+    assert plan.authorizes_privileged_action is False
+    assert connection.response.response_creates == 1
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m26_planning_failure_still_creates_exactly_one_response() -> None:
+    """L: planning exceptions do not skip or duplicate the existing response.create."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+
+    class Broken(ConversationIntelligence):
+        def interpret(self, *args: object, **kwargs: object) -> Any:
+            raise RuntimeError("boom")
+
+    session._conversation_intelligence = Broken()
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_1",
+            transcript="How should I organize my desk photos?",
+        )
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert connection.response.response_creates == 1
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+    assert thread.is_alive() is False
+
+
+def test_m26_partial_transcript_does_not_plan_or_create() -> None:
+    """M: ignored transcription deltas never alter planning or trigger response.create."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="user_1",
+            transcript="what is th",
+        )
+    )
+    time.sleep(0.15)
+    assert connection.response.response_creates == 0
+    assert "user_1" not in session._plans_by_item
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m26_has_exactly_one_response_create_site() -> None:
+    source = inspect.getsource(RealtimeMultimodalSession)
+    assert source.count("connection.response.create()") == 1
+
+
+def test_m26_transcript_before_timeout_applies_plan_then_one_create() -> None:
+    """F1-A: finalized transcript before the deadline plans, injects, then creates once."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_1",
+            transcript="How should I organize my desk photos?",
+        )
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert connection.response.response_creates == 1
+    create_at = connection.call_order.index("response.create")
+    assert connection.call_order[create_at - 1] == "session.update"
+    plan_updates = [
+        update
+        for update in connection.session.updates
+        if REALTIME_PLAN_BEGIN in str(update.get("instructions", ""))
+    ]
+    assert plan_updates
+    assert "desk photos" in (state.active_goal or "").casefold()
+    turn = session._visual_turns["user_1"]
+    assert turn.transcript_fallback is False
+    assert turn.response_create_sent is True
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m26_missing_transcript_falls_back_without_fabricating_plan() -> None:
+    """F1-B: bounded fallback still creates exactly once with no transcript-derived plan."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection,
+        history,
+        conversation_state=state,
+        transcript_wait_seconds=MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    started = time.monotonic()
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0
+    assert connection.response.response_creates == 1
+    assert "user_1" not in session._plans_by_item
+    assert state.active_goal is None
+    assert session._visual_turns["user_1"].transcript_fallback is True
+    create_at = connection.call_order.index("response.create")
+    updates_before = connection.call_order[:create_at].count("session.update")
+    fallback_update = connection.session.updates[updates_before - 1]
+    assert REALTIME_PLAN_BEGIN not in str(fallback_update.get("instructions", ""))
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m26_transcript_wait_is_bounded_by_configured_timeout() -> None:
+    """Response-start wait is bounded by the configured fallback, not unbounded."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, _printed = _run_session(
+        connection,
+        history,
+        transcript_wait_seconds=MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    assert session._transcript_wait_seconds == MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    started = time.monotonic()
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    elapsed = time.monotonic() - started
+    assert elapsed >= 0.0
+    assert elapsed < 2.0
+    assert connection.response.response_creates == 1
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m26_late_transcript_after_fallback_does_not_create_or_overwrite() -> None:
+    """F1-C: late transcript cannot create a second response or overwrite a newer goal."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection,
+        history,
+        conversation_state=state,
+        transcript_wait_seconds=MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_2")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_2",
+            transcript="How do backups work?",
+        )
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    assert _wait_until(lambda: "backup" in (state.active_goal or "").casefold(), timeout=5)
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_1",
+            transcript="schedule the briefing for Monday",
+        )
+    )
+    time.sleep(0.2)
+    assert connection.response.response_creates == 2
+    assert "backup" in (state.active_goal or "").casefold()
+    assert "briefing" not in (state.active_goal or "").casefold()
+    assert "user_1" not in session._plans_by_item
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m26_interrupted_turn_before_timeout_does_not_create() -> None:
+    """F1-D: a stale waiting turn ignores timeout/fallback and creates no response."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, _printed = _run_session(
+        connection,
+        history,
+        transcript_wait_seconds=MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    assert _wait_until(lambda: session._visual_turns.get("user_1") is not None, timeout=5)
+    session._visual_turns["user_1"].stale = True
+    session._clear_transcript_wait("user_1")
+    time.sleep(MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS + 0.4)
+    assert connection.response.response_creates == 0
+    assert session._visual_turns["user_1"].prepare_enqueued is False
+    assert session._visual_turns["user_1"].response_create_sent is False
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m26_cleanup_before_timeout_creates_no_response_and_clears_deadlines() -> None:
+    """F1-E: shutdown cancels pending transcript waits; no late create or leak."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection,
+        history,
+        conversation_state=state,
+        transcript_wait_seconds=MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    assert _wait_until(lambda: session._visual_turns.get("user_1") is not None, timeout=5)
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+    assert thread.is_alive() is False
+    time.sleep(MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS + 0.4)
+    assert connection.response.response_creates == 0
+    assert session._transcript_deadlines == {}
+    assert state.active_goal is None
+
+
+def test_m26_rapid_double_turn_timeouts_are_independent() -> None:
+    """F1-F: each turn has its own deadline; first timeout cannot create for the second."""
+    connection = FakeConnection(auto_ack_responses=False)
+    history = ConversationHistory()
+    thread, session, _result_box, _printed = _run_session(
+        connection,
+        history,
+        transcript_wait_seconds=MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_a")
+    )
+    assert _wait_until(lambda: session._visual_turns.get("user_a") is not None, timeout=5)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="user_b")
+    )
+    assert _wait_until(lambda: session._visual_turns.get("user_b") is not None, timeout=5)
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    assert session._visual_turns["user_a"].response_create_sent is True
+    assert session._visual_turns["user_b"].response_create_sent is True
+    assert session._visual_turns["user_a"].transcript_fallback is True
+    assert session._visual_turns["user_b"].transcript_fallback is True
+    assert connection.response.pending_response_ids[:2] == ["resp_1", "resp_2"]
+    connection.ack_response_created("resp_1")
+    assert _wait_until(
+        lambda: session._visual_turns["user_a"].response_id == "resp_1",
+        timeout=5,
+    )
+    assert session._visual_turns["user_b"].response_id is None
+    connection.ack_response_created("resp_2")
+    assert _wait_until(
+        lambda: session._visual_turns["user_b"].response_id == "resp_2",
+        timeout=5,
+    )
+    assert session._response_to_user_item.get("resp_1") == "user_a"
+    assert session._response_to_user_item.get("resp_2") == "user_b"
+    assert connection.response.response_creates == 2
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m26_planning_failure_after_transcript_still_one_create() -> None:
+    """F1-G: planning failure after a normal transcript still uses one response.create."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+
+    class Broken(ConversationIntelligence):
+        def interpret(self, *args: object, **kwargs: object) -> Any:
+            raise RuntimeError("boom")
+
+    session._conversation_intelligence = Broken()
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_1",
+            transcript="How should I organize my desk photos?",
+        )
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert connection.response.response_creates == 1
+    assert "user_1" not in session._plans_by_item
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m26_timeout_fallback_does_not_authorize_privileged_action() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection,
+        history,
+        conversation_state=state,
+        transcript_wait_seconds=MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert session._plans_by_item == {}
+    assert state.active_goal is None
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m26_duplicate_text_plans_associate_by_item_id() -> None:
+    """F2-A/D: two multimodal 'continue' turns keep distinct plans and FIFO linkage."""
+    connection = FakeConnection(auto_ack_responses=False)
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_a")
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="user_b")
+    )
+    assert _wait_until(
+        lambda: session._visual_turns.get("user_a") is not None
+        and session._visual_turns.get("user_b") is not None,
+        timeout=5,
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_a",
+            transcript="continue",
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_b",
+            transcript="continue",
+        )
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    assert _wait_until(
+        lambda: "user_a" in session._plans_by_item and "user_b" in session._plans_by_item,
+        timeout=5,
+    )
+    assert session._plans_by_item["user_a"] is not session._plans_by_item["user_b"]
+    connection.ack_response_created("resp_1")
+    assert _wait_until(
+        lambda: session._visual_turns["user_a"].response_id == "resp_1",
+        timeout=5,
+    )
+    assert session._visual_turns["user_b"].response_id is None
+    connection.ack_response_created("resp_2")
+    assert _wait_until(
+        lambda: session._visual_turns["user_b"].response_id == "resp_2",
+        timeout=5,
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio_transcript.done",
+            response_id="resp_2",
+            transcript="Later continue.",
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.done",
+            response=FakeResponse(id="resp_2", status="completed"),
+        )
+    )
+    assert _wait_until(lambda: "user_b" not in session._plans_by_item, timeout=5)
+    assert "user_a" in session._plans_by_item
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio_transcript.done",
+            response_id="resp_1",
+            transcript="Earlier continue.",
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.done",
+            response=FakeResponse(id="resp_1", status="completed"),
+        )
+    )
+    assert _wait_until(lambda: "user_a" not in session._plans_by_item, timeout=5)
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m26_interrupted_duplicate_text_plan_cannot_be_consumed() -> None:
+    """F2-C: interrupting one identical-text multimodal turn drops only that plan."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_a")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_a",
+            transcript="continue",
+        )
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_b")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_b",
+            transcript="continue",
+        )
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    assert _wait_until(
+        lambda: "user_a" in session._plans_by_item and "user_b" in session._plans_by_item,
+        timeout=5,
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.done",
+            response=FakeResponse(id="resp_1", status="cancelled"),
+        )
+    )
+    assert _wait_until(lambda: "user_a" not in session._plans_by_item, timeout=5)
+    assert "user_b" in session._plans_by_item
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m26_no_transcript_equality_plan_identity() -> None:
+    """F2-F: no leftover transcript-equality identity mechanism."""
+    assert not hasattr(RealtimeMultimodalSession, "_take_plan_for_user_text")
+    source = inspect.getsource(RealtimeMultimodalSession)
+    assert "_take_plan_for_user_text" not in source
+    assert "original_user_text == " not in source

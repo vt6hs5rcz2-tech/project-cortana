@@ -135,6 +135,32 @@ def test_date_and_continue_follow_ups() -> None:
     assert prior.confidence == "high"
 
 
+def test_tell_me_more_and_do_that_follow_ups() -> None:
+    intel = _intel()
+    state = ConversationState()
+    state.set_active_goal("explain backup options")
+    more = intel.interpret("tell me more about that", state)
+    assert more.confidence == "high"
+    assert more.turn_taking == "continuation"
+    assert more.response_depth == "detailed"
+
+    state2 = _state_with_options("alpha plan", "beta plan")
+    do_that = intel.interpret("do that", state2)
+    assert do_that.confidence == "high"
+    assert do_that.resolved_follow_up is not None
+
+    empty = intel.interpret("do that", ConversationState())
+    assert empty.preserves_uncertainty is True
+    assert empty.effective_user_text == "do that"
+
+    why_state = ConversationState()
+    why_state.set_active_goal("Weekly backups")
+    why = intel.interpret("Why is that better?", why_state)
+    assert why.turn_taking == "continuation"
+    assert why.resolved_follow_up is not None
+    assert "Weekly backups" in why.resolved_follow_up
+
+
 def test_ambiguous_follow_up_does_not_invent_referent() -> None:
     guidance = _intel().interpret("the second one", ConversationState())
     assert guidance.confidence == "low"

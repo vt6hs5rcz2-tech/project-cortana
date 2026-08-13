@@ -37,9 +37,13 @@ from src.conversation import ConversationHistory
 from src.conversation_intelligence import (
     ConversationIntelligence,
     append_style_policy,
-    safe_interpret,
 )
 from src.conversation_state import ConversationState
+from src.realtime_conversation_plan import (
+    RealtimeConversationPlan,
+    format_realtime_plan_instructions,
+    safe_plan_realtime_turn,
+)
 from src.identity import CORTANA_SYSTEM_INSTRUCTIONS
 from src.memory_context import format_active_memory_context
 from src.realtime_voice_input import (
@@ -79,6 +83,7 @@ REALTIME_CONNECTION_FAILED = (
 )
 _MAX_ASSEMBLER_COMPLETED_PENDING = 32
 _WORKER_JOIN_TIMEOUT_SECONDS = 5.0
+_MAX_PENDING_REALTIME_PLANS = 8
 REALTIME_SESSION_FAILED = (
     "Cortana: Realtime voice session failed. "
     "You can use /voice-turn for one spoken turn."
@@ -369,6 +374,20 @@ def assert_timed_recv_compatible(connection: object) -> None:
     )
 
 
+@dataclass(frozen=True)
+class TurnCommitResult:
+    """Outcome of one assembler commit attempt, including the user item id.
+
+    Callers associate M28 plans by ``user_item_id``, not transcript text.
+    """
+
+    outcome: Literal["pair", "user_only", "none"]
+    user_item_id: str | None = None
+
+
+_NO_COMMIT = TurnCommitResult(outcome="none")
+
+
 class _TurnAssembler:
     """Small deterministic buffer that commits only finalized text turns.
 
@@ -397,19 +416,24 @@ class _TurnAssembler:
         if self._current_user_item_id is not None:
             self._response_user_item[response_id] = self._current_user_item_id
 
-    def store_user_transcript(self, item_id: str, transcript: str) -> None:
+    def store_user_transcript(
+        self, item_id: str, transcript: str
+    ) -> TurnCommitResult:
         cleaned = transcript.strip()
         if not cleaned or len(cleaned) > MAX_VOICE_TRANSCRIPT_CHARS:
-            return
+            return _NO_COMMIT
         if item_id in self._committed_user_only_items:
-            return
+            return _NO_COMMIT
         self._pending_user[item_id] = cleaned
         if item_id in self._user_only_items:
             self._commit_user_only(item_id, cleaned)
-            return
+            return TurnCommitResult(outcome="user_only", user_item_id=item_id)
         for response_id, linked_item in list(self._response_user_item.items()):
             if linked_item == item_id:
-                self._try_commit_pair(response_id)
+                result = self._try_commit_pair(response_id)
+                if result.outcome == "pair":
+                    return result
+        return _NO_COMMIT
 
     def store_assistant_transcript(self, response_id: str, transcript: str) -> None:
         cleaned = transcript.strip()
@@ -428,9 +452,9 @@ class _TurnAssembler:
         *,
         response_id: str,
         status: str,
-    ) -> Literal["pair", "user_only", "none"]:
+    ) -> TurnCommitResult:
         if response_id in self._committed_responses:
-            return "none"
+            return _NO_COMMIT
         if status == "completed":
             self._mark_completed(response_id)
             return self._try_commit_pair(response_id)
@@ -441,15 +465,15 @@ class _TurnAssembler:
         self._pending_assistant.pop(response_id, None)
         user_item = self._response_user_item.pop(response_id, None)
         if user_item is None:
-            return "none"
+            return _NO_COMMIT
         if user_item in self._committed_user_only_items:
-            return "none"
+            return _NO_COMMIT
         user = self._pending_user.get(user_item)
         if user is not None:
             self._commit_user_only(user_item, user)
-            return "user_only"
+            return TurnCommitResult(outcome="user_only", user_item_id=user_item)
         self._user_only_items.add(user_item)
-        return "none"
+        return _NO_COMMIT
 
     def _mark_completed(self, response_id: str) -> None:
         if response_id in self._completed_responses:
@@ -462,20 +486,20 @@ class _TurnAssembler:
                 continue
             self._completed_responses.discard(oldest)
 
-    def _try_commit_pair(self, response_id: str) -> Literal["pair", "none"]:
+    def _try_commit_pair(self, response_id: str) -> TurnCommitResult:
         if response_id in self._committed_responses:
-            return "none"
+            return _NO_COMMIT
         if response_id in self._non_completed_responses:
-            return "none"
+            return _NO_COMMIT
         if response_id not in self._completed_responses:
-            return "none"
+            return _NO_COMMIT
         user_item = self._response_user_item.get(response_id)
         assistant = self._pending_assistant.get(response_id)
         if user_item is None or assistant is None:
-            return "none"
+            return _NO_COMMIT
         user = self._pending_user.get(user_item)
         if user is None:
-            return "none"
+            return _NO_COMMIT
         self._history.add_user_message(user)
         self._history.add_assistant_message(assistant)
         self._committed_responses.add(response_id)
@@ -484,7 +508,7 @@ class _TurnAssembler:
         self._response_user_item.pop(response_id, None)
         self._completed_responses.discard(response_id)
         self._user_only_items.discard(user_item)
-        return "pair"
+        return TurnCommitResult(outcome="pair", user_item_id=user_item)
 
     def _commit_user_only(self, item_id: str, user: str) -> None:
         if item_id in self._committed_user_only_items:
@@ -524,6 +548,10 @@ class RealtimeVoiceSession:
         self._active_memory = active_memory_context
         self._conversation_state = conversation_state
         self._conversation_intelligence = ConversationIntelligence()
+        self._base_instructions = ""
+        self._plans_by_item: dict[str, RealtimeConversationPlan] = {}
+        self._interrupted_item_ids: set[str] = set()
+        self._state_writes_closed = threading.Event()
         self._logger = logger_ or logger
         self._connect_factory = connect_factory
         self._microphone_factory = microphone_factory
@@ -724,6 +752,7 @@ class RealtimeVoiceSession:
         instructions = build_realtime_instructions(
             active_memory_context=self._active_memory,
         )
+        self._base_instructions = instructions
         payload = build_session_update_payload(
             settings=self._settings,
             instructions=instructions,
@@ -989,6 +1018,8 @@ class RealtimeVoiceSession:
         response_id = self._active_response_id
         # Local interruption first; server auto-cancels via interrupt_response.
         self._mark_response_cancelled(response_id)
+        if isinstance(item_id, str) and item_id:
+            self._interrupted_item_ids.add(item_id)
         self._playback_abort.set()
         self._abort_playback_stream_now()
         self._discard_playback_for_response(response_id)
@@ -1009,7 +1040,17 @@ class RealtimeVoiceSession:
         cleaned = transcript.strip()
         if cleaned:
             self._print(f"Cortana: (Heard) {cleaned}")
-        self._assembler.store_user_transcript(item_id, transcript)
+            plan = self._plan_finalized_user_transcript(item_id, cleaned)
+            if plan is not None:
+                self._plans_by_item[item_id] = plan
+                while len(self._plans_by_item) > _MAX_PENDING_REALTIME_PLANS:
+                    oldest = next(iter(self._plans_by_item))
+                    self._plans_by_item.pop(oldest, None)
+        outcome = self._assembler.store_user_transcript(item_id, transcript)
+        if outcome.outcome == "pair":
+            self._observe_completed_turn(user_item_id=outcome.user_item_id)
+        elif outcome.outcome == "user_only" and outcome.user_item_id is not None:
+            self._plans_by_item.pop(outcome.user_item_id, None)
 
     def _on_response_created(self, event: object) -> None:
         response = getattr(event, "response", None)
@@ -1098,23 +1139,30 @@ class RealtimeVoiceSession:
                 response_id=response_id,
                 status=status_text or "incomplete",
             )
-        if outcome == "pair":
-            self._observe_completed_turn()
+        if outcome.outcome == "pair":
+            self._observe_completed_turn(user_item_id=outcome.user_item_id)
+        elif outcome.outcome == "user_only" and outcome.user_item_id is not None:
+            self._plans_by_item.pop(outcome.user_item_id, None)
         if self._active_response_id == response_id:
             self._active_response_id = None
             self._responding = False
             self._set_state(RealtimeSessionState.LISTENING)
 
-    def _observe_completed_turn(self) -> None:
-        """M27: locally interpret/observe one fully finalized realtime turn.
+    def _observe_completed_turn(self, *, user_item_id: str | None) -> None:
+        """Observe one fully finalized realtime turn and refresh next-turn context.
 
-        Runs only after the turn assembler has committed both a final user
-        transcript and a final assistant transcript to ``ConversationHistory``
-        as a matched pair. Never touches the realtime connection and never
-        triggers a second response — this is pure local state observation.
+        User-side M28 planning already ran on the finalized transcript when the
+        architecture delivered it. This hook never creates a response: M25 keeps
+        ``create_response=True`` as the sole response owner. True per-utterance
+        pre-response injection is not available because the provider typically
+        begins the assistant response from server VAD before the local
+        transcript event arrives.
+
+        Plans are retrieved by the committed user item id. Transcript text is
+        never used as turn identity.
         """
         state = self._conversation_state
-        if state is None:
+        if state is None or not self._conversation_writes_allowed():
             return
         if len(self._history.turns) < 2:
             return
@@ -1124,23 +1172,84 @@ class RealtimeVoiceSession:
             return
         try:
             state.set_interaction_mode("realtime")
-            guidance = safe_interpret(
-                self._conversation_intelligence,
-                user_turn.content,
-                state,
-            )
-            if guidance is not None:
+            plan = None
+            if user_item_id:
+                plan = self._plans_by_item.pop(user_item_id, None)
+            # Do not re-interpret user text here. Missing plans (planning
+            # failure, interruption) must not invent a second association by
+            # transcript equality.
+            if plan is not None:
                 self._conversation_intelligence.observe_assistant_reply(
                     assistant_turn.content,
                     state,
-                    guidance,
+                    plan.guidance,
                 )
+            self._refresh_next_turn_instructions(plan)
         except Exception as error:
             self._logger.error(
                 "Realtime conversational intelligence observe failed "
                 "error_type=%s",
                 type(error).__name__,
             )
+
+    def _plan_finalized_user_transcript(
+        self,
+        item_id: str,
+        user_text: str,
+    ) -> RealtimeConversationPlan | None:
+        """Local M28 planning for one finalized user transcript.
+
+        Updates bounded ConversationState only. Does not inject into an
+        in-flight provider response and does not call response.create.
+        """
+        state = self._conversation_state
+        if state is None or not self._conversation_writes_allowed():
+            return None
+        interrupted = item_id in self._interrupted_item_ids
+        self._interrupted_item_ids.discard(item_id)
+        plan = safe_plan_realtime_turn(
+            self._conversation_intelligence,
+            user_text,
+            state,
+            interaction_mode="realtime",
+            user_interrupted=interrupted,
+        )
+        return plan
+
+    def _refresh_next_turn_instructions(
+        self,
+        plan: RealtimeConversationPlan | None,
+    ) -> None:
+        """Apply compact next-turn guidance via session.update after a completed pair.
+
+        This does not change response ownership. It only updates session
+        instructions so a later auto-response can see bounded conversational
+        context (topic, goal, options, avoid-repetition).
+        """
+        if not self._conversation_writes_allowed():
+            return
+        connection = self._connection
+        if connection is None or not self._base_instructions:
+            return
+        try:
+            instructions = format_realtime_plan_instructions(
+                self._base_instructions,
+                plan,
+                self._conversation_state,
+            )
+            payload = build_session_update_payload(
+                settings=self._settings,
+                instructions=instructions,
+            )
+            connection.session.update(session=payload)
+        except Exception as error:
+            self._logger.error(
+                "Realtime next-turn instruction update failed error_type=%s",
+                type(error).__name__,
+            )
+
+    def _conversation_writes_allowed(self) -> bool:
+        return not self._state_writes_closed.is_set()
 
     def _discard_playback_for_response(self, response_id: str) -> None:
         retained: list[PlaybackChunk] = []
@@ -1312,6 +1421,7 @@ class RealtimeVoiceSession:
 
     def _cleanup(self) -> None:
         self._set_state(RealtimeSessionState.CLOSING)
+        self._state_writes_closed.set()
         self._stop.set()
         if self._microphone is not None:
             self._microphone.stop()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import logging
 import threading
 import time
@@ -36,6 +37,7 @@ from src.realtime_voice import (
     build_session_update_payload,
     run_realtime_voice_session,
 )
+from src.realtime_conversation_plan import REALTIME_PLAN_BEGIN
 from src.realtime_voice_input import (
     REALTIME_INPUT_OVERFLOW as INPUT_OVERFLOW_MESSAGE,
     RealtimeAudioFrame,
@@ -319,7 +321,8 @@ def test_turn_assembler_commits_completed_pair() -> None:
     assembler.store_user_transcript("item_u", "hello")
     assembler.store_assistant_transcript("resp_1", "hi there")
     result = assembler.on_response_done(response_id="resp_1", status="completed")
-    assert result == "pair"
+    assert result.outcome == "pair"
+    assert result.user_item_id == "item_u"
     assert history.turns[0].content == "hello"
     assert history.turns[1].content == "hi there"
 
@@ -332,7 +335,8 @@ def test_turn_assembler_cancelled_commits_user_only() -> None:
     assembler.store_user_transcript("item_u", "interrupt me")
     assembler.store_assistant_transcript("resp_1", "partial answer")
     result = assembler.on_response_done(response_id="resp_1", status="cancelled")
-    assert result == "user_only"
+    assert result.outcome == "user_only"
+    assert result.user_item_id == "item_u"
     assert len(history.turns) == 1
     assert history.turns[0].role == "user"
     assert history.turns[0].content == "interrupt me"
@@ -592,7 +596,7 @@ def test_turn_assembler_done_then_user_then_assistant() -> None:
     assembler = _TurnAssembler(history)
     assembler.set_current_user_item("item_u")
     assembler.bind_response("resp_1")
-    assert assembler.on_response_done(response_id="resp_1", status="completed") == "none"
+    assert assembler.on_response_done(response_id="resp_1", status="completed").outcome == "none"
     assembler.store_user_transcript("item_u", "hello")
     assert len(history.turns) == 0
     assembler.store_assistant_transcript("resp_1", "hi there")
@@ -604,10 +608,11 @@ def test_turn_assembler_done_then_assistant_then_user() -> None:
     assembler = _TurnAssembler(history)
     assembler.set_current_user_item("item_u")
     assembler.bind_response("resp_1")
-    assert assembler.on_response_done(response_id="resp_1", status="completed") == "none"
+    assert assembler.on_response_done(response_id="resp_1", status="completed").outcome == "none"
     assembler.store_assistant_transcript("resp_1", "hi there")
-    assert len(history.turns) == 0
-    assembler.store_user_transcript("item_u", "hello")
+    result = assembler.store_user_transcript("item_u", "hello")
+    assert result.outcome == "pair"
+    assert result.user_item_id == "item_u"
     _assert_single_pair(history, "hello", "hi there")
 
 
@@ -617,7 +622,7 @@ def test_turn_assembler_user_then_done_then_assistant() -> None:
     assembler.set_current_user_item("item_u")
     assembler.bind_response("resp_1")
     assembler.store_user_transcript("item_u", "hello")
-    assert assembler.on_response_done(response_id="resp_1", status="completed") == "none"
+    assert assembler.on_response_done(response_id="resp_1", status="completed").outcome == "none"
     assembler.store_assistant_transcript("resp_1", "hi there")
     _assert_single_pair(history, "hello", "hi there")
 
@@ -628,7 +633,7 @@ def test_turn_assembler_assistant_then_done_then_user() -> None:
     assembler.set_current_user_item("item_u")
     assembler.bind_response("resp_1")
     assembler.store_assistant_transcript("resp_1", "hi there")
-    assert assembler.on_response_done(response_id="resp_1", status="completed") == "none"
+    assert assembler.on_response_done(response_id="resp_1", status="completed").outcome == "none"
     assembler.store_user_transcript("item_u", "hello")
     _assert_single_pair(history, "hello", "hi there")
 
@@ -640,10 +645,10 @@ def test_turn_assembler_duplicate_finals_commit_once() -> None:
     assembler.bind_response("resp_1")
     assembler.store_user_transcript("item_u", "hello")
     assembler.store_assistant_transcript("resp_1", "hi there")
-    assert assembler.on_response_done(response_id="resp_1", status="completed") == "pair"
+    assert assembler.on_response_done(response_id="resp_1", status="completed").outcome == "pair"
     assembler.store_user_transcript("item_u", "hello")
     assembler.store_assistant_transcript("resp_1", "hi there")
-    assert assembler.on_response_done(response_id="resp_1", status="completed") == "none"
+    assert assembler.on_response_done(response_id="resp_1", status="completed").outcome == "none"
     _assert_single_pair(history, "hello", "hi there")
 
 
@@ -653,7 +658,7 @@ def test_turn_assembler_late_assistant_after_cancel_never_pairs() -> None:
     assembler.set_current_user_item("item_u")
     assembler.bind_response("resp_1")
     assembler.store_user_transcript("item_u", "hello")
-    assert assembler.on_response_done(response_id="resp_1", status="cancelled") == (
+    assert assembler.on_response_done(response_id="resp_1", status="cancelled").outcome == (
         "user_only"
     )
     assembler.store_assistant_transcript("resp_1", "should not appear")
@@ -1214,3 +1219,392 @@ def test_dangerous_realtime_transcript_never_authorizes_privileged_action() -> N
 
     session.request_stop(error_type="cancelled")
     thread.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# Milestone 28 realtime conversational planning
+# ---------------------------------------------------------------------------
+
+
+def test_m25_create_response_and_vad_unchanged_after_plan_refresh() -> None:
+    """H: create_response=True and server_vad remain after next-turn guidance."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    _push_completed_turn(
+        connection,
+        item_id="item_1",
+        response_id="resp_1",
+        user_text="Give me three backup options.",
+        assistant_text="1) Daily\n2) Weekly\n3) Monthly\nWhich one?",
+    )
+    assert _wait_until(lambda: len(connection.session.updates) >= 2, timeout=5)
+    latest = connection.session.updates[-1]
+    audio = latest["audio"]
+    turn = audio["input"]["turn_detection"]
+    assert turn["create_response"] is True
+    assert turn["interrupt_response"] is True
+    assert turn["type"] == "server_vad"
+    assert latest["tools"] == []
+    assert REALTIME_PLAN_BEGIN in str(latest["instructions"])
+    assert connection.response.created_items == []
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m25_plans_final_transcript_not_partial_and_not_before_transcript() -> None:
+    """H + M: planning runs on finalized transcripts only."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="item_1")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.delta",
+            item_id="item_1",
+            transcript="the sec",
+        )
+    )
+    time.sleep(0.15)
+    assert state.is_empty is True
+
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_1",
+            transcript="Give me three backup options.",
+        )
+    )
+    assert _wait_until(lambda: state.active_goal is not None, timeout=5)
+    assert "backup" in (state.active_goal or "").casefold()
+    # Provider still owns the in-flight/auto response; no client response.create.
+    assert connection.response.created_items == []
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m25_planning_failure_does_not_duplicate_or_crash() -> None:
+    """L: planning exceptions degrade to the existing auto-response path."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+
+    class Broken(ConversationIntelligence):
+        def interpret(self, *args: object, **kwargs: object) -> Any:
+            raise RuntimeError("boom")
+
+    session._conversation_intelligence = Broken()
+    _push_completed_turn(
+        connection,
+        item_id="item_1",
+        response_id="resp_1",
+        user_text="How do backups work?",
+        assistant_text="Daily or weekly.",
+    )
+    assert _wait_until(lambda: len(history.turns) >= 2, timeout=5)
+    assert connection.response.created_items == []
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+    assert thread.is_alive() is False
+
+
+def test_m25_barge_in_correction_is_interruption_context_only() -> None:
+    """H + 14: barge-in abort ownership is unchanged; the new utterance is planned."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    state.set_active_goal("schedule the briefing for Monday")
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(id="resp_a", status="in_progress"),
+        )
+    )
+    pcm = base64.b64encode(b"\x01\x00" * 80).decode("ascii")
+    connection.socket.push(
+        FakeEvent(type="response.output_audio.delta", response_id="resp_a", delta=pcm)
+    )
+    assert _wait_until(lambda: bool(FakePlaybackStream.instances))
+    assert _wait_until(lambda: len(FakePlaybackStream.instances[0].writes) >= 1)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="item_b")
+    )
+    assert _wait_until(lambda: FakePlaybackStream.instances[0].abort_calls >= 1)
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_b",
+            transcript="No, I meant Tuesday",
+        )
+    )
+    assert _wait_until(lambda: state.latest_correction is not None, timeout=5)
+    assert "tuesday" in (state.latest_correction or "").casefold()
+    assert connection.response.created_items == []
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m25_identical_text_plans_associate_by_item_id() -> None:
+    """F2-A/E: two 'continue' turns keep distinct item-id plans and next-turn guidance."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="item_a")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(id="resp_a", status="in_progress"),
+        )
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="item_b")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(id="resp_b", status="in_progress"),
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_a",
+            transcript="continue",
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_b",
+            transcript="continue",
+        )
+    )
+    assert _wait_until(
+        lambda: "item_a" in session._plans_by_item and "item_b" in session._plans_by_item,
+        timeout=5,
+    )
+    plan_a = session._plans_by_item["item_a"]
+    plan_b = session._plans_by_item["item_b"]
+    assert plan_a is not plan_b
+    assert plan_a.original_user_text == "continue"
+    assert plan_b.original_user_text == "continue"
+
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio_transcript.done",
+            response_id="resp_b",
+            transcript="Continuing with the later turn.",
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.done",
+            response=FakeResponse(id="resp_b", status="completed"),
+        )
+    )
+    assert _wait_until(lambda: "item_b" not in session._plans_by_item, timeout=5)
+    assert "item_a" in session._plans_by_item
+    assert _wait_until(
+        lambda: any(
+            REALTIME_PLAN_BEGIN in str(update.get("instructions", ""))
+            for update in connection.session.updates
+        ),
+        timeout=5,
+    )
+    latest = connection.session.updates[-1]
+    turn = latest["audio"]["input"]["turn_detection"]
+    assert turn["create_response"] is True
+    assert turn["interrupt_response"] is True
+    assert turn["type"] == "server_vad"
+    assert connection.response.created_items == []
+
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio_transcript.done",
+            response_id="resp_a",
+            transcript="Continuing with the earlier turn.",
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.done",
+            response=FakeResponse(id="resp_a", status="completed"),
+        )
+    )
+    assert _wait_until(lambda: "item_a" not in session._plans_by_item, timeout=5)
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m25_completion_order_does_not_steal_identical_text_plan() -> None:
+    """F2-B: completing the later identical-text turn cannot consume the earlier plan."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="item_a")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(id="resp_a", status="in_progress"),
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_a",
+            transcript="continue",
+        )
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="item_b")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(id="resp_b", status="in_progress"),
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_b",
+            transcript="continue",
+        )
+    )
+    assert _wait_until(
+        lambda: "item_a" in session._plans_by_item and "item_b" in session._plans_by_item,
+        timeout=5,
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio_transcript.done",
+            response_id="resp_b",
+            transcript="Later continue.",
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.done",
+            response=FakeResponse(id="resp_b", status="completed"),
+        )
+    )
+    assert _wait_until(lambda: "item_b" not in session._plans_by_item, timeout=5)
+    assert session._plans_by_item["item_a"].original_user_text == "continue"
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m25_interrupted_identical_text_plan_cannot_be_consumed() -> None:
+    """F2-C: cancelling one 'continue' turn drops its plan so the other keeps its own."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="item_a")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(id="resp_a", status="in_progress"),
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_a",
+            transcript="continue",
+        )
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="item_b")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(id="resp_b", status="in_progress"),
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_b",
+            transcript="continue",
+        )
+    )
+    assert _wait_until(
+        lambda: "item_a" in session._plans_by_item and "item_b" in session._plans_by_item,
+        timeout=5,
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.done",
+            response=FakeResponse(id="resp_a", status="cancelled"),
+        )
+    )
+    assert _wait_until(lambda: "item_a" not in session._plans_by_item, timeout=5)
+    assert "item_b" in session._plans_by_item
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio_transcript.done",
+            response_id="resp_b",
+            transcript="Continuing only the live turn.",
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.done",
+            response=FakeResponse(id="resp_b", status="completed"),
+        )
+    )
+    assert _wait_until(lambda: "item_b" not in session._plans_by_item, timeout=5)
+    assert "item_a" not in session._plans_by_item
+    assert connection.response.created_items == []
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m25_no_transcript_equality_plan_identity() -> None:
+    """F2-F: plan identity is item id only; no text-matching helper remains."""
+    assert not hasattr(RealtimeVoiceSession, "_take_plan_for_user_text")
+    source = inspect.getsource(RealtimeVoiceSession)
+    assert "_take_plan_for_user_text" not in source
+    assert "original_user_text == " not in source
+    assert "connection.response.create()" not in source
+
+
+def test_m25_create_response_true_unchanged_in_payload_builder() -> None:
+    payload = build_session_update_payload(
+        settings=_settings(),
+        instructions="test",
+    )
+    turn = payload["audio"]["input"]["turn_detection"]  # type: ignore[index]
+    assert turn["create_response"] is True
+    assert turn["interrupt_response"] is True
+    assert turn["type"] == "server_vad"
