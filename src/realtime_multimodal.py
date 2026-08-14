@@ -32,6 +32,7 @@ from src.config import (
     MAX_CANCELLED_REALTIME_RESPONSE_IDS,
     MAX_REALTIME_VOICE_SESSION_MINUTES,
     REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS,
     REALTIME_VISUAL_FIXED_LABEL,
     REALTIME_VISUAL_FRESH_WAIT_SECONDS,
     REALTIME_VISUAL_IMAGE_DETAIL,
@@ -44,6 +45,7 @@ from src.config import (
     REALTIME_VOICE_SAMPLE_RATE_HZ,
     REALTIME_VOICE_SAMPLE_WIDTH_BYTES,
     bounded_realtime_multimodal_transcript_wait_seconds,
+    bounded_realtime_multimodal_visual_ack_wait_seconds,
 )
 from src.conversation import ConversationHistory
 from src.conversation_intelligence import (
@@ -175,6 +177,7 @@ _MAX_VISUAL_TURNS = 16
 _MAX_PENDING_VISUAL_ACKS = 16
 _MAX_ORPHAN_DONE_RESPONSES = 16
 _MAX_COMPLETED_VISUAL_TOMBSTONES = 32
+_MAX_DELETED_REMOTE_VISUAL_IDS = 32
 
 
 class MultimodalOutboundKind(str, Enum):
@@ -216,6 +219,8 @@ class _VisualTurnState:
     delete_when_acked: bool = False
     prepare_enqueued: bool = False
     transcript_fallback: bool = False
+    bound_at_monotonic: float = 0.0
+    ack_deadline_monotonic: float | None = None
 
 
 def build_multimodal_instructions(
@@ -367,6 +372,7 @@ class RealtimeMultimodalSession:
         sleep_fn: Callable[[float], None] = time.sleep,
         conversation_state: ConversationState | None = None,
         transcript_wait_seconds: float | None = None,
+        visual_ack_wait_seconds: float | None = None,
         speech_delivery_state: SpeechDeliveryState | None = None,
     ) -> None:
         self._settings = settings
@@ -386,6 +392,13 @@ class RealtimeMultimodalSession:
                 REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
                 if transcript_wait_seconds is None
                 else transcript_wait_seconds
+            )
+        )
+        self._visual_ack_wait_seconds = (
+            bounded_realtime_multimodal_visual_ack_wait_seconds(
+                REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS
+                if visual_ack_wait_seconds is None
+                else visual_ack_wait_seconds
             )
         )
         self._state_writes_closed = threading.Event()
@@ -452,6 +465,9 @@ class RealtimeMultimodalSession:
         self._orphan_done_cancelled: dict[str, bool] = {}
         self._completed_visual_item_ids: deque[str] = deque(
             maxlen=_MAX_COMPLETED_VISUAL_TOMBSTONES
+        )
+        self._deleted_remote_visual_ids: deque[str] = deque(
+            maxlen=_MAX_DELETED_REMOTE_VISUAL_IDS
         )
         self._response_to_user_item: dict[str, str] = {}
 
@@ -728,6 +744,8 @@ class RealtimeMultimodalSession:
                 if event is not None:
                     self._handle_event(event)
                 self._expire_transcript_waits()
+                self._expire_visual_ack_waits()
+                self._compact_completed_visual_turns()
                 self._drain_outbound(connection)
         except Exception as error:
             if not self._stop.is_set():
@@ -826,6 +844,9 @@ class RealtimeMultimodalSession:
                 self.request_stop(error_type="visual_insert_failed")
                 return
             turn.awaiting_remote_id = True
+            turn.ack_deadline_monotonic = (
+                self._monotonic() + self._visual_ack_wait_seconds
+            )
             self._queue_visual_ack(user_item_id)
 
         try:
@@ -940,8 +961,13 @@ class RealtimeMultimodalSession:
                 visual = camera.wait_for_fresh_frame(
                     wait_seconds=REALTIME_VISUAL_FRESH_WAIT_SECONDS,
                 )
-        turn = _VisualTurnState(user_item_id=item_id, visual_frame=visual)
+        turn = _VisualTurnState(
+            user_item_id=item_id,
+            visual_frame=visual,
+            bound_at_monotonic=self._monotonic(),
+        )
         self._visual_turns[item_id] = turn
+        self._compact_completed_visual_turns()
         if (
             visual is not None
             and self._conversation_state is not None
@@ -976,6 +1002,7 @@ class RealtimeMultimodalSession:
             # Evicted tombstone still owns this in-flight ack. Discard it
             # rather than binding an ambiguous frame to a newer turn.
             self._orphan_visual_ack_debt -= 1
+            self._delete_identified_orphan_remote(item_id)
             return
         while self._pending_visual_acks:
             pending_user = self._pending_visual_acks[0]
@@ -984,14 +1011,23 @@ class RealtimeMultimodalSession:
                 # Consume this ack as belonging to the stale/missing turn.
                 # Do not bind it to a later valid turn in the same event.
                 self._pending_visual_acks.popleft()
+                self._delete_identified_orphan_remote(item_id)
                 return
             if not turn.awaiting_remote_id or turn.remote_visual_item_id is not None:
                 self._pending_visual_acks.popleft()
                 return
             if item_id == pending_user:
                 return
+            if item_id in self._deleted_remote_visual_ids:
+                self._pending_visual_acks.popleft()
+                self._delete_identified_orphan_remote(item_id)
+                return
+            if item_id in self._live_remote_visual_ids:
+                self._pending_visual_acks.popleft()
+                return
             turn.remote_visual_item_id = item_id
             turn.awaiting_remote_id = False
+            turn.ack_deadline_monotonic = None
             self._current_remote_visual_item_id = item_id
             self._live_remote_visual_ids.add(item_id)
             self._pending_visual_acks.popleft()
@@ -1060,6 +1096,9 @@ class RealtimeMultimodalSession:
                 continue
             self._mark_turn_stale(user_item_id)
 
+    def _release_visual_frame(self, turn: _VisualTurnState) -> None:
+        turn.visual_frame = None
+
     def _mark_turn_stale(self, user_item_id: str) -> None:
         turn = self._visual_turns.get(user_item_id)
         if turn is None:
@@ -1068,7 +1107,57 @@ class RealtimeMultimodalSession:
         self._clear_transcript_wait(user_item_id)
         self._plans_by_item.pop(user_item_id, None)
         self._clear_visual_ref_if_matches(turn, user_item_id)
-        turn.visual_frame = None
+        self._release_visual_frame(turn)
+
+    def _visual_ack_deadline(self, turn: _VisualTurnState) -> float | None:
+        if turn.ack_deadline_monotonic is not None:
+            return turn.ack_deadline_monotonic
+        if turn.bound_at_monotonic > 0.0:
+            return turn.bound_at_monotonic + self._visual_ack_wait_seconds
+        return None
+
+    def _expire_visual_ack_waits(self) -> None:
+        """Expire awaiting visual acks whose monotonic deadline has passed.
+
+        Does not sleep the worker, create a response, or bind late acks.
+        """
+        now = self._monotonic()
+        for user_item_id, turn in list(self._visual_turns.items()):
+            if not turn.awaiting_remote_id or turn.stale:
+                continue
+            deadline = self._visual_ack_deadline(turn)
+            if deadline is None or now < deadline:
+                continue
+            self._expire_awaiting_visual_turn(user_item_id)
+
+    def _expire_awaiting_visual_turn(self, user_item_id: str) -> None:
+        turn = self._visual_turns.get(user_item_id)
+        if turn is None:
+            return
+        self._mark_turn_stale(user_item_id)
+        turn.ack_deadline_monotonic = None
+        if turn.remote_visual_item_id is not None:
+            self._delete_remote_visual_item(turn)
+
+    def _drop_visual_turn(self, user_item_id: str, turn: _VisualTurnState) -> None:
+        self._release_visual_frame(turn)
+        self._completed_visual_item_ids.append(user_item_id)
+        self._visual_turns.pop(user_item_id, None)
+        self._transcript_ready.discard(user_item_id)
+        self._transcript_deadlines.pop(user_item_id, None)
+        if turn.response_id is not None:
+            self._response_to_user_item.pop(turn.response_id, None)
+
+    def _force_expire_visual_turn(self, user_item_id: str) -> None:
+        """Conservatively expire the oldest turn when the hard cap is exceeded."""
+        turn = self._visual_turns.get(user_item_id)
+        if turn is None:
+            return
+        self._expire_awaiting_visual_turn(user_item_id)
+        if turn.remote_visual_item_id is not None and not turn.delete_sent:
+            self._forget_remote_visual_id(turn.remote_visual_item_id)
+            turn.delete_sent = True
+        self._drop_visual_turn(user_item_id, turn)
 
     def _turn_can_release(self, turn: _VisualTurnState) -> bool:
         if turn.awaiting_remote_id and not turn.stale:
@@ -1084,27 +1173,16 @@ class RealtimeMultimodalSession:
         )
 
     def _compact_completed_visual_turns(self) -> None:
+        self._expire_visual_ack_waits()
         for user_item_id, turn in list(self._visual_turns.items()):
             if not self._turn_can_release(turn):
                 continue
-            turn.visual_frame = None
-            self._completed_visual_item_ids.append(user_item_id)
-            self._visual_turns.pop(user_item_id, None)
-            self._transcript_ready.discard(user_item_id)
-            self._transcript_deadlines.pop(user_item_id, None)
-            if turn.response_id is not None:
-                self._response_to_user_item.pop(turn.response_id, None)
+            self._drop_visual_turn(user_item_id, turn)
         while len(self._visual_turns) > _MAX_VISUAL_TURNS:
-            evicted = False
-            for user_item_id, turn in list(self._visual_turns.items()):
-                if turn.stale or turn.delete_sent:
-                    turn.visual_frame = None
-                    self._completed_visual_item_ids.append(user_item_id)
-                    self._visual_turns.pop(user_item_id, None)
-                    evicted = True
-                    break
-            if not evicted:
+            oldest_id = next(iter(self._visual_turns), None)
+            if oldest_id is None:
                 break
+            self._force_expire_visual_turn(oldest_id)
 
     def _on_user_transcript(self, event: object) -> None:
         item_id = getattr(event, "item_id", None)
@@ -1518,6 +1596,10 @@ class RealtimeMultimodalSession:
             return
         connection = self._connection
         if connection is None:
+            turn.delete_sent = True
+            turn.delete_when_acked = False
+            self._release_visual_frame(turn)
+            self._forget_remote_visual_id(remote_id)
             return
         try:
             connection.conversation.item.delete(item_id=remote_id)
@@ -1530,12 +1612,13 @@ class RealtimeMultimodalSession:
             return
         turn.delete_sent = True
         turn.delete_when_acked = False
-        turn.visual_frame = None
-        self._live_remote_visual_ids.discard(remote_id)
-        if self._current_remote_visual_item_id == remote_id:
-            self._current_remote_visual_item_id = None
-            if self._conversation_state is not None:
-                self._conversation_state.clear_visual_context_ref()
+        self._release_visual_frame(turn)
+        self._forget_remote_visual_id(remote_id)
+        if (
+            self._conversation_state is not None
+            and self._conversation_state.visual_context_ref_id == remote_id
+        ):
+            self._conversation_state.clear_visual_context_ref()
 
     def _sweep_session_remote_visuals(self, connection: object) -> None:
         """Best-effort delete every remote visual item this session still owns."""
@@ -1557,6 +1640,46 @@ class RealtimeMultimodalSession:
                     pass
         self._live_remote_visual_ids.clear()
         self._current_remote_visual_item_id = None
+
+    def _forget_remote_visual_id(self, remote_id: str | None) -> None:
+        if not remote_id:
+            return
+        self._live_remote_visual_ids.discard(remote_id)
+        if remote_id in self._deleted_remote_visual_ids:
+            return
+        self._deleted_remote_visual_ids.append(remote_id)
+        if self._current_remote_visual_item_id == remote_id:
+            self._current_remote_visual_item_id = None
+
+    def _delete_identified_orphan_remote(
+        self,
+        item_id: str,
+        *,
+        turn: _VisualTurnState | None = None,
+    ) -> None:
+        """Best-effort delete a FIFO-owned late ack. Never bind it to a live turn."""
+        for live in self._visual_turns.values():
+            if live.remote_visual_item_id == item_id and not live.stale:
+                return
+        if turn is not None:
+            self._release_visual_frame(turn)
+            if turn.remote_visual_item_id is None:
+                turn.remote_visual_item_id = item_id
+            turn.awaiting_remote_id = False
+            self._delete_remote_visual_item(turn)
+            if not turn.delete_sent:
+                self._forget_remote_visual_id(item_id)
+            return
+        connection = self._connection
+        conversation = getattr(connection, "conversation", None) if connection else None
+        item = getattr(conversation, "item", None)
+        delete = getattr(item, "delete", None)
+        if callable(delete):
+            try:
+                delete(item_id=item_id)
+            except Exception:
+                pass
+        self._forget_remote_visual_id(item_id)
 
     def _discard_playback_for_response(self, response_id: str) -> None:
         retained: list[PlaybackChunk] = []
@@ -1821,6 +1944,8 @@ class RealtimeMultimodalSession:
             self._playback_bytes_queued = 0
         if self._speech_delivery_state is not None:
             self._speech_delivery_state.clear_session_delivery_state()
+        for turn in self._visual_turns.values():
+            self._release_visual_frame(turn)
         self._visual_turns.clear()
         self._transcript_deadlines.clear()
         self._transcript_ready.clear()
@@ -1829,6 +1954,8 @@ class RealtimeMultimodalSession:
         self._pending_visual_acks.clear()
         self._orphan_visual_ack_debt = 0
         self._live_remote_visual_ids.clear()
+        self._deleted_remote_visual_ids.clear()
+        self._current_remote_visual_item_id = None
         self._orphan_done_response_ids.clear()
         self._orphan_done_cancelled.clear()
         self._completed_visual_item_ids.clear()

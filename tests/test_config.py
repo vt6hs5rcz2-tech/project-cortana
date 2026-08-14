@@ -51,6 +51,8 @@ from src.config import (
     PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED,
     PROCESS_JOB_ACTIVE_PROCESS_LIMIT,
     PROCESS_RESOURCE_LIMITS_ENABLED,
+    PROCESS_CHILD_STARTUP_TIMEOUT_SECONDS,
+    TOOL_AI_CONTEXT_INJECTION_ENABLED,
     TOOL_DRY_RUN_ENFORCEMENT_ENABLED,
     TOOL_HUMAN_APPROVAL_ENABLED,
     TOOL_SCOPE_ENFORCEMENT_ENABLED,
@@ -115,7 +117,11 @@ from src.config import (
     REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
     MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
     MAX_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS,
+    MIN_REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS,
+    MAX_REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS,
     bounded_realtime_multimodal_transcript_wait_seconds,
+    bounded_realtime_multimodal_visual_ack_wait_seconds,
     CONVERSATIONAL_INTELLIGENCE_ENABLED,
     MAX_CONVERSATIONAL_REFERENTS,
     MAX_CONVERSATIONAL_STATE_CHARS,
@@ -283,6 +289,9 @@ def test_realtime_multimodal_limits_and_capabilities_are_centralized() -> None:
     assert REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS == 2.5
     assert MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS == 0.25
     assert MAX_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS == 8.0
+    assert REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS == 8.0
+    assert MIN_REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS == 0.25
+    assert MAX_REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS == 30.0
 
 
 def test_multimodal_transcript_wait_seconds_are_normalized() -> None:
@@ -312,6 +321,35 @@ def test_multimodal_transcript_wait_seconds_are_normalized() -> None:
     assert (
         bounded_realtime_multimodal_transcript_wait_seconds(None)
         == REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
+    )
+
+
+def test_multimodal_visual_ack_wait_seconds_are_normalized() -> None:
+    assert bounded_realtime_multimodal_visual_ack_wait_seconds(8.0) == 8.0
+    assert bounded_realtime_multimodal_visual_ack_wait_seconds(2.0) == 2.0
+    assert (
+        bounded_realtime_multimodal_visual_ack_wait_seconds(0.05)
+        == MIN_REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS
+    )
+    assert (
+        bounded_realtime_multimodal_visual_ack_wait_seconds(99.0)
+        == MAX_REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS
+    )
+    assert (
+        bounded_realtime_multimodal_visual_ack_wait_seconds("nope")
+        == REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS
+    )
+    assert (
+        bounded_realtime_multimodal_visual_ack_wait_seconds(float("nan"))
+        == REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS
+    )
+    assert (
+        bounded_realtime_multimodal_visual_ack_wait_seconds(float("inf"))
+        == REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS
+    )
+    assert (
+        bounded_realtime_multimodal_visual_ack_wait_seconds(None)
+        == REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS
     )
 
 
@@ -412,6 +450,8 @@ def test_defensive_tool_framework_capabilities_are_centralized() -> None:
     assert ARBITRARY_SHELL_EXECUTION_ENABLED is False
     assert EXTERNAL_TOOL_EXECUTION_ENABLED is False
     assert AUTONOMOUS_REMEDIATION_ENABLED is False
+    assert TOOL_AI_CONTEXT_INJECTION_ENABLED is False
+    assert PROCESS_CHILD_STARTUP_TIMEOUT_SECONDS == 10
     assert TOOL_CONTROL_REPOSITORY_FILENAME == "tool_control.json"
 
 

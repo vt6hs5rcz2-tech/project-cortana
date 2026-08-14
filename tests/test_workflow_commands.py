@@ -199,6 +199,36 @@ def test_playbook_run_execute(tmp_path: Path) -> None:
     assert cast(CountingClient, client).calls == 0
 
 
+def test_playbook_run_new_operation_flag_is_execute_only(tmp_path: Path) -> None:
+    client = cast(OpenAIClient, CountingClient())
+    services = _services(tmp_path)
+    _scope_result, repo, _runs, services = _run(
+        "/scope-new Baseline | system-summary,simulated-log-check | none | review",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    scope_id = repo.list_scopes()[0].scope_id
+    rejected, _repo, runs, services = _run(
+        f"/playbook-run platform-baseline --new-operation | {scope_id}",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    assert "Usage" in (rejected.message or "")
+    assert runs.list_runs() == []
+    run_result, _repo, runs, _services_out = _run(
+        f"/playbook-run platform-baseline --execute --new-operation | {scope_id}",
+        tmp_path,
+        client=client,
+        services=services,
+    )
+    assert "Mode: execute" in (run_result.message or "")
+    assert runs.list_runs()[0].status == "completed"
+    assert runs.list_runs()[0].dry_run is False
+    assert cast(CountingClient, client).calls == 0
+
+
 def test_malformed_and_unknown_playbook(tmp_path: Path) -> None:
     client = cast(OpenAIClient, CountingClient())
     services = _services(tmp_path)

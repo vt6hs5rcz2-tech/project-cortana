@@ -22,6 +22,7 @@ from src.ai_service import (
     generate_study_question_response,
 )
 from src.citation_validation import CITATION_LABEL_PATTERN
+from src.user_facing import cortana_domain_message
 from src.config import (
     DOCUMENT_CONTEXT_INJECTION_ENABLED,
     LOCAL_DOCUMENT_RETRIEVAL_ENABLED,
@@ -384,7 +385,12 @@ class StudyPartnerService:
             cleaned_answer = validate_user_answer_input(answer_text)
             question = self._repository.get_question(session.pending_question_id)
         except StudyValidationError as error:
-            raise StudyPartnerValidationError(f"Cortana: {error}") from error
+            raise StudyPartnerValidationError(
+                cortana_domain_message(
+                    error,
+                    fallback="Cortana: I couldn't grade that study answer.",
+                )
+            ) from error
         except StudyStorageError as error:
             raise StudyPartnerError(error.user_message) from error
 

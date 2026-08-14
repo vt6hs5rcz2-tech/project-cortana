@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from src.incident_repository import JsonIncidentRepository
+from src.tool_definition import DefensiveToolDefinition, create_tool_definition
 from src.tool_executor import DefensiveToolExecutor
 from src.tool_registry import ToolRegistry, build_default_tool_registry
 from src.tool_repository import JsonToolControlRepository
@@ -50,4 +51,36 @@ def make_scope(
         allowed_target_types=target_types,
         allowed_local_path_roots=roots,
         notes="test-scope-notes-marker",
+    )
+
+
+def make_gated_test_tool(
+    *,
+    capability_class: str,
+    tool_id: str = "future-side-effect",
+    implementation_identifier: str = "impl_future_side_effect",
+    requires_approval: bool = True,
+    enabled: bool = True,
+) -> DefensiveToolDefinition:
+    """Return a test-only tool with an explicit gated or reserved capability class.
+
+    Capability is never inferred from ``tool_id``.
+    """
+    return create_tool_definition(
+        tool_id=tool_id,
+        name="Future Side Effect",
+        description=(
+            "Test-only side-effecting tool used to prove capability kill-switches."
+        ),
+        category="diagnostics",
+        version="1.0.0",
+        risk_level="informational",
+        execution_mode="internal-python",
+        supported_objective_types=("inspect",),
+        supported_target_types=("none",),
+        parameter_schema=(),
+        requires_approval=requires_approval,
+        implementation_identifier=implementation_identifier,
+        capability_class=capability_class,
+        enabled=enabled,
     )

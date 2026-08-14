@@ -81,6 +81,7 @@ def test_interpret_does_not_call_tool_or_workflow_surfaces() -> None:
         "the first one",
         "I meant Tuesday",
         "Forget that",
+        "go back",
         "run a tool",
         "schedule a meeting",
         "remember this forever",
@@ -118,6 +119,10 @@ def test_correction_text_does_not_bypass_orchestrator_privileges(
     result = orchestrator.try_handle("remember keep this note")
     assert result is not None
     assert len(store.list_memories()) == 1
+
+    # "go back" is conversational repair only; persistent memory stays.
+    intel.interpret("go back", state)
+    assert [item.text for item in store.list_memories()] == ["keep this note"]
 
 
 def test_guidance_fields_contain_no_authorization_hooks() -> None:

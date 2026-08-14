@@ -245,6 +245,11 @@ MAX_REALTIME_VISUAL_CONSECUTIVE_FRAME_FAILURES = 3
 REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS = 2.5
 MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS = 0.25
 MAX_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS = 8.0
+# Bounded wait for a provider visual-item ack after conversation.item.create.
+# Independent of the transcript wait. Does not delay or duplicate response.create.
+REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS = 8.0
+MIN_REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS = 0.25
+MAX_REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS = 30.0
 REALTIME_VISUAL_IMAGE_DETAIL = "low"
 REALTIME_VISUAL_FIXED_LABEL = (
     "Current camera frame for the preceding spoken turn. "
@@ -301,6 +306,12 @@ EVIDENCE_STORE_DIRNAME = "evidence"
 MAX_EVENT_TITLE_LENGTH = 200
 MAX_EVENT_DESCRIPTION_LENGTH = 5_000
 MAX_EVENT_SOURCE_LENGTH = 200
+MAX_STORED_INCIDENTS = 500
+MAX_STORED_INCIDENT_EVENTS = 500
+MAX_STORED_INCIDENT_INDICATORS = 500
+MAX_STORED_EVIDENCE_RECORDS = 500
+MAX_STORED_INCIDENT_NOTES = 2_000
+MAX_STORED_CUSTODY_ENTRIES = 5_000
 MAX_INCIDENT_TITLE_LENGTH = 200
 MAX_INCIDENT_SUMMARY_LENGTH = 5_000
 MAX_INDICATOR_VALUE_LENGTH = 2_000
@@ -324,11 +335,26 @@ DEFENSIVE_TOOL_FRAMEWORK_ENABLED = True
 TOOL_SCOPE_ENFORCEMENT_ENABLED = True
 TOOL_HUMAN_APPROVAL_ENABLED = True
 TOOL_DRY_RUN_ENFORCEMENT_ENABLED = True
+# ENFORCED at DefensiveToolExecutor / tool_policy.assert_executable.
+# Tools with capability_class="arbitrary-shell" cannot execute while False.
 ARBITRARY_SHELL_EXECUTION_ENABLED = False
+# ENFORCED at DefensiveToolExecutor / tool_policy.assert_executable.
+# Tools with capability_class="external-process" cannot execute while False.
+# Enabled future-external definitions remain structurally rejected.
 EXTERNAL_TOOL_EXECUTION_ENABLED = False
+# ENFORCED at DefensiveToolExecutor / tool_policy.assert_executable.
+# Tools with capability_class="autonomous-remediation" cannot execute while
+# False, even with a stored approval. This does not disable user-explicit
+# approved bounded read-only tools (capability_class="internal-readonly").
+# Enabling this flag still requires explicit approval and dry-run; it does
+# not authorize unattended, conversational, or tool-result self-approval.
 AUTONOMOUS_REMEDIATION_ENABLED = False
 TOOL_AUDIT_PERSISTENCE_ENABLED = True
 TOOL_SINGLE_INSTANCE_COORDINATION_ENABLED = False
+# RESERVED / not implemented. No production path injects tool results into
+# AI context. This flag is not an execution gate. Do not treat False as
+# evidence of enforcement. WORKFLOW_AI_CONTEXT_INJECTION_ENABLED is a
+# separate Milestone 12 packet-selection flag.
 TOOL_AI_CONTEXT_INJECTION_ENABLED = False
 
 # Process-isolated defensive tool execution foundation (Milestone 13)
@@ -348,6 +374,13 @@ PROCESS_FILE_TOOL_ISOLATION_ENABLED = False
 TOOL_CONTROL_REPOSITORY_SCHEMA_VERSION = 1
 TOOL_CONTROL_REPOSITORY_FILENAME = "tool_control.json"
 TOOL_PROCESS_SCRATCH_DIRNAME = "tool_process_scratch"
+
+# Primary tool-control records fail closed. Audit entries trim oldest on write.
+MAX_STORED_TOOL_SCOPES = 100
+MAX_STORED_TOOL_REQUESTS = 500
+MAX_STORED_TOOL_APPROVALS = 500
+MAX_STORED_TOOL_RESULTS = 500
+MAX_TOOL_AUDIT_ENTRIES = 500
 
 MAX_TOOL_NAME_LENGTH = 100
 MAX_TOOL_DESCRIPTION_LENGTH = 1_000
@@ -374,6 +407,10 @@ MAX_TOOL_LIST_PREVIEW_CHARS = 120
 FINGERPRINT_DISPLAY_PREFIX_CHARS = 12
 
 # Milestone 13 process-isolation IPC and termination bounds
+# RESERVED / unused. There is no child-process startup handshake. Isolated
+# execution waits with definition.timeout_seconds on communicate().
+# PROCESS_TERMINATION_CONFIRMATION_TIMEOUT_SECONDS is the related used bound.
+# Do not invent a startup lifecycle subsystem to make this constant "live".
 PROCESS_CHILD_STARTUP_TIMEOUT_SECONDS = 10
 PROCESS_TERMINATION_CONFIRMATION_TIMEOUT_SECONDS = 5
 # Raised for Milestone 15 nested file-authorization payloads (path bounds).
@@ -452,6 +489,9 @@ MAX_WORKFLOW_STEP_DESCRIPTION_LENGTH = 500
 MAX_WORKFLOW_ERROR_MESSAGE_LENGTH = 500
 MAX_WORKFLOW_RUNS_RETAINED = 100
 MAX_WORKFLOW_AUDIT_ENTRIES_RETAINED = 500
+# Bounded cross-run markers for side-effecting workflow steps. Oldest markers
+# are dropped when the cap is exceeded; this is not an unbounded history.
+MAX_WORKFLOW_COMPLETED_EFFECT_KEYS = 200
 MAX_WORKFLOW_LIST_PREVIEW_CHARS = 120
 MAX_WORKFLOW_AUDIT_DETAILS_LENGTH = 1_000
 
@@ -580,6 +620,28 @@ def bounded_realtime_multimodal_transcript_wait_seconds(value: object) -> float:
         return MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
     if seconds > MAX_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS:
         return MAX_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS
+    return seconds
+
+
+def bounded_realtime_multimodal_visual_ack_wait_seconds(value: object) -> float:
+    """Normalize the M26 visual-ack wait to configured bounds.
+
+    Non-numeric and non-finite values fall back to the default. Finite values
+    outside the min/max range are clamped. This timeout bounds how long a
+    multimodal turn may wait for a provider visual item id before the local
+    turn is expired, its frame bytes released, and a late ack discarded.
+    """
+    default = REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS
+    try:
+        seconds = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    if seconds != seconds or seconds in {float("inf"), float("-inf")}:
+        return default
+    if seconds < MIN_REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS:
+        return MIN_REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS
+    if seconds > MAX_REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS:
+        return MAX_REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS
     return seconds
 
 

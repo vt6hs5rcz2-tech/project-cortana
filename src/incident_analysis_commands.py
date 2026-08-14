@@ -27,6 +27,7 @@ from src.incident_analysis_repository import InMemoryIncidentAnalysisRepository
 from src.incident_analysis_service import IncidentAnalysisService
 from src.incident_repository import IncidentRepository, IncidentStorageError
 from src.command_argument_utils import extract_command_argument
+from src.user_facing import cortana_domain_message
 from src.security_commands import split_delimited_fields
 from src.settings import Settings
 from src.tool_common import (
@@ -255,11 +256,21 @@ def _handle_run(
             )
         )
     except IncidentAnalysisConflictError as error:
-        return IncidentAnalysisCommandResult(message=f"Cortana: {error}")
+        return IncidentAnalysisCommandResult(
+            message=cortana_domain_message(
+                error,
+                fallback="Cortana: I couldn't run that incident analysis.",
+            )
+        )
     except IncidentAnalysisValidationError as error:
         message = str(error)
         if "No prepared analysis" in message:
-            return IncidentAnalysisCommandResult(message=f"Cortana: {message}")
+            return IncidentAnalysisCommandResult(
+                message=cortana_domain_message(
+                    error,
+                    fallback="Cortana: I couldn't run that incident analysis.",
+                )
+            )
         return IncidentAnalysisCommandResult(message=RUN_USAGE)
     except IncidentStorageError as error:
         return IncidentAnalysisCommandResult(message=error.user_message)
@@ -361,11 +372,21 @@ def _handle_save_note(
             )
         )
     except IncidentAnalysisConflictError as error:
-        return IncidentAnalysisCommandResult(message=f"Cortana: {error}")
+        return IncidentAnalysisCommandResult(
+            message=cortana_domain_message(
+                error,
+                fallback="Cortana: I couldn't save that analysis note.",
+            )
+        )
     except IncidentAnalysisValidationError as error:
         message = str(error)
         if "No completed analysis" in message or "maximum note length" in message:
-            return IncidentAnalysisCommandResult(message=f"Cortana: {message}")
+            return IncidentAnalysisCommandResult(
+                message=cortana_domain_message(
+                    error,
+                    fallback="Cortana: I couldn't save that analysis note.",
+                )
+            )
         return IncidentAnalysisCommandResult(message=SAVE_NOTE_USAGE)
     except IncidentStorageError as error:
         return IncidentAnalysisCommandResult(message=error.user_message)

@@ -102,6 +102,64 @@ def test_snapshot_is_deterministic() -> None:
     assert first["offered_options"] == ["one", "two"]
 
 
+def test_restore_repairs_inconsistent_question_waiting_pair() -> None:
+    """restore() must not copy unresolved_question with waiting=False."""
+    source = ConversationState()
+    source.unresolved_question = "Which day?"
+    source.waiting_for_user = False
+    target = ConversationState()
+    target.restore(source)
+    assert target.unresolved_question == "Which day?"
+    assert target.waiting_for_user is True
+
+
+def test_restore_valid_waiting_question() -> None:
+    source = ConversationState()
+    source.set_unresolved_question("Which day works?")
+    source.set_active_goal("schedule the review")
+    target = ConversationState()
+    target.set_active_goal("unrelated")
+    target.restore(source)
+    assert target.unresolved_question == "Which day works?"
+    assert target.waiting_for_user is True
+    assert target.active_goal == "schedule the review"
+
+
+def test_clone_restore_round_trip_preserves_waiting_question() -> None:
+    state = ConversationState()
+    state.set_topic("schedule")
+    state.set_active_goal("schedule the review")
+    state.set_unresolved_question("Which day works?")
+    state.set_offered_options(("Monday", "Tuesday"))
+    cloned = state.clone()
+    restored = ConversationState()
+    restored.restore(cloned)
+    assert restored.snapshot() == state.snapshot()
+    assert restored.waiting_for_user is True
+    assert restored.unresolved_question == "Which day works?"
+
+
+def test_set_waiting_for_user_refuses_impossible_pair() -> None:
+    state = ConversationState()
+    state.set_unresolved_question("Which option?")
+    state.set_waiting_for_user(False)
+    assert state.unresolved_question == "Which option?"
+    assert state.waiting_for_user is True
+    state.set_unresolved_question(None)
+    state.set_waiting_for_user(False)
+    assert state.waiting_for_user is False
+
+
+def test_clear_option_thread_keeps_non_ordinal_referents() -> None:
+    state = ConversationState()
+    state.set_offered_options(("Alpha", "Beta"))
+    state.replace_option_referents(("Alpha", "Beta"))
+    state.add_referent(ConversationalReferent(label="vpn", description="rule"))
+    state.clear_option_thread()
+    assert state.offered_options == ()
+    assert [item.label for item in state.recent_referents] == ["vpn"]
+
+
 def test_state_is_not_permanent_memory() -> None:
     """ConversationState has no persist/save/load surface for memories."""
     methods = {name for name in dir(ConversationState) if not name.startswith("_")}

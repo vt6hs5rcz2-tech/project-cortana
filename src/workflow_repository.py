@@ -21,20 +21,31 @@ from uuid import uuid4
 
 from src.config import (
     MAX_WORKFLOW_AUDIT_ENTRIES_RETAINED,
+    MAX_WORKFLOW_COMPLETED_EFFECT_KEYS,
     MAX_WORKFLOW_RUNS_RETAINED,
     WORKFLOW_REPOSITORY_SCHEMA_VERSION,
 )
-from src.tool_common import ToolExecutionOutcome, utc_timestamp, validate_uuid
+from src.tool_common import (
+    ToolExecutionOutcome,
+    ToolValidationError,
+    utc_timestamp,
+    validate_utc_timestamp,
+    validate_uuid,
+)
 from src.tool_result import ToolExecutionResult, validate_tool_execution_result
 from src.workflow_audit import WorkflowAuditEntry, validate_workflow_audit_entry
 from src.workflow_common import (
     ABANDONED_AFTER_RESTART_ERROR_CODE,
     ABANDONED_AFTER_RESTART_MESSAGE,
+    SIDE_EFFECT_REEXECUTION_MESSAGE,
     WORKFLOW_TERMINAL_STATUSES,
     WorkflowAuditAction,
+    WorkflowPolicyError,
     WorkflowRunStatus,
     WorkflowStorageError,
     WorkflowValidationError,
+    validate_playbook_name,
+    validate_step_id,
 )
 from src.workflow_result import (
     WorkflowRunResult,
@@ -55,8 +66,14 @@ WORKFLOW_SAVE_ERROR_MESSAGE = (
 )
 
 # Explicit safe persistence allowlists. Unexpected keys fail closed.
-PERSISTED_ROOT_KEYS: frozenset[str] = frozenset(
+PERSISTED_REQUIRED_ROOT_KEYS: frozenset[str] = frozenset(
     {"version", "runs", "audit_entries"}
+)
+PERSISTED_ROOT_KEYS: frozenset[str] = frozenset(
+    {"version", "runs", "audit_entries", "completed_effect_keys"}
+)
+PERSISTED_EFFECT_KEYS: frozenset[str] = frozenset(
+    {"effect_key", "playbook_name", "step_id", "recorded_at"}
 )
 PERSISTED_RUN_KEYS: frozenset[str] = frozenset(
     {
@@ -115,6 +132,16 @@ PERSISTED_AUDIT_KEYS: frozenset[str] = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class WorkflowSideEffectMarker:
+    """Bounded persisted claim that a side-effecting step was attempted."""
+
+    effect_key: str
+    playbook_name: str
+    step_id: str
+    recorded_at: str
+
+
 class WorkflowRunRepository(Protocol):
     """Persistence boundary for workflow runs and workflow audit entries."""
 
@@ -133,6 +160,21 @@ class WorkflowRunRepository(Protocol):
     def list_audit_entries(self) -> list[WorkflowAuditEntry]:
         """Return audit entries in append order."""
 
+    def has_side_effect_key(self, effect_key: str) -> bool:
+        """Return whether a side-effecting operation was already claimed."""
+
+    def claim_side_effect_key(
+        self,
+        effect_key: str,
+        *,
+        playbook_name: str,
+        step_id: str,
+    ) -> WorkflowSideEffectMarker:
+        """Persist a claim before executing a side-effecting step."""
+
+    def list_side_effect_markers(self) -> list[WorkflowSideEffectMarker]:
+        """Return retained side-effect claims in insertion order."""
+
 
 @dataclass
 class _WorkflowRepositoryState:
@@ -141,6 +183,7 @@ class _WorkflowRepositoryState:
     runs: dict[str, WorkflowRunResult] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
     audit_entries: list[WorkflowAuditEntry] = field(default_factory=list)
+    completed_effect_keys: list[WorkflowSideEffectMarker] = field(default_factory=list)
 
 
 class InMemoryWorkflowRunRepository:
@@ -151,16 +194,23 @@ class InMemoryWorkflowRunRepository:
         *,
         max_runs: int = MAX_WORKFLOW_RUNS_RETAINED,
         max_audit_entries: int = MAX_WORKFLOW_AUDIT_ENTRIES_RETAINED,
+        max_completed_effect_keys: int = MAX_WORKFLOW_COMPLETED_EFFECT_KEYS,
     ) -> None:
         if max_runs < 1:
             raise WorkflowValidationError("max_runs must be at least 1.")
         if max_audit_entries < 1:
             raise WorkflowValidationError("max_audit_entries must be at least 1.")
+        if max_completed_effect_keys < 1:
+            raise WorkflowValidationError(
+                "max_completed_effect_keys must be at least 1."
+            )
         self._max_runs = max_runs
         self._max_audit_entries = max_audit_entries
+        self._max_completed_effect_keys = max_completed_effect_keys
         self._runs: dict[str, WorkflowRunResult] = {}
         self._order: list[str] = []
         self._audit: list[WorkflowAuditEntry] = []
+        self._effect_markers: list[WorkflowSideEffectMarker] = []
 
     def save_run(self, run: WorkflowRunResult) -> WorkflowRunResult:
         """Insert or update one validated run without rewriting step history."""
@@ -201,6 +251,36 @@ class InMemoryWorkflowRunRepository:
         """Return audit entries in append order."""
         return list(self._audit)
 
+    def has_side_effect_key(self, effect_key: str) -> bool:
+        """Return whether a side-effecting operation was already claimed."""
+        return any(item.effect_key == effect_key for item in self._effect_markers)
+
+    def claim_side_effect_key(
+        self,
+        effect_key: str,
+        *,
+        playbook_name: str,
+        step_id: str,
+    ) -> WorkflowSideEffectMarker:
+        """Persist a claim before executing a side-effecting step."""
+        marker = _validated_side_effect_marker(
+            effect_key=effect_key,
+            playbook_name=playbook_name,
+            step_id=step_id,
+            recorded_at=utc_timestamp(),
+        )
+        if self.has_side_effect_key(marker.effect_key):
+            raise WorkflowPolicyError(SIDE_EFFECT_REEXECUTION_MESSAGE)
+        self._effect_markers.append(marker)
+        overflow = len(self._effect_markers) - self._max_completed_effect_keys
+        if overflow > 0:
+            del self._effect_markers[:overflow]
+        return marker
+
+    def list_side_effect_markers(self) -> list[WorkflowSideEffectMarker]:
+        """Return retained side-effect claims in insertion order."""
+        return list(self._effect_markers)
+
     def _enforce_retention(self) -> None:
         """Drop oldest terminal runs when the retention bound is hit.
 
@@ -240,14 +320,20 @@ class JsonWorkflowRunRepository:
         *,
         max_runs: int = MAX_WORKFLOW_RUNS_RETAINED,
         max_audit_entries: int = MAX_WORKFLOW_AUDIT_ENTRIES_RETAINED,
+        max_completed_effect_keys: int = MAX_WORKFLOW_COMPLETED_EFFECT_KEYS,
     ) -> None:
         if max_runs < 1:
             raise WorkflowValidationError("max_runs must be at least 1.")
         if max_audit_entries < 1:
             raise WorkflowValidationError("max_audit_entries must be at least 1.")
+        if max_completed_effect_keys < 1:
+            raise WorkflowValidationError(
+                "max_completed_effect_keys must be at least 1."
+            )
         self._file_path = file_path
         self._max_runs = max_runs
         self._max_audit_entries = max_audit_entries
+        self._max_completed_effect_keys = max_completed_effect_keys
         self._state: _WorkflowRepositoryState | None = None
         self._load_error: WorkflowStorageError | None = None
 
@@ -304,6 +390,39 @@ class JsonWorkflowRunRepository:
         """Return audit entries in append order."""
         return list(self._ensure_loaded().audit_entries)
 
+    def has_side_effect_key(self, effect_key: str) -> bool:
+        """Return whether a side-effecting operation was already claimed."""
+        return any(
+            item.effect_key == effect_key
+            for item in self._ensure_loaded().completed_effect_keys
+        )
+
+    def claim_side_effect_key(
+        self,
+        effect_key: str,
+        *,
+        playbook_name: str,
+        step_id: str,
+    ) -> WorkflowSideEffectMarker:
+        """Persist a claim before executing a side-effecting step."""
+        state = self._clone_state(self._ensure_loaded())
+        marker = _validated_side_effect_marker(
+            effect_key=effect_key,
+            playbook_name=playbook_name,
+            step_id=step_id,
+            recorded_at=utc_timestamp(),
+        )
+        if any(item.effect_key == marker.effect_key for item in state.completed_effect_keys):
+            raise WorkflowPolicyError(SIDE_EFFECT_REEXECUTION_MESSAGE)
+        state.completed_effect_keys.append(marker)
+        _enforce_effect_retention(state, self._max_completed_effect_keys)
+        self._persist(state)
+        return marker
+
+    def list_side_effect_markers(self) -> list[WorkflowSideEffectMarker]:
+        """Return retained side-effect claims in insertion order."""
+        return list(self._ensure_loaded().completed_effect_keys)
+
     def _ensure_loaded(self) -> _WorkflowRepositoryState:
         if self._load_error is not None:
             raise self._load_error
@@ -358,7 +477,7 @@ class JsonWorkflowRunRepository:
             raise self._load_error from error
 
     def _deserialize_state(self, payload: dict[str, Any]) -> _WorkflowRepositoryState:
-        _assert_exact_keys(payload, PERSISTED_ROOT_KEYS, context="repository root")
+        _assert_root_keys(payload)
         version = payload.get("version")
         if version != WORKFLOW_REPOSITORY_SCHEMA_VERSION:
             logger.error("Workflow repository has unsupported schema version.")
@@ -414,10 +533,34 @@ class JsonWorkflowRunRepository:
             seen_audit_ids.add(entry.audit_id)
             audit_entries.append(entry)
 
+        markers_payload = payload.get("completed_effect_keys", [])
+        if not isinstance(markers_payload, list):
+            raise WorkflowStorageError(
+                "Workflow repository completed_effect_keys must be a list.",
+                user_message=WORKFLOW_LOAD_ERROR_MESSAGE,
+            )
+        markers: list[WorkflowSideEffectMarker] = []
+        seen_keys: set[str] = set()
+        for item in markers_payload:
+            if not isinstance(item, dict):
+                raise WorkflowStorageError(
+                    "Workflow side-effect marker must be an object.",
+                    user_message=WORKFLOW_LOAD_ERROR_MESSAGE,
+                )
+            marker = _deserialize_side_effect_marker(item)
+            if marker.effect_key in seen_keys:
+                raise WorkflowStorageError(
+                    "Duplicate workflow side-effect key rejected.",
+                    user_message=WORKFLOW_LOAD_ERROR_MESSAGE,
+                )
+            seen_keys.add(marker.effect_key)
+            markers.append(marker)
+
         return _WorkflowRepositoryState(
             runs=runs,
             order=order,
             audit_entries=audit_entries,
+            completed_effect_keys=markers,
         )
 
     def _persist(self, state: _WorkflowRepositoryState) -> None:
@@ -426,6 +569,10 @@ class JsonWorkflowRunRepository:
             "runs": [_serialize_run(state.runs[run_id]) for run_id in state.order],
             "audit_entries": [
                 _serialize_audit(entry) for entry in state.audit_entries
+            ],
+            "completed_effect_keys": [
+                _serialize_side_effect_marker(item)
+                for item in state.completed_effect_keys
             ],
         }
         serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
@@ -468,6 +615,7 @@ class JsonWorkflowRunRepository:
             runs=dict(state.runs),
             order=list(state.order),
             audit_entries=list(state.audit_entries),
+            completed_effect_keys=list(state.completed_effect_keys),
         )
 
 
@@ -593,6 +741,89 @@ def _abandon_stale_nonterminal_runs(state: _WorkflowRepositoryState) -> bool:
         state.runs[run_id] = abandoned
         changed = True
     return changed
+
+
+def _assert_root_keys(payload: dict[str, Any]) -> None:
+    """Accept current or pre-idempotency repository roots; reject extras."""
+    keys = frozenset(payload.keys())
+    unexpected = keys - PERSISTED_ROOT_KEYS
+    if unexpected:
+        raise WorkflowStorageError(
+            "Unexpected repository root keys rejected.",
+            user_message=WORKFLOW_LOAD_ERROR_MESSAGE,
+        )
+    missing = PERSISTED_REQUIRED_ROOT_KEYS - keys
+    if missing:
+        raise WorkflowStorageError(
+            "Missing repository root keys rejected.",
+            user_message=WORKFLOW_LOAD_ERROR_MESSAGE,
+        )
+
+
+def _validated_side_effect_marker(
+    *,
+    effect_key: str,
+    playbook_name: str,
+    step_id: str,
+    recorded_at: str,
+) -> WorkflowSideEffectMarker:
+    if not isinstance(effect_key, str) or len(effect_key) != 64:
+        raise WorkflowValidationError("Side-effect key must be a SHA-256 hex digest.")
+    if any(character not in "0123456789abcdef" for character in effect_key):
+        raise WorkflowValidationError("Side-effect key must be a SHA-256 hex digest.")
+    return WorkflowSideEffectMarker(
+        effect_key=effect_key,
+        playbook_name=validate_playbook_name(playbook_name),
+        step_id=validate_step_id(step_id),
+        recorded_at=validate_utc_timestamp(
+            recorded_at,
+            field_name="Side-effect recorded timestamp",
+        ),
+    )
+
+
+def _serialize_side_effect_marker(
+    marker: WorkflowSideEffectMarker,
+) -> dict[str, str]:
+    payload = {
+        "effect_key": marker.effect_key,
+        "playbook_name": marker.playbook_name,
+        "step_id": marker.step_id,
+        "recorded_at": marker.recorded_at,
+    }
+    _assert_exact_keys(payload, PERSISTED_EFFECT_KEYS, context="side-effect marker")
+    return payload
+
+
+def _deserialize_side_effect_marker(payload: dict[str, Any]) -> WorkflowSideEffectMarker:
+    _assert_exact_keys(payload, PERSISTED_EFFECT_KEYS, context="side-effect marker")
+    recorded_at = payload.get("recorded_at")
+    if not isinstance(recorded_at, str) or not recorded_at.strip():
+        raise WorkflowStorageError(
+            "Workflow side-effect marker timestamp is invalid.",
+            user_message=WORKFLOW_LOAD_ERROR_MESSAGE,
+        )
+    try:
+        return _validated_side_effect_marker(
+            effect_key=str(payload["effect_key"]),
+            playbook_name=str(payload["playbook_name"]),
+            step_id=str(payload["step_id"]),
+            recorded_at=recorded_at,
+        )
+    except (WorkflowValidationError, ToolValidationError) as error:
+        raise WorkflowStorageError(
+            "Workflow side-effect marker is invalid.",
+            user_message=WORKFLOW_LOAD_ERROR_MESSAGE,
+        ) from error
+
+
+def _enforce_effect_retention(
+    state: _WorkflowRepositoryState,
+    max_completed_effect_keys: int,
+) -> None:
+    overflow = len(state.completed_effect_keys) - max_completed_effect_keys
+    if overflow > 0:
+        del state.completed_effect_keys[:overflow]
 
 
 def _assert_exact_keys(

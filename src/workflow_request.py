@@ -36,6 +36,7 @@ class WorkflowRunRequest:
     step_tool_requests: dict[str, ToolExecutionRequest]
     step_approvals: dict[str, ToolApprovalRecord]
     cancellation_requested: bool
+    operation_id: str | None
 
 
 def create_workflow_run_request(
@@ -50,6 +51,7 @@ def create_workflow_run_request(
     step_approvals: Mapping[str, ToolApprovalRecord] | None = None,
     cancellation_requested: bool = False,
     run_id: str | None = None,
+    operation_id: str | None = None,
 ) -> WorkflowRunRequest:
     """Create a validated immutable workflow run request.
 
@@ -64,6 +66,10 @@ def create_workflow_run_request(
     cleaned_incident = validate_optional_uuid(
         incident_id,
         field_name="Incident ID",
+    )
+    cleaned_operation = validate_optional_uuid(
+        operation_id,
+        field_name="Operation ID",
     )
     cleaned_by = require_non_blank_text(
         requested_by,
@@ -103,4 +109,5 @@ def create_workflow_run_request(
         step_tool_requests=requests,
         step_approvals=approvals,
         cancellation_requested=bool(cancellation_requested),
+        operation_id=cleaned_operation,
     )

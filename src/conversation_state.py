@@ -75,6 +75,18 @@ class ConversationState:
     turn_window: int = CONVERSATIONAL_RECENT_TURN_WINDOW
     _character_budget_used: int = 0
 
+    def _enforce_question_waiting_invariant(self) -> None:
+        """Keep unresolved_question and waiting_for_user coherent (Invariant A).
+
+        A non-empty unresolved_question implies waiting_for_user=True.
+        waiting_for_user may still be True without a stored question.
+        A genuine pending question is never dropped to satisfy the pair.
+        """
+        if self.unresolved_question is not None and not self.unresolved_question.strip():
+            self.unresolved_question = None
+        if self.unresolved_question is not None:
+            self.waiting_for_user = True
+
     def __post_init__(self) -> None:
         """Keep constructor state coherent with setter semantics.
 
@@ -82,10 +94,7 @@ class ConversationState:
         waiting_for_user=True. waiting_for_user may still be True without a
         stored question (for example an incomplete thought).
         """
-        if self.unresolved_question is not None and not self.unresolved_question.strip():
-            self.unresolved_question = None
-        if self.unresolved_question is not None:
-            self.waiting_for_user = True
+        self._enforce_question_waiting_invariant()
 
     def reset(self) -> None:
         """Clear all session conversational state."""
@@ -101,6 +110,7 @@ class ConversationState:
         self.recent_ack_phrases.clear()
         self.recent_restatement_fingerprints.clear()
         self._character_budget_used = 0
+        self._enforce_question_waiting_invariant()
 
     def set_interaction_mode(self, mode: InteractionMode) -> None:
         """Record the most recent interaction mode for continuity hints."""
@@ -133,7 +143,23 @@ class ConversationState:
                 MAX_CONVERSATIONAL_QUESTION_CHARS,
             )
             self.waiting_for_user = True
+        self._enforce_question_waiting_invariant()
         self._after_mutation()
+
+    def set_waiting_for_user(self, waiting: bool) -> None:
+        """Set waiting_for_user without violating Invariant A.
+
+        Clearing waiting while a question is stored is refused: the question
+        remains pending and waiting stays True. Callers that consumed the
+        question must use set_unresolved_question(None).
+        """
+        if waiting:
+            self.waiting_for_user = True
+        elif self.unresolved_question is None:
+            self.waiting_for_user = False
+        else:
+            self.waiting_for_user = True
+        self._enforce_question_waiting_invariant()
 
     def set_latest_correction(self, correction: str | None) -> None:
         """Record the latest conversational correction/clarification."""
@@ -173,6 +199,20 @@ class ConversationState:
         """Drop all recent referents."""
         self.recent_referents.clear()
         self._after_mutation()
+
+    def clear_option_thread(self) -> None:
+        """Drop offered options and option-derived ordinal referents.
+
+        Referents without an ordinal are preserved because they are not
+        bound to the current numbered option list.
+        """
+        self.set_offered_options(())
+        self.replace_option_referents(())
+
+    def abandon_pending_branch(self) -> None:
+        """Clear the pending question and option thread; keep topic/goal."""
+        self.set_unresolved_question(None)
+        self.clear_option_thread()
 
     def replace_option_referents(self, options: tuple[str, ...] | list[str]) -> None:
         """Replace option-derived referents; keep referents without ordinals."""
@@ -269,6 +309,7 @@ class ConversationState:
         )
         self.turn_window = other.turn_window
         self._character_budget_used = other._character_budget_used
+        self._enforce_question_waiting_invariant()
 
     def snapshot(self) -> dict[str, object]:
         """Return a deterministic serializable snapshot of current state."""

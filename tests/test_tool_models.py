@@ -246,6 +246,8 @@ def test_policy_for_builtin_tools() -> None:
     assert initial_request_status(summary) == "drafted"
     assert initial_request_status(file_tool) == "awaiting-approval"
     assert_requestable(summary)
+    for definition in registry.list_all():
+        assert definition.capability_class == "internal-readonly"
 
 
 def test_empty_scope_tool_list_authorizes_nothing() -> None:

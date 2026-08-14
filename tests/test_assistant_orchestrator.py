@@ -300,6 +300,9 @@ def test_orchestrator_returns_none_for_unmatched_phrases(tmp_path: Path) -> None
             "remember that my project is called Cortana",
             "that my project is called Cortana",
         ),
+        ("remember my dog's name is Max", "my dog's name is Max"),
+        ("remember the server is in Virginia", "the server is in Virginia"),
+        ("remember the backup window is 2 AM", "the backup window is 2 AM"),
     ],
 )
 def test_memory_write_anchored_forms(
@@ -357,6 +360,16 @@ def test_memory_write_collisions_do_not_trigger(tmp_path: Path) -> None:
         "remember this forever",
         "remember that forever",
         "remember it forever",
+        "remember this thing",
+        "remember that fact",
+        "remember it please",
+        "remember this forever please",
+        "remember this for me",
+        "remember what I just said",
+        "remember the above",
+        "remember the previous thing",
+        "remember what we discussed",
+        "remember that one",
     ):
         assert orchestrator.try_handle(phrase) is None
     assert store.list_memories() == []

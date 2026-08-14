@@ -7,10 +7,7 @@ Never falls back to plaintext file storage.
 from __future__ import annotations
 
 import logging
-from typing import Protocol
-
-import keyring
-from keyring.errors import KeyringError
+from typing import Any, Protocol
 
 from src.config import SECRET_STORE_SERVICE_NAME
 
@@ -72,6 +69,7 @@ class KeyringSecretStore:
     def set_secret(self, key: str, value: str) -> None:
         cleaned_key = _require_key(key)
         cleaned_value = _require_value(value)
+        _require_keyring()
         try:
             keyring.set_password(self._service_name, cleaned_key, cleaned_value)
         except KeyringError as error:
@@ -85,6 +83,7 @@ class KeyringSecretStore:
 
     def get_secret(self, key: str) -> str | None:
         cleaned_key = _require_key(key)
+        _require_keyring()
         try:
             value = keyring.get_password(self._service_name, cleaned_key)
         except KeyringError as error:
@@ -109,6 +108,7 @@ class KeyringSecretStore:
 
     def delete_secret(self, key: str) -> None:
         cleaned_key = _require_key(key)
+        _require_keyring()
         try:
             existing = keyring.get_password(self._service_name, cleaned_key)
         except KeyringError as error:
@@ -156,6 +156,23 @@ class KeyringSecretStore:
             raise SecretStoreError(
                 "SecretStore delete verification failed: secret still present.",
             )
+
+
+def _require_keyring() -> Any:
+    if keyring is None:
+        raise SecretStoreError(
+            "keyring is unavailable",
+            user_message="Cortana: Secure credential storage is unavailable.",
+        )
+    return keyring
+
+
+try:
+    import keyring
+    from keyring.errors import KeyringError
+except ImportError:  # pragma: no cover
+    keyring = None  # type: ignore[assignment]
+    KeyringError = Exception  # type: ignore[misc,assignment]
 
 
 def google_refresh_token_secret_key(account_id: str) -> str:

@@ -774,6 +774,11 @@ def _handle_indicator(context: SecurityCommandContext) -> SecurityCommandResult:
     return SecurityCommandResult(message=message)
 
 
+def _rollback_copied_evidence(store: EvidenceStore, evidence_id: str) -> None:
+    """Best-effort rollback of a copied evidence binary after metadata failure."""
+    store.discard_stored_copy(evidence_id)
+
+
 def _handle_evidence_register(context: SecurityCommandContext) -> SecurityCommandResult:
     """Register evidence by copying bytes and recording metadata plus custody."""
     fields = split_delimited_fields(extract_command_argument(context.message), 3)
@@ -782,6 +787,7 @@ def _handle_evidence_register(context: SecurityCommandContext) -> SecurityComman
 
     path_argument, title, description = fields
     evidence_id = str(uuid4())
+    copied_bytes = False
 
     try:
         sha256_hash, source_size, original_filename = (
@@ -790,6 +796,7 @@ def _handle_evidence_register(context: SecurityCommandContext) -> SecurityComman
                 evidence_id=evidence_id,
             )
         )
+        copied_bytes = True
         evidence = create_evidence_record(
             evidence_id=evidence_id,
             evidence_type="file",
@@ -827,8 +834,12 @@ def _handle_evidence_register(context: SecurityCommandContext) -> SecurityComman
         SecurityFieldTooLongError,
         SecurityValidationError,
     ):
+        if copied_bytes:
+            _rollback_copied_evidence(context.evidence_store, evidence_id)
         return SecurityCommandResult(message=EVIDENCE_REGISTER_USAGE)
     except IncidentStorageError as error:
+        if copied_bytes:
+            _rollback_copied_evidence(context.evidence_store, evidence_id)
         return SecurityCommandResult(message=error.user_message)
 
     logger.info(

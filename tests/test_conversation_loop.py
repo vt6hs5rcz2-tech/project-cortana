@@ -12,6 +12,7 @@ from src.ai_service import OpenAIClient
 from src.commands import HELP_TEXT
 from src.conversation import ConversationHistory, MESSAGE_TOO_LONG, SHUTDOWN_MESSAGE, STARTUP_GREETING
 from src.conversation_loop import handle_message, process_conversation_turn, run_conversation_loop
+from src.conversation_intelligence import ConversationIntelligence
 from src.conversation_state import ConversationState
 from src.config import MAX_CONVERSATION_MESSAGE_CHARS
 from src.document_chunker import DocumentChunker
@@ -844,6 +845,39 @@ def test_process_conversation_turn_rejects_oversized_message(
         assert history.turns == []
         assert state.snapshot() == prior
     assert calls["count"] == 0
+
+
+def test_failed_ai_restore_reproduces_valid_prior_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed OpenAI turns roll ConversationState back to the pre-interpret snapshot."""
+    state = ConversationState()
+    state.set_active_goal("schedule the review")
+    state.set_unresolved_question("Which day works?")
+    state.set_offered_options(("Monday", "Tuesday"))
+    prior = state.snapshot()
+
+    def fake_generate_response(**kwargs: object) -> str:
+        raise RuntimeError("simulated AI failure")
+
+    monkeypatch.setattr(
+        "src.conversation_loop.generate_response",
+        fake_generate_response,
+    )
+    answer = process_conversation_turn(
+        client=FAKE_CLIENT,
+        settings=Settings(openai_api_key="test-api-key", openai_model="test-model"),
+        user_message="Please rotate the SSH keys on the jump host",
+        logger=FakeLogger(),
+        conversation_history=ConversationHistory(),
+        conversation_state=state,
+        conversation_intelligence=ConversationIntelligence(),
+    )
+    assert answer is None
+    assert state.snapshot() == prior
+    assert state.unresolved_question == "Which day works?"
+    assert state.waiting_for_user is True
+    assert state.offered_options == ("Monday", "Tuesday")
 
 
 def test_process_conversation_turn_unicode_at_limit_is_accepted(

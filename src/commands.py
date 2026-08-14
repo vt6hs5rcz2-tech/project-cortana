@@ -295,7 +295,7 @@ SUPPORTED_COMMANDS = frozenset(
 HELP_TEXT = """Cortana: Available commands:
   /help                 - List available commands and brief descriptions
   /status               - Show safe local session information
-  /clear                - Clear in-memory conversation history for this session
+  /clear                - Clear session conversation context, including recalled memories
   /remember             - Save one explicit persistent memory
   /memories             - List saved persistent memories
   /forget               - Delete one saved memory by ID
@@ -429,14 +429,15 @@ ABOUT_TEXT = (
 )
 
 CLEAR_CONFIRMATION = (
-    "Cortana: Conversation history, conversational state, and the latest "
-    "grounded source manifest have been cleared. Incident records and "
-    "evidence were left unchanged."
+    "Cortana: Conversation history, conversational state, recalled active "
+    "memories, and the latest grounded source manifest have been cleared. "
+    "Persistent memories, incident records, and evidence were left unchanged."
 )
 CLEAR_ALREADY_EMPTY = (
     "Cortana: Conversation history is already empty. "
-    "Conversational state and any grounded source manifest have also been "
-    "cleared. Incident records and evidence were left unchanged."
+    "Conversational state, recalled active memories, and any grounded source "
+    "manifest have also been cleared. Persistent memories, incident records, "
+    "and evidence were left unchanged."
 )
 
 REMEMBER_MISSING_TEXT = "Cortana: Please provide text to remember. Usage: /remember <text>"
@@ -1363,6 +1364,7 @@ def _handle_clear(context: CommandContext) -> CommandResult:
             retrieval_session=context.retrieval_session,
             conversation_state=context.conversation_state,
             speech_delivery_state=context.speech_delivery_state,
+            active_memory_context=context.active_memory_context,
         ),
     )
 
@@ -2252,11 +2254,16 @@ def format_status(
         "  Dry-run enforcement: "
         f"{'enabled' if TOOL_DRY_RUN_ENFORCEMENT_ENABLED else 'disabled'}\n"
         "  Arbitrary shell execution: "
-        f"{'enabled' if ARBITRARY_SHELL_EXECUTION_ENABLED else 'disabled'}\n"
+        f"{'enabled' if ARBITRARY_SHELL_EXECUTION_ENABLED else 'disabled'}"
+        " [ENFORCED]\n"
         "  External tool execution: "
-        f"{'enabled' if EXTERNAL_TOOL_EXECUTION_ENABLED else 'disabled'}\n"
+        f"{'enabled' if EXTERNAL_TOOL_EXECUTION_ENABLED else 'disabled'}"
+        " [ENFORCED]\n"
         "  Autonomous remediation: "
-        f"{'enabled' if AUTONOMOUS_REMEDIATION_ENABLED else 'disabled'}\n"
+        f"{'enabled' if AUTONOMOUS_REMEDIATION_ENABLED else 'disabled'}"
+        " [ENFORCED]\n"
+        "  Tool AI-context injection: reserved (not implemented)\n"
+        "  Process child startup timeout: reserved (unused; no startup handshake)\n"
         f"  Active scopes: {active_scope_count}\n"
         f"  Pending approvals: {pending_approval_count}\n"
         "  Tool audit persistence: "
@@ -2341,8 +2348,9 @@ def clear_conversation_history(
     retrieval_session: RetrievalSession | None = None,
     conversation_state: ConversationState | None = None,
     speech_delivery_state: SpeechDeliveryState | None = None,
+    active_memory_context: ActiveMemoryContext | None = None,
 ) -> str:
-    """Clear in-memory history and grounded source manifest for the session."""
+    """Clear in-memory session context without deleting persistent memories."""
     history_was_empty = not conversation_history.turns
     conversation_history.clear()
     if retrieval_session is not None:
@@ -2351,6 +2359,8 @@ def clear_conversation_history(
         conversation_state.reset()
     if speech_delivery_state is not None:
         speech_delivery_state.reset()
+    if active_memory_context is not None:
+        active_memory_context.clear()
 
     if history_was_empty:
         return CLEAR_ALREADY_EMPTY

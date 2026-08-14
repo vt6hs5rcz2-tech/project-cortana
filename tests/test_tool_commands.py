@@ -248,9 +248,14 @@ def test_status_flags_and_privacy(tmp_path: Path) -> None:
         tool_repository=repo,
     )
     assert "Defensive tool framework: enabled" in status
-    assert "Arbitrary shell execution: disabled" in status
-    assert "External tool execution: disabled" in status
-    assert "Autonomous remediation: disabled" in status
+    assert "Arbitrary shell execution: disabled [ENFORCED]" in status
+    assert "External tool execution: disabled [ENFORCED]" in status
+    assert "Autonomous remediation: disabled [ENFORCED]" in status
+    assert "Tool AI-context injection: reserved (not implemented)" in status
+    assert (
+        "Process child startup timeout: reserved (unused; no startup handshake)"
+        in status
+    )
     assert "Process-isolated tool execution: disabled" in status
     assert "Process-isolated tool termination: disabled" in status
     assert "Process resource limits: disabled" in status

@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Protocol
 
-from src.config import MAX_STORED_MEMORIES
+from src.config import MAX_MEMORY_TEXT_LENGTH, MAX_STORED_MEMORIES
 from src.memory import MemoryRecord, create_memory
 
 logger = logging.getLogger("ProjectCortana")
@@ -162,8 +162,14 @@ class JsonMemoryStore:
             raise MemoryStorageError
 
         records: list[MemoryRecord] = []
+        seen_ids: set[str] = set()
         for item in memories_payload:
-            records.append(self._parse_record(item))
+            record = self._parse_record(item)
+            if record.id in seen_ids:
+                logger.error("Memory file contains duplicate memory IDs.")
+                raise MemoryStorageError
+            seen_ids.add(record.id)
+            records.append(record)
         if len(records) > self._max_memories:
             logger.error(
                 "Memory file exceeds configured memory count limit count=%s",
@@ -190,6 +196,10 @@ class JsonMemoryStore:
             or not created_at.strip()
         ):
             logger.error("Memory file contains a malformed memory record.")
+            raise MemoryStorageError
+
+        if len(text) > MAX_MEMORY_TEXT_LENGTH:
+            logger.error("Memory file contains an overlong memory text record.")
             raise MemoryStorageError
 
         return MemoryRecord(

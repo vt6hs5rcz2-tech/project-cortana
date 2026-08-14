@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from dataclasses import dataclass
 from typing import cast
@@ -487,7 +488,18 @@ def test_normalize_user_utterance_is_stable() -> None:
     )
 
 
-def test_guidance_never_authorizes_privileged_action() -> None:
+def test_guidance_authorizes_privileged_action_is_structurally_false() -> None:
+    """Structural contract: the property is hardcoded False, not a call-graph check.
+
+    Isolation that interpret cannot reach executors is covered by
+    ``tests/test_conversation_intelligence_isolation.py`` and Deep Audit F5.
+    """
+    source = inspect.getsource(ConversationalGuidance.authorizes_privileged_action.fget)
+    assert source.count("return False") >= 1
+    assert "executor" not in source
+    signature = inspect.signature(ConversationIntelligence.interpret)
+    assert "tool_executor" not in signature.parameters
+    assert "workflow_executor" not in signature.parameters
     guidance = _intel().interpret("yes", _state_with_options("a", "b"))
     assert guidance.authorizes_privileged_action is False
 
@@ -559,3 +571,96 @@ def test_generate_response_rejects_non_developer_conversational_context() -> Non
         assert "developer role" in str(error).casefold()
     else:
         raise AssertionError("expected ValueError for non-developer role")
+
+
+def _assert_invariant_a(state: ConversationState) -> None:
+    if state.unresolved_question:
+        assert state.waiting_for_user is True
+
+
+def test_incomplete_thought_keeps_pending_question_coherent() -> None:
+    intel = _intel()
+    state = ConversationState()
+    state.set_unresolved_question("Which day works?")
+    intel.interpret("I was checking the logs and", state)
+    assert state.unresolved_question is not None
+    _assert_invariant_a(state)
+
+
+def test_i_meant_correction_consumes_pending_question() -> None:
+    intel = _intel()
+    state = ConversationState()
+    state.set_active_goal("schedule the briefing for Monday")
+    state.set_unresolved_question("Which day works?")
+    intel.interpret("I meant Tuesday", state)
+    assert state.unresolved_question is None
+    assert state.waiting_for_user is False
+    assert state.active_goal is not None
+    assert "tuesday" in state.active_goal.casefold()
+    _assert_invariant_a(state)
+
+
+def test_bare_date_word_consumes_pending_question() -> None:
+    intel = _intel()
+    state = ConversationState()
+    state.set_active_goal("schedule the review")
+    state.set_unresolved_question("Which day works?")
+    intel.interpret("Tuesday", state)
+    assert state.unresolved_question is None
+    assert state.waiting_for_user is False
+    _assert_invariant_a(state)
+
+
+def test_prefixed_date_correction_consumes_pending_question() -> None:
+    intel = _intel()
+    state = ConversationState()
+    state.set_active_goal("schedule the review")
+    state.set_unresolved_question("Which day works?")
+    intel.interpret("actually, Tuesday", state)
+    assert state.unresolved_question is None
+    assert state.waiting_for_user is False
+    _assert_invariant_a(state)
+
+
+def test_new_complete_request_clears_stale_option_thread() -> None:
+    intel = _intel()
+    state = _state_with_options("Alpha", "Beta")
+    state.replace_option_referents(("Alpha", "Beta"))
+    intel.interpret("Please rotate the SSH keys on the jump host", state)
+    assert state.offered_options == ()
+    follow = intel.interpret("the second one", state)
+    assert follow.preserves_uncertainty is True
+    assert follow.effective_user_text == "the second one"
+    assert "Beta" not in (follow.resolved_follow_up or "")
+
+
+def test_true_continuation_preserves_offered_options() -> None:
+    intel = _intel()
+    state = _state_with_options("Alpha", "Beta")
+    continue_turn = intel.interpret("continue", state)
+    assert continue_turn.turn_taking == "continuation"
+    assert state.offered_options == ("Alpha", "Beta")
+    follow = intel.interpret("the second one", state)
+    assert follow.effective_user_text == "Beta"
+    assert follow.preserves_uncertainty is False
+
+
+def test_go_back_clears_pending_branch_not_whole_state() -> None:
+    intel = _intel()
+    state = _state_with_options("Alpha", "Beta")
+    state.replace_option_referents(("Alpha", "Beta"))
+    state.set_topic("choose a plan")
+    prior_goal = state.active_goal
+    intel.interpret("go back", state)
+    assert state.unresolved_question is None
+    assert state.waiting_for_user is False
+    assert state.offered_options == ()
+    assert state.latest_correction == "go back"
+    assert state.active_goal == prior_goal
+    assert state.current_topic == "choose a plan"
+    yes = intel.interpret("yes", state)
+    assert yes.preserves_uncertainty is True
+    ordinal = intel.interpret("the second one", state)
+    assert ordinal.preserves_uncertainty is True
+    assert ordinal.effective_user_text == "the second one"
+    _assert_invariant_a(state)

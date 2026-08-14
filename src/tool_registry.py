@@ -167,6 +167,7 @@ def _builtin_tool_definitions() -> list[DefensiveToolDefinition]:
             enabled=True,
             implementation_identifier="impl_system_summary",
             process_isolation="eligible",
+            capability_class="internal-readonly",
         ),
         create_tool_definition(
             tool_id="file-sha256",
@@ -198,6 +199,7 @@ def _builtin_tool_definitions() -> list[DefensiveToolDefinition]:
             enabled=True,
             implementation_identifier="impl_file_sha256",
             process_isolation="eligible",
+            capability_class="internal-readonly",
         ),
         create_tool_definition(
             tool_id="text-search",
@@ -245,6 +247,7 @@ def _builtin_tool_definitions() -> list[DefensiveToolDefinition]:
             enabled=True,
             implementation_identifier="impl_text_search",
             process_isolation="eligible",
+            capability_class="internal-readonly",
         ),
         create_tool_definition(
             tool_id="compare-sha256",
@@ -281,6 +284,7 @@ def _builtin_tool_definitions() -> list[DefensiveToolDefinition]:
             enabled=True,
             implementation_identifier="impl_compare_sha256",
             process_isolation="eligible",
+            capability_class="internal-readonly",
         ),
         create_tool_definition(
             tool_id="incident-summary",
@@ -309,6 +313,7 @@ def _builtin_tool_definitions() -> list[DefensiveToolDefinition]:
             supports_dry_run=True,
             enabled=True,
             implementation_identifier="impl_incident_summary",
+            capability_class="internal-readonly",
         ),
         create_tool_definition(
             tool_id="simulated-log-check",
@@ -347,6 +352,7 @@ def _builtin_tool_definitions() -> list[DefensiveToolDefinition]:
             enabled=True,
             implementation_identifier="impl_simulated_log_check",
             process_isolation="eligible",
+            capability_class="internal-readonly",
         ),
     ]
 

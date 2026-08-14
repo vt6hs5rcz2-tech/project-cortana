@@ -53,27 +53,20 @@ def test_local_wall_rejects_offset_and_z() -> None:
         parse_local_wall_datetime("2026-01-15 09:00+00:00")
 
 
-def test_spring_forward_fold0_behavior_pinned() -> None:
-    # 2026-03-08 02:30 does not exist in America/New_York; fold=0 still
-    # constructs an aware datetime that ZoneInfo normalizes deterministically.
-    utc_iso = local_wall_to_utc_iso(
-        parse_local_wall_datetime("2026-03-08 02:30"),
-        "America/New_York",
-    )
-    local = datetime.fromisoformat(utc_iso.replace("Z", "+00:00")).astimezone(
-        ZoneInfo("America/New_York")
-    )
-    assert local.fold == 0
-    assert utc_iso.endswith("Z")
+def test_spring_forward_nonexistent_time_is_rejected() -> None:
+    with pytest.raises(ReminderValidationError, match="does not exist"):
+        local_wall_to_utc_iso(
+            parse_local_wall_datetime("2026-03-08 02:30"),
+            "America/New_York",
+        )
 
 
-def test_fall_back_fold0_behavior_pinned() -> None:
-    # 2026-11-01 01:30 is ambiguous; fold=0 selects the earlier offset (EDT/-4).
-    utc_iso = local_wall_to_utc_iso(
-        parse_local_wall_datetime("2026-11-01 01:30"),
-        "America/New_York",
-    )
-    assert utc_iso == "2026-11-01T05:30:00.000000Z"
+def test_fall_back_ambiguous_time_is_rejected() -> None:
+    with pytest.raises(ReminderValidationError, match="ambiguous"):
+        local_wall_to_utc_iso(
+            parse_local_wall_datetime("2026-11-01 01:30"),
+            "America/New_York",
+        )
 
 
 def test_recurring_wall_clock_preserved_across_dst() -> None:

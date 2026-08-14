@@ -322,17 +322,17 @@ def test_remember_does_not_auto_activate(tmp_path: Path) -> None:
     assert active.active_count == 0
 
 
-def test_clear_does_not_remove_active_memories(tmp_path: Path) -> None:
-    """ /clear should clear conversation history only. """
+def test_clear_releases_active_memories_but_keeps_persistent(tmp_path: Path) -> None:
+    """ /clear should drop session recall without deleting persistent memories. """
     store = _memory_store(tmp_path)
-    record = store.add_memory("Stay active")
+    record = store.add_memory("Stay stored")
     active = ActiveMemoryContext()
     active.activate(record)
     history = ConversationHistory()
     history.add_user_message("Hello")
     history.add_assistant_message("Hi")
 
-    result, _, active, history = _run(
+    result, store, active, history = _run(
         "/clear",
         tmp_path=tmp_path,
         store=store,
@@ -342,7 +342,8 @@ def test_clear_does_not_remove_active_memories(tmp_path: Path) -> None:
 
     assert result.message == CLEAR_CONFIRMATION
     assert history.turns == []
-    assert active.list_active_ids() == [record.id]
+    assert active.active_count == 0
+    assert [memory.id for memory in store.list_memories()] == [record.id]
 
 
 def test_forget_removes_currently_active_memory(tmp_path: Path) -> None:

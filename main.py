@@ -36,7 +36,7 @@ from src.memory_store import JsonMemoryStore
 from src.openai_client import create_openai_client
 from src.retrieval_session import RetrievalSession
 from src.settings import Settings, load_settings
-from src.calendar_commands import create_default_calendar_service
+from src.calendar_commands import try_create_calendar_service
 from src.reminder_commands import create_default_reminder_service
 from src.study_commands import create_default_study_service
 from src.study_service import StudyPartnerService
@@ -124,7 +124,7 @@ def main() -> None:
     reminder_service = create_default_reminder_service(
         repository_file_path=get_default_reminder_repository_file_path(),
     )
-    calendar_service = create_default_calendar_service(
+    calendar_service = try_create_calendar_service(
         repository_file_path=get_default_calendar_repository_file_path(),
         oauth_client_file=settings.google_oauth_client_file,
     )

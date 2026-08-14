@@ -31,6 +31,7 @@ from src.tool_policy import (
     assert_executable,
     assert_requestable,
     initial_request_status,
+    tool_is_side_effecting,
 )
 from src.tool_registry import ToolRegistry
 from src.tool_repository import ToolControlRepository
@@ -50,11 +51,17 @@ from src.tool_scope import (
 )
 from src.workflow_audit import create_workflow_audit_entry
 from src.workflow_common import (
+    SIDE_EFFECT_CLAIM_FAILED_ERROR_CODE,
+    SIDE_EFFECT_CLAIM_FAILED_MESSAGE,
+    SIDE_EFFECT_REEXECUTION_ERROR_CODE,
+    SIDE_EFFECT_REEXECUTION_MESSAGE,
     SystemWorkflowClock,
     WorkflowAuthorizationError,
     WorkflowClock,
     WorkflowPolicyError,
+    WorkflowStorageError,
     WorkflowValidationError,
+    compute_workflow_side_effect_key,
 )
 from src.workflow_definition import WorkflowDefinition, WorkflowStepDefinition
 from src.workflow_registry import WorkflowRegistry
@@ -436,6 +443,13 @@ class WorkflowExecutor:
                 # Revalidate immediately before execution.
                 assert_approval_allows_execution(approval, tool_request)
 
+            if not request.dry_run and tool_is_side_effecting(definition):
+                self._claim_side_effecting_step(
+                    request=request,
+                    workflow=workflow,
+                    step=step,
+                )
+
             if request.dry_run:
                 tool_result = self._tool_executor.plan_dry_run(
                     definition=definition,
@@ -574,6 +588,14 @@ class WorkflowExecutor:
             ToolPolicyError,
         ) as error:
             error_code = type(error).__name__
+            error_message = _safe_failure_message(error)
+            if isinstance(error, WorkflowPolicyError):
+                if str(error) == SIDE_EFFECT_REEXECUTION_MESSAGE:
+                    error_code = SIDE_EFFECT_REEXECUTION_ERROR_CODE
+                    error_message = SIDE_EFFECT_REEXECUTION_MESSAGE
+                elif str(error) == SIDE_EFFECT_CLAIM_FAILED_MESSAGE:
+                    error_code = SIDE_EFFECT_CLAIM_FAILED_ERROR_CODE
+                    error_message = SIDE_EFFECT_CLAIM_FAILED_MESSAGE
             step_result = create_workflow_step_result(
                 step_id=step.step_id,
                 tool_id=step.tool_id,
@@ -582,7 +604,7 @@ class WorkflowExecutor:
                 started_timestamp=started_at,
                 completed_timestamp=self._clock.utc_now_iso(),
                 error_code=error_code,
-                error_message=_safe_failure_message(error),
+                error_message=error_message,
                 dry_run=request.dry_run,
             )
             self._audit(
@@ -706,6 +728,39 @@ class WorkflowExecutor:
             },
         )
         return approval
+
+    def _claim_side_effecting_step(
+        self,
+        *,
+        request: WorkflowRunRequest,
+        workflow: WorkflowDefinition,
+        step: WorkflowStepDefinition,
+    ) -> None:
+        """Record a side-effect claim before live execution.
+
+        The claim is persisted before ``execute`` so a later crash or failed
+        run-completion write cannot silently replay the same operation.
+        Presence of the marker means the step was already attempted; it does
+        not assert that the prior side effect succeeded.
+        """
+        effect_key = compute_workflow_side_effect_key(
+            playbook_name=workflow.name,
+            playbook_version=workflow.version,
+            step_id=step.step_id,
+            tool_id=step.tool_id,
+            static_parameters=step.static_parameters,
+            operation_id=request.operation_id,
+        )
+        if self._run_repository.has_side_effect_key(effect_key):
+            raise WorkflowPolicyError(SIDE_EFFECT_REEXECUTION_MESSAGE)
+        try:
+            self._run_repository.claim_side_effect_key(
+                effect_key,
+                playbook_name=workflow.name,
+                step_id=step.step_id,
+            )
+        except WorkflowStorageError as error:
+            raise WorkflowPolicyError(SIDE_EFFECT_CLAIM_FAILED_MESSAGE) from error
 
     def _assert_tool_currently_allowed(
         self,

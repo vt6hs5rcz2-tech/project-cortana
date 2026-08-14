@@ -404,6 +404,25 @@ def test_slash_remember_remains_authoritative_for_deictic_looking_text(
     assert [item.text for item in store.list_memories()] == ["this forever"]
 
 
+def test_slash_remember_this_thing_remains_explicit_control_plane(
+    tmp_path: Path,
+) -> None:
+    """Slash /remember this thing stays explicit persistence, unlike NL memory."""
+    store = _memory_store(tmp_path)
+    result = handle_slash_command(
+        "/remember this thing",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
+        memory_store=store,
+    )
+    assert result.message is not None
+    assert "Memory saved" in result.message
+    assert [item.text for item in store.list_memories()] == ["this thing"]
+
+
 def test_remember_preserves_argument_capitalization(tmp_path: Path) -> None:
     """Memory text should preserve the user's original capitalization."""
     store = _memory_store(tmp_path)

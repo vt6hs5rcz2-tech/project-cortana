@@ -10,7 +10,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from src.config import INCIDENT_REPOSITORY_SCHEMA_VERSION
+from src.config import (
+    INCIDENT_REPOSITORY_SCHEMA_VERSION,
+    MAX_STORED_CUSTODY_ENTRIES,
+    MAX_STORED_EVIDENCE_RECORDS,
+    MAX_STORED_INCIDENT_EVENTS,
+    MAX_STORED_INCIDENT_INDICATORS,
+    MAX_STORED_INCIDENT_NOTES,
+    MAX_STORED_INCIDENTS,
+)
 from src.security_custody import ChainOfCustodyEntry, validate_custody_entry
 from src.security_event import (
     SecurityEvent,
@@ -52,6 +60,16 @@ class IncidentStorageError(RuntimeError):
 
 class IncidentRelationshipError(IncidentStorageError):
     """Raised when a relationship change is invalid or inconsistent."""
+
+
+class IncidentCountLimitError(IncidentStorageError):
+    """Raised when adding an incident-foundation record would exceed a cap."""
+
+    def __init__(self, *, collection: str, max_count: int) -> None:
+        super().__init__(
+            f"Cortana: Incident {collection} capacity reached. "
+            f"A maximum of {max_count} can be stored."
+        )
 
 
 @dataclass
@@ -181,8 +199,33 @@ class IncidentRepository(Protocol):
 class JsonIncidentRepository:
     """UTF-8 JSON-backed coordinated repository for incident foundation data."""
 
-    def __init__(self, file_path: Path) -> None:
+    def __init__(
+        self,
+        file_path: Path,
+        *,
+        max_incidents: int = MAX_STORED_INCIDENTS,
+        max_events: int = MAX_STORED_INCIDENT_EVENTS,
+        max_indicators: int = MAX_STORED_INCIDENT_INDICATORS,
+        max_evidence: int = MAX_STORED_EVIDENCE_RECORDS,
+        max_notes: int = MAX_STORED_INCIDENT_NOTES,
+        max_custody_entries: int = MAX_STORED_CUSTODY_ENTRIES,
+    ) -> None:
+        if min(
+            max_incidents,
+            max_events,
+            max_indicators,
+            max_evidence,
+            max_notes,
+            max_custody_entries,
+        ) < 1:
+            raise ValueError("Incident repository retention caps must be at least 1.")
         self._file_path = file_path
+        self._max_incidents = max_incidents
+        self._max_events = max_events
+        self._max_indicators = max_indicators
+        self._max_evidence = max_evidence
+        self._max_notes = max_notes
+        self._max_custody_entries = max_custody_entries
         self._state: _RepositoryState | None = None
         self._load_error: IncidentStorageError | None = None
 
@@ -213,6 +256,7 @@ class JsonIncidentRepository:
                 raise IncidentRelationshipError(
                     "Cortana: Related incident was not found."
                 )
+        self._assert_can_add(len(state.events), self._max_events, "event")
         state.events.append(validated)
         self._persist(state)
         return validated
@@ -248,6 +292,7 @@ class JsonIncidentRepository:
         if any(item.incident_id == validated.incident_id for item in state.incidents):
             raise IncidentStorageError(INCIDENT_LOAD_ERROR_MESSAGE)
         self._assert_ids_exist(state, event_ids=validated.event_ids)
+        self._assert_can_add(len(state.incidents), self._max_incidents, "incident")
         state.incidents.append(validated)
         self._persist(state)
         return validated
@@ -430,6 +475,7 @@ class JsonIncidentRepository:
             event_ids=validated.related_event_ids,
             incident_ids=validated.related_incident_ids,
         )
+        self._assert_can_add(len(state.indicators), self._max_indicators, "indicator")
         state.indicators.append(validated)
         self._persist(state)
         return validated
@@ -476,6 +522,12 @@ class JsonIncidentRepository:
             validated,
             chain_of_custody_entry_ids=linked_ids,
         )
+        self._assert_can_add(len(state.evidence), self._max_evidence, "evidence")
+        if len(state.custody_entries) + len(validated_entries) > self._max_custody_entries:
+            raise IncidentCountLimitError(
+                collection="custody entry",
+                max_count=self._max_custody_entries,
+            )
         state.evidence.append(validated)
         state.custody_entries.extend(validated_entries)
         self._persist(state)
@@ -499,6 +551,11 @@ class JsonIncidentRepository:
             )
         if any(item.entry_id == validated.entry_id for item in state.custody_entries):
             raise IncidentStorageError(INCIDENT_LOAD_ERROR_MESSAGE)
+        self._assert_can_add(
+            len(state.custody_entries),
+            self._max_custody_entries,
+            "custody entry",
+        )
 
         updated_evidence = replace_evidence_record(
             evidence,
@@ -534,6 +591,7 @@ class JsonIncidentRepository:
             raise IncidentRelationshipError("Cortana: Incident was not found.")
         if any(item.note_id == validated.note_id for item in state.notes):
             raise IncidentStorageError(INCIDENT_LOAD_ERROR_MESSAGE)
+        self._assert_can_add(len(state.notes), self._max_notes, "note")
 
         updated_incident = replace_security_incident(
             incident,
@@ -653,6 +711,7 @@ class JsonIncidentRepository:
             notes=self._parse_notes(payload.get("notes")),
         )
         self._validate_referential_integrity(state)
+        self._assert_loaded_collection_caps(state)
         return state
 
     def _parse_events(self, payload: object) -> list[SecurityEvent]:
@@ -980,6 +1039,28 @@ class JsonIncidentRepository:
                         "Incident repository has inconsistent event-incident link."
                     )
                     raise IncidentStorageError
+
+    def _assert_can_add(self, current_count: int, max_count: int, collection: str) -> None:
+        if current_count >= max_count:
+            raise IncidentCountLimitError(collection=collection, max_count=max_count)
+
+    def _assert_loaded_collection_caps(self, state: _RepositoryState) -> None:
+        checks = (
+            (state.incidents, self._max_incidents, "incidents"),
+            (state.events, self._max_events, "events"),
+            (state.indicators, self._max_indicators, "indicators"),
+            (state.evidence, self._max_evidence, "evidence"),
+            (state.notes, self._max_notes, "notes"),
+            (state.custody_entries, self._max_custody_entries, "custody_entries"),
+        )
+        for collection, max_count, name in checks:
+            if len(collection) > max_count:
+                logger.error(
+                    "Incident repository exceeds %s cap count=%s",
+                    name,
+                    len(collection),
+                )
+                raise IncidentStorageError
 
     def _persist(self, state: _RepositoryState) -> None:
         """Atomically write the coordinated repository as UTF-8 JSON."""

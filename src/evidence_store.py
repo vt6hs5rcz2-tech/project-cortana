@@ -50,6 +50,9 @@ class EvidenceStore(Protocol):
     def has_stored_copy(self, evidence_id: str) -> bool:
         """Return whether a stored evidence object exists for the ID."""
 
+    def discard_stored_copy(self, evidence_id: str) -> None:
+        """Best-effort delete one stored evidence object after a failed persist."""
+
     def resolve_stored_evidence_path(self, evidence_id: str) -> Path:
         """Return the absolute path of one stored evidence object for tool use.
 
@@ -168,6 +171,28 @@ class LocalEvidenceStore:
             return path.exists() and not path.is_symlink() and path.is_file()
         except OSError:
             return False
+
+    def discard_stored_copy(self, evidence_id: str) -> None:
+        """Best-effort delete one stored evidence object.
+
+        Logs ``error_type`` only. Does not raise, so a rollback failure cannot
+        hide the original metadata-persist error.
+        """
+        try:
+            path = self._object_path(_canonical_evidence_id(evidence_id))
+        except EvidenceStoreError:
+            logger.error(
+                "Evidence rollback skipped invalid evidence_id error_type=%s",
+                "EvidenceStoreError",
+            )
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as error:
+            logger.error(
+                "Evidence rollback unlink failed error_type=%s",
+                type(error).__name__,
+            )
 
     def resolve_stored_evidence_path(self, evidence_id: str) -> Path:
         """Return a safe absolute path to one existing stored evidence object."""

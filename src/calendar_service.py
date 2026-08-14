@@ -11,17 +11,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn, cast
 
-from google.oauth2.credentials import Credentials
-
-from src.calendar_google import (
-    GoogleCalendarProvider,
-    credentials_from_refresh_token,
-    revoke_google_refresh_token,
-    run_google_oauth_flow,
-    validate_google_oauth_client_file,
-)
 from src.calendar_models import (
     PRIMARY_CALENDAR_ID,
     CalendarAccount,
@@ -61,11 +52,53 @@ from src.secret_store import (
     google_refresh_token_secret_key,
 )
 from src.tool_common import parse_utc_timestamp, validate_uuid
+from src.user_facing import cortana_domain_message
 
 logger = logging.getLogger("ProjectCortana")
 
-ProviderFactory = Callable[[Credentials], CalendarProvider]
-OAuthFlowRunner = Callable[[Path], Credentials]
+ProviderFactory = Callable[[object], CalendarProvider]
+OAuthFlowRunner = Callable[[Path], object]
+
+CALENDAR_UNAVAILABLE_MESSAGE = (
+    "Cortana: Calendar is unavailable because optional dependencies are missing."
+)
+
+
+def _calendar_validation_message(error: BaseException) -> str:
+    return cortana_domain_message(
+        error,
+        fallback="Cortana: I couldn't complete that calendar request.",
+    )
+
+
+def optional_calendar_dependencies_available() -> bool:
+    """Return True when optional Google and keyring packages can be imported."""
+    try:
+        import google.oauth2.credentials  # noqa: F401
+        import keyring  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _default_google_provider(credentials: object) -> CalendarProvider:
+    from src.calendar_google import GoogleCalendarProvider
+
+    return GoogleCalendarProvider(cast(Any, credentials))
+
+
+def _default_oauth_flow(client_file: Path) -> object:
+    from src.calendar_google import run_google_oauth_flow
+
+    return run_google_oauth_flow(client_file)
+
+
+def _calendar_unavailable_error() -> CalendarError:
+    return CalendarError(
+        "Optional calendar dependencies are unavailable.",
+        category="validation_error",
+        user_message=CALENDAR_UNAVAILABLE_MESSAGE,
+    )
 
 
 @dataclass(frozen=True)
@@ -96,10 +129,8 @@ class CalendarService:
         self._secret_store = secret_store
         self._oauth_client_file = oauth_client_file
         self._clock = clock or SystemCalendarClock()
-        self._provider_factory = provider_factory or (
-            lambda credentials: GoogleCalendarProvider(credentials)
-        )
-        self._oauth_flow_runner = oauth_flow_runner or run_google_oauth_flow
+        self._provider_factory = provider_factory or _default_google_provider
+        self._oauth_flow_runner = oauth_flow_runner or _default_oauth_flow
 
     @property
     def clock(self) -> CalendarClock:
@@ -118,8 +149,11 @@ class CalendarService:
                 ),
             )
         client_file = self._require_oauth_client_file()
-        credentials = self._oauth_flow_runner(client_file)
-        refresh_token = credentials.refresh_token
+        try:
+            credentials = self._oauth_flow_runner(client_file)
+        except ImportError as error:
+            raise _calendar_unavailable_error() from error
+        refresh_token = getattr(credentials, "refresh_token", None)
         if not refresh_token:
             raise CalendarError(
                 "Missing refresh token after OAuth.",
@@ -311,7 +345,7 @@ class CalendarService:
             raise CalendarError(
                 str(error),
                 category="validation_error",
-                user_message=f"Cortana: {error}",
+                user_message=_calendar_validation_message(error),
             ) from error
         self._assert_no_conflicts(resolved, start_utc, end_utc)
         client_event_id = generate_google_client_event_id()
@@ -368,7 +402,7 @@ class CalendarService:
             raise CalendarError(
                 str(error),
                 category="validation_error",
-                user_message=f"Cortana: {error}",
+                user_message=_calendar_validation_message(error),
             ) from error
         event = self._provider().get_event(resolved, validate_event_id(event_id))
         self._assert_writable_event(event)
@@ -524,6 +558,14 @@ class CalendarService:
         return self._confirm_cancel(proposal)
 
     def status_view(self) -> CalendarStatusView:
+        if not optional_calendar_dependencies_available():
+            return CalendarStatusView(
+                connection_state="unavailable",
+                provider_id=None,
+                default_calendar_id=None,
+                pending_proposal_count=0,
+                unknown_outcome_count=0,
+            )
         account = self._repository.get_account()
         proposals = self._repository.list_proposals()
         pending = sum(1 for item in proposals if item.status == "pending")
@@ -976,7 +1018,10 @@ class CalendarService:
                     "Desktop OAuth client JSON path."
                 ),
             )
-        return validate_google_oauth_client_file(self._oauth_client_file)
+        try:
+            return cast(Path, validate_google_oauth_client_file(self._oauth_client_file))
+        except ImportError as error:
+            raise _calendar_unavailable_error() from error
 
     def _provider(self) -> CalendarProvider:
         account = self._require_usable_account()
@@ -1002,11 +1047,16 @@ class CalendarService:
                 client_secrets_file=client_file,
                 refresh_token=refresh_token,
             )
+        except ImportError as error:
+            raise _calendar_unavailable_error() from error
         except CalendarError as error:
             if error.category == "auth_error":
                 self._mark_needs_reauth(account)
             raise
-        return self._provider_factory(credentials)
+        try:
+            return self._provider_factory(credentials)
+        except ImportError as error:
+            raise _calendar_unavailable_error() from error
 
     def _mark_needs_reauth(self, account: CalendarAccount) -> None:
         updated = replace_calendar_account(account, status="needs_reauth")
@@ -1014,3 +1064,27 @@ class CalendarService:
             self._repository.save_account_with_audits(updated, ())
         except CalendarStorageError:
             logger.error("Failed to persist needs_reauth status")
+
+
+def credentials_from_refresh_token(*args: Any, **kwargs: Any) -> Any:
+    from src.calendar_google import credentials_from_refresh_token as impl
+
+    return impl(*args, **kwargs)
+
+
+def revoke_google_refresh_token(*args: Any, **kwargs: Any) -> Any:
+    from src.calendar_google import revoke_google_refresh_token as impl
+
+    return impl(*args, **kwargs)
+
+
+def run_google_oauth_flow(*args: Any, **kwargs: Any) -> Any:
+    from src.calendar_google import run_google_oauth_flow as impl
+
+    return impl(*args, **kwargs)
+
+
+def validate_google_oauth_client_file(*args: Any, **kwargs: Any) -> Any:
+    from src.calendar_google import validate_google_oauth_client_file as impl
+
+    return impl(*args, **kwargs)

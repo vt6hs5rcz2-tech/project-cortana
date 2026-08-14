@@ -96,7 +96,13 @@ def test_serialized_key_allowlists_exact(tmp_path: Path) -> None:
     repo = JsonWorkflowRunRepository(path)
     repo.save_run(_run(status="completed", step_results=(_step_with_tool_result(),)))
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert set(payload.keys()) == {"version", "runs", "audit_entries"}
+    assert set(payload.keys()) == {
+        "version",
+        "runs",
+        "audit_entries",
+        "completed_effect_keys",
+    }
+    assert payload["completed_effect_keys"] == []
     run_payload = payload["runs"][0]
     assert set(run_payload.keys()) == set(PERSISTED_RUN_KEYS)
     step_payload = run_payload["step_results"][0]
@@ -171,6 +177,35 @@ def test_invalid_and_truncated_json_fail_closed(tmp_path: Path) -> None:
     with pytest.raises(WorkflowStorageError):
         repo2.list_runs()
     assert path.read_text(encoding="utf-8") == before
+
+
+def test_side_effect_markers_round_trip_and_retention(tmp_path: Path) -> None:
+    path = tmp_path / "workflow_runs.json"
+    repo = JsonWorkflowRunRepository(path, max_completed_effect_keys=2)
+    first = "a" * 64
+    second = "b" * 64
+    third = "c" * 64
+    repo.claim_side_effect_key(first, playbook_name="side-effect-once", step_id="mutate")
+    repo.claim_side_effect_key(second, playbook_name="side-effect-once", step_id="mutate")
+    repo.claim_side_effect_key(third, playbook_name="side-effect-once", step_id="mutate")
+    keys = [item.effect_key for item in repo.list_side_effect_markers()]
+    assert keys == [second, third]
+    reloaded = JsonWorkflowRunRepository(path, max_completed_effect_keys=2)
+    assert [item.effect_key for item in reloaded.list_side_effect_markers()] == [
+        second,
+        third,
+    ]
+
+
+def test_pre_idempotency_root_without_effect_keys_still_loads(tmp_path: Path) -> None:
+    path = tmp_path / "workflow_runs.json"
+    path.write_text(
+        json.dumps({"version": 1, "runs": [], "audit_entries": []}),
+        encoding="utf-8",
+    )
+    repo = JsonWorkflowRunRepository(path)
+    assert repo.list_runs() == []
+    assert repo.list_side_effect_markers() == []
 
 
 def test_wrong_schema_unexpected_keys_and_duplicates_rejected(tmp_path: Path) -> None:

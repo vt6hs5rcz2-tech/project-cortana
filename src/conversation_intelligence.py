@@ -380,7 +380,9 @@ class ConversationIntelligence:
             )
 
         if self._looks_incomplete(normalized, original):
-            state.waiting_for_user = False
+            # Incomplete thoughts do not consume a pending question. If one
+            # is stored, Invariant A keeps waiting_for_user True.
+            state.set_waiting_for_user(False)
             return self._build_guidance(
                 original=original,
                 effective=original,
@@ -394,13 +396,16 @@ class ConversationIntelligence:
 
         # Ordinary complete request: update active goal/topic lightly.
         incidental_marker = self._has_incidental_topic_marker(normalized)
-        if state.active_goal is None or (
+        establishes_new_goal = state.active_goal is None or (
             self._substantive_request(normalized) and not incidental_marker
-        ):
+        )
+        if establishes_new_goal:
             state.set_active_goal(original)
             if state.current_topic is None:
                 state.set_topic(self._topic_from_text(original))
-        state.waiting_for_user = False
+            # New complete request is a thread boundary: drop stale options.
+            state.clear_option_thread()
+            state.set_latest_correction(None)
         state.set_unresolved_question(None)
 
         return self._build_guidance(
@@ -588,7 +593,7 @@ class ConversationIntelligence:
                 )
             else:
                 state.set_active_goal(target)
-            state.waiting_for_user = False
+            state.set_unresolved_question(None)
             return self._build_guidance(
                 original=original,
                 effective=target,
@@ -691,7 +696,7 @@ class ConversationIntelligence:
         if _CORRECTION_NOT_ASKED.fullmatch(normalized):
             # Conversational repair only — keep prior goal if present, wait.
             state.set_latest_correction("not what was asked")
-            state.waiting_for_user = True
+            state.set_waiting_for_user(True)
             return self._build_guidance(
                 original=original,
                 effective=original,
@@ -710,6 +715,9 @@ class ConversationIntelligence:
         if _CORRECTION_GO_BACK.fullmatch(normalized):
             prior = state.active_goal or state.current_topic
             state.set_latest_correction("go back")
+            # Abandon the current pending question/option branch only.
+            # Keep topic/goal; do not wipe ConversationState or memory.
+            state.abandon_pending_branch()
             return self._build_guidance(
                 original=original,
                 effective=prior or original,
@@ -733,10 +741,7 @@ class ConversationIntelligence:
             # authority to delete persistent memory or call the memory store.
             state.set_latest_correction("forget that (conversational only)")
             state.set_unresolved_question(None)
-            state.waiting_for_user = False
-            if state.offered_options:
-                state.set_offered_options(())
-            state.replace_option_referents(())
+            state.clear_option_thread()
             return self._build_guidance(
                 original=original,
                 effective=original,
@@ -812,7 +817,6 @@ class ConversationIntelligence:
         state.set_topic(self._topic_from_text(effective))
         state.set_active_goal(effective)
         state.set_unresolved_question(None)
-        state.waiting_for_user = False
         state.set_latest_correction(None)
         state.set_offered_options(())
         state.clear_referents()
@@ -894,7 +898,6 @@ class ConversationIntelligence:
                 if state.unresolved_question
                 else "Affirmative reply to the pending question."
             )
-            state.waiting_for_user = False
             state.set_unresolved_question(None)
             return self._build_guidance(
                 original=original,
@@ -915,7 +918,6 @@ class ConversationIntelligence:
                 if state.unresolved_question
                 else "Negative reply to the pending question."
             )
-            state.waiting_for_user = False
             state.set_unresolved_question(None)
             return self._build_guidance(
                 original=original,
@@ -1097,7 +1099,7 @@ class ConversationIntelligence:
         resolved = f"{goal} clarified to {when}"
         state.set_active_goal(resolved)
         state.set_latest_correction(when)
-        state.waiting_for_user = False
+        state.set_unresolved_question(None)
         return self._build_guidance(
             original=original,
             effective=resolved,

@@ -18,7 +18,11 @@ from src.calendar_repository import (
     CalendarStorageError,
     JsonCalendarRepository,
 )
-from src.calendar_service import CalendarService
+from src.calendar_service import (
+    CALENDAR_UNAVAILABLE_MESSAGE,
+    CalendarService,
+    optional_calendar_dependencies_available,
+)
 from src.config import (
     MAX_CALENDAR_LIST_PREVIEW_CHARS,
     MAX_CALENDAR_LIST_RESULTS,
@@ -27,6 +31,7 @@ from src.config import (
 from src.reminder_commands import split_delimited_fields
 from src.secret_store import KeyringSecretStore, SecretStore, SecretStoreError
 from src.command_argument_utils import extract_command_argument
+from src.user_facing import cortana_domain_message
 
 logger = logging.getLogger("ProjectCortana")
 
@@ -120,6 +125,20 @@ def create_default_calendar_service(
     )
 
 
+def try_create_calendar_service(
+    *,
+    repository_file_path: Path | None = None,
+    secret_store: SecretStore | None = None,
+    oauth_client_file: Path | None = None,
+) -> CalendarService:
+    """Construct calendar service without failing core startup if deps are missing."""
+    return create_default_calendar_service(
+        repository_file_path=repository_file_path,
+        secret_store=secret_store,
+        oauth_client_file=oauth_client_file,
+    )
+
+
 def handle_calendar_command(
     command_name: str,
     context: CalendarCommandContext,
@@ -128,6 +147,8 @@ def handle_calendar_command(
     handler = CALENDAR_COMMAND_HANDLERS.get(command_name)
     if handler is None:
         return None
+    if not optional_calendar_dependencies_available():
+        return CalendarCommandResult(message=CALENDAR_UNAVAILABLE_MESSAGE)
     try:
         return handler(context)
     except CalendarError as error:
@@ -137,7 +158,12 @@ def handle_calendar_command(
     except SecretStoreError as error:
         return CalendarCommandResult(message=error.user_message)
     except CalendarValidationError as error:
-        return CalendarCommandResult(message=f"Cortana: {error}")
+        return CalendarCommandResult(
+            message=cortana_domain_message(
+                error,
+                fallback="Cortana: I couldn't complete that calendar request.",
+            )
+        )
 
 
 def _handle_calendar_connect(context: CalendarCommandContext) -> CalendarCommandResult:

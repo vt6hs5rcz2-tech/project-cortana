@@ -227,3 +227,26 @@ def test_stop_releases_camera_even_when_worker_join_times_out() -> None:
     assert session.is_open is False
     assert session._opened is False
     assert session._capture is None
+    assert session._sequence == 0
+    assert session._consecutive_failures == 0
+
+
+def test_stop_then_start_resets_sequence_and_failures() -> None:
+    first_capture = FakeCapture(frames=[_bgr_solid(32, 32, (0, 0, 255))])
+    captures = [first_capture]
+    session = CameraCaptureSession(capture_factory=lambda: captures[-1])
+    first = session.open_and_capture_first()
+    assert first.sequence == 0
+    session._sequence = 9
+    session._consecutive_failures = 2
+    session.stop()
+    assert session._sequence == 0
+    assert session._consecutive_failures == 0
+    assert session.get_latest_frame() is None
+
+    second_capture = FakeCapture(frames=[_bgr_solid(32, 32, (0, 255, 0))])
+    captures.append(second_capture)
+    restarted = session.open_and_capture_first()
+    assert restarted.sequence == 0
+    assert session._consecutive_failures == 0
+    session.stop()

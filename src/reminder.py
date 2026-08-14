@@ -208,18 +208,38 @@ def parse_local_wall_datetime(value: str, *, field_name: str = "Local time") -> 
         ) from error
 
 
+DST_NONEXISTENT_LOCAL_TIME_MESSAGE = (
+    "That local time does not exist because of daylight saving time. "
+    "Choose another time."
+)
+DST_AMBIGUOUS_LOCAL_TIME_MESSAGE = (
+    "That local time is ambiguous because of daylight saving time. "
+    "Choose another time."
+)
+
+
 def local_wall_to_utc_iso(
     local_wall: datetime,
     timezone_name: str,
 ) -> str:
-    """Convert a naive local wall datetime in an IANA zone to UTC ISO Z."""
+    """Convert a naive local wall datetime in an IANA zone to UTC ISO Z.
+
+    Nonexistent spring-forward times and ambiguous fall-back times are
+    rejected. Reminder and calendar conversion share this function.
+    """
     if local_wall.tzinfo is not None:
         raise ReminderValidationError("Local wall datetime must be naive.")
     zone = ZoneInfo(validate_iana_timezone(timezone_name))
-    # fold=0 selects the earlier offset during ambiguous fall-back periods.
-    aware_local = local_wall.replace(tzinfo=zone, fold=0)
-    utc_value = aware_local.astimezone(timezone.utc)
-    return utc_value.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    fold_zero = local_wall.replace(tzinfo=zone, fold=0)
+    utc_zero = fold_zero.astimezone(timezone.utc)
+    round_trip = utc_zero.astimezone(zone).replace(tzinfo=None)
+    if round_trip != local_wall:
+        raise ReminderValidationError(DST_NONEXISTENT_LOCAL_TIME_MESSAGE)
+    fold_one = local_wall.replace(tzinfo=zone, fold=1)
+    utc_one = fold_one.astimezone(timezone.utc)
+    if utc_zero != utc_one:
+        raise ReminderValidationError(DST_AMBIGUOUS_LOCAL_TIME_MESSAGE)
+    return utc_zero.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def utc_iso_to_local(utc_iso: str, timezone_name: str) -> datetime:
@@ -782,6 +802,8 @@ def _next_daily_after(
             wall_time,
             timezone_name,
         )
+        if candidate_utc is None:
+            continue
         if candidate_utc > after_utc:
             return candidate_utc.isoformat(timespec="microseconds").replace(
                 "+00:00", "Z"
@@ -820,6 +842,8 @@ def _next_weekly_after(
             wall_time,
             timezone_name,
         )
+        if candidate_utc is None:
+            continue
         if candidate_utc > after_utc:
             return candidate_utc.isoformat(timespec="microseconds").replace(
                 "+00:00", "Z"
@@ -855,6 +879,8 @@ def _next_monthly_after(
             wall_time,
             timezone_name,
         )
+        if candidate_utc is None:
+            continue
         if candidate_utc > after_utc:
             return candidate_utc.isoformat(timespec="microseconds").replace(
                 "+00:00", "Z"
@@ -868,7 +894,7 @@ def _local_date_wall_to_utc(
     day: date,
     wall_time: time,
     timezone_name: str,
-) -> datetime:
+) -> datetime | None:
     local_naive = datetime(
         day.year,
         day.month,
@@ -878,7 +904,10 @@ def _local_date_wall_to_utc(
         wall_time.second,
         wall_time.microsecond,
     )
-    iso = local_wall_to_utc_iso(local_naive, timezone_name)
+    try:
+        iso = local_wall_to_utc_iso(local_naive, timezone_name)
+    except ReminderValidationError:
+        return None
     return parse_utc_timestamp(iso)
 
 

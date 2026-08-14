@@ -215,7 +215,7 @@ def test_clear_preserves_incident_data(tmp_path: Path) -> None:
     _run("/event-new low | Keep | Keep me", tmp_path, repo=repo, history=history)
 
     cleared = _run("/clear", tmp_path, repo=repo, history=history)
-    assert "Incident records and evidence were left unchanged" in str(cleared.message)
+    assert "incident records, and evidence were left unchanged" in str(cleared.message)
     assert history.turns == []
     assert repo.event_count() == 1
 

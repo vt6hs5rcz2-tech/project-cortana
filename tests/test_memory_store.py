@@ -251,3 +251,31 @@ def test_memory_store_load_rejects_over_capacity_file(tmp_path: Path) -> None:
 
 def test_max_stored_memories_default_is_five_hundred() -> None:
     assert MAX_STORED_MEMORIES == 500
+
+
+def test_memory_store_load_rejects_overlong_text_without_rewrite(tmp_path: Path) -> None:
+    path = tmp_path / "memories.json"
+    payload = (
+        '{"memories":[{"id":"11111111-1111-1111-1111-111111111111",'
+        f'"text":"{"x" * (MAX_MEMORY_TEXT_LENGTH + 1)}",'
+        '"created_at":"2026-08-14T00:00:00.000000Z"}]}\n'
+    )
+    path.write_text(payload, encoding="utf-8")
+    store = JsonMemoryStore(path)
+    with pytest.raises(MemoryStorageError):
+        store.list_memories()
+    assert path.read_text(encoding="utf-8") == payload
+
+
+def test_memory_store_load_rejects_duplicate_ids_without_rewrite(tmp_path: Path) -> None:
+    path = tmp_path / "memories.json"
+    record = (
+        '{"id":"11111111-1111-1111-1111-111111111111","text":"dup",'
+        '"created_at":"2026-08-14T00:00:00.000000Z"}'
+    )
+    payload = '{"memories":[' + record + "," + record + "]}\n"
+    path.write_text(payload, encoding="utf-8")
+    store = JsonMemoryStore(path)
+    with pytest.raises(MemoryStorageError):
+        store.list_memories()
+    assert path.read_text(encoding="utf-8") == payload

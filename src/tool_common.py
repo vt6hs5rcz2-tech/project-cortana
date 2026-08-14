@@ -90,6 +90,14 @@ ToolProcessIsolation = Literal[
     "eligible",
     "required",
 ]
+ToolCapabilityClass = Literal[
+    "internal-readonly",
+    "internal-mutating",
+    "arbitrary-shell",
+    "external-process",
+    "autonomous-remediation",
+    "ai-context-injection",
+]
 ToolAuditAction = Literal[
     "scope-created",
     "request-created",
@@ -183,6 +191,35 @@ TOOL_EXECUTION_OUTCOMES: frozenset[str] = frozenset(
 )
 TOOL_PROCESS_ISOLATION_VALUES: frozenset[str] = frozenset(
     {"prohibited", "eligible", "required"}
+)
+TOOL_CAPABILITY_CLASSES: frozenset[str] = frozenset(
+    {
+        "internal-readonly",
+        "internal-mutating",
+        "arbitrary-shell",
+        "external-process",
+        "autonomous-remediation",
+        "ai-context-injection",
+    }
+)
+# Replay-safe tools may re-run from step 0 without a new operation instance.
+READ_ONLY_TOOL_CAPABILITY_CLASSES: frozenset[str] = frozenset({"internal-readonly"})
+# Side-effecting classes require a persisted claim plus a new operation
+# instance before the same step can execute again.
+SIDE_EFFECTING_TOOL_CAPABILITY_CLASSES: frozenset[str] = (
+    TOOL_CAPABILITY_CLASSES - READ_ONLY_TOOL_CAPABILITY_CLASSES
+)
+# Capability classes that require a live kill-switch at execution time.
+GATED_TOOL_CAPABILITY_CLASSES: frozenset[str] = frozenset(
+    {
+        "arbitrary-shell",
+        "external-process",
+        "autonomous-remediation",
+    }
+)
+# Declared capabilities with no production implementation.
+RESERVED_TOOL_CAPABILITY_CLASSES: frozenset[str] = frozenset(
+    {"ai-context-injection"}
 )
 TOOL_AUDIT_ACTIONS: frozenset[str] = frozenset(
     {

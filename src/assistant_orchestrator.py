@@ -34,8 +34,22 @@ _MEMORY_WRITE_PATTERN = re.compile(
     r"^remember\s*[:\-]?\s+(?P<text>.+)$",
     re.IGNORECASE,
 )
+_MEMORY_FILLER_SUFFIX = re.compile(
+    r"(?:\s+(?:please|forever|for\s+me|right\s+now))+$",
+    re.IGNORECASE,
+)
+# Match only after filler suffixes are stripped. Must not reject factual
+# clauses that begin with "that", e.g. "that my project is called Cortana".
 _DEICTIC_MEMORY_TEXT = re.compile(
-    r"^(?:this|that|it)(?:\s+forever)?$",
+    r"^(?:"
+    r"this|that|it"
+    r"|this\s+(?:thing|one|fact)"
+    r"|that\s+(?:thing|one|fact)"
+    r"|the\s+above"
+    r"|the\s+previous(?:\s+thing)?"
+    r"|what\s+i\s+just\s+said"
+    r"|what\s+we\s+(?:just\s+)?discussed"
+    r")$",
     re.IGNORECASE,
 )
 _DOCUMENT_SEARCH_PATTERN = re.compile(
@@ -211,9 +225,19 @@ _CALENDAR_SCHEDULE_GUIDANCE = (
 )
 
 
+def _strip_memory_filler_suffixes(text: str) -> str:
+    """Remove trailing polite/duration fillers from a remember payload."""
+    cleaned = text.strip().rstrip(".,!?").strip()
+    while True:
+        next_text = _MEMORY_FILLER_SUFFIX.sub("", cleaned).strip().rstrip(".,!?").strip()
+        if next_text == cleaned:
+            return next_text
+        cleaned = next_text
+
+
 def _is_deictic_memory_text(text: str) -> bool:
     """Return True when the remember payload is too ambiguous to persist."""
-    cleaned = text.strip().rstrip(".,!?").strip()
+    cleaned = _strip_memory_filler_suffixes(text)
     return _DEICTIC_MEMORY_TEXT.fullmatch(cleaned) is not None
 
 
@@ -420,13 +444,13 @@ class UnifiedAssistantOrchestrator:
                 missing_fields=("query",),
                 safe_user_message=_SEARCH_DOCS_MISSING_QUERY,
             )
-        except DocumentRetrievalError as error:
+        except DocumentRetrievalError:
             return OrchestrationResult(
                 domain="documents",
                 action="search",
                 confidence="high",
                 missing_fields=(),
-                safe_user_message=f"Cortana: {error}",
+                safe_user_message="Cortana: I couldn't search the document vault.",
             )
 
         if not results:

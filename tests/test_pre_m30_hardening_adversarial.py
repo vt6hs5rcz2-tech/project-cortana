@@ -277,7 +277,8 @@ def test_harden_forget_that_and_erase_memory_is_conversational_only() -> None:
     )
 
 
-def test_harden_forget_that_part_does_not_touch_persistent_memory() -> None:
+def test_harden_forget_that_part_clears_conversational_state_only() -> None:
+    """Conversational repair only; this test does not open JsonMemoryStore."""
     intel = _intel()
     state = ConversationState()
     state.set_active_goal("review firewall rules")
@@ -551,8 +552,8 @@ def test_harden_response_created_before_new_item_does_not_bind_stale() -> None:
     assembler.store_user_transcript("item_1", "first turn")
     assembler.store_assistant_transcript("resp_1", "first answer")
     assembler.on_response_done(response_id="resp_1", status="completed")
-    assembler.bind_response("resp_2")
     assembler.set_current_user_item("item_2")
+    assembler.bind_response("resp_2")
     assembler.store_user_transcript("item_2", "second turn")
     assembler.store_assistant_transcript("resp_2", "second answer")
     result = assembler.on_response_done(response_id="resp_2", status="completed")
@@ -608,6 +609,14 @@ def test_harden_stale_response_created_after_barge_in_commit_is_rejected() -> No
     )
     assert session._active_response_id == "resp_new"
     assert not session._is_cancelled("resp_new")
+    pcm = base64.b64encode(b"\x02\x00" * 20).decode("ascii")
+    session._on_audio_delta(
+        FakeEvent(
+            type="response.output_audio.delta",
+            response_id="resp_new",
+            delta=pcm,
+        )
+    )
     session._on_response_created(
         FakeEvent(
             type="response.created",
@@ -616,7 +625,7 @@ def test_harden_stale_response_created_after_barge_in_commit_is_rejected() -> No
     )
     assert session._is_cancelled("resp_stale")
     assert session._active_response_id == "resp_new"
-    pcm = base64.b64encode(b"\x02\x00" * 20).decode("ascii")
+    queued_before = session._playback_queue.qsize()
     session._on_audio_delta(
         FakeEvent(
             type="response.output_audio.delta",
@@ -624,11 +633,14 @@ def test_harden_stale_response_created_after_barge_in_commit_is_rejected() -> No
             delta=pcm,
         )
     )
-    assert session._playback_queue.empty()
+    assert session._playback_queue.qsize() == queued_before
 
 
 def test_harden_malformed_response_done_clears_responding() -> None:
     session = _voice_session()
+    session._on_user_audio_committed(
+        FakeEvent(type="input_audio_buffer.committed", item_id="item_1")
+    )
     session._on_response_created(
         FakeEvent(
             type="response.created",
@@ -1372,6 +1384,13 @@ def _assert_m25_session_local_empty(session: RealtimeVoiceSession) -> None:
     assert session._auto_response_pending is False
     assert session._preempt_upcoming_response is False
     assert session._invalid_pending_response_count == 0
+    assert session._expected_generation is None
+    assert session._generations == {}
+    assert len(session._invalidated_unclaimed) == 0
+    assert session._provisional_response_id is None
+    assert session._claimed_response_ids == {}
+    assert len(session._tombstoned_response_ids) == 0
+    assert session._tombstoned_set == set()
     assert session._responding is False
     assert session._active_response_id is None
     assert session._cancelled_set == set()
@@ -1388,6 +1407,8 @@ def _assert_m26_session_local_empty(session: RealtimeMultimodalSession) -> None:
     assert len(session._pending_visual_acks) == 0
     assert session._orphan_visual_ack_debt == 0
     assert session._live_remote_visual_ids == set()
+    assert session._current_remote_visual_item_id is None
+    assert len(session._deleted_remote_visual_ids) == 0
     assert len(session._orphan_done_response_ids) == 0
     assert session._orphan_done_cancelled == {}
     assert len(session._completed_visual_item_ids) == 0
@@ -1517,7 +1538,13 @@ def test_harden_correction_still_uses_okay_acknowledgment() -> None:
     assert guidance.acknowledgment_hint == "okay"
 
 
-def test_harden_m25_cleanup_clears_session_local_residue() -> None:
+def test_harden_cleanup_clears_m25_session_local_state() -> None:
+    """Clears constructed-object M25 fields via ``_cleanup()``.
+
+    This does not start a session thread or provider fake. Thread/socket
+    lifecycle coverage is in ``tests/test_realtime_voice.py`` (``_run_session``
+    / ``FakeConnection``), including ``test_hard_session_timeout_lifecycle``.
+    """
     state = ConversationState()
     state.set_active_goal("keep this shared goal")
     session = _voice_session(state=state)
@@ -1538,7 +1565,8 @@ def test_harden_m25_cleanup_clears_session_local_residue() -> None:
     assert state.active_goal == "keep this shared goal"
 
 
-def test_harden_hundred_m25_session_create_cleanup_cycles() -> None:
+def test_harden_hundred_cleanup_calls_clear_bounded_state() -> None:
+    """Repeated constructed-object ``_cleanup()``; not a start/stop stress test."""
     shared = ConversationState()
     shared.set_topic("shared topic")
     plateaus: list[int] = []

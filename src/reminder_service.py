@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from src.config import MAX_REMINDER_LIST_RESULTS
+from src.user_facing import cortana_domain_message
 from src.reminder import (
     REMINDER_TERMINAL_STATUSES,
     ManualReminderClock,
@@ -106,7 +107,13 @@ class ReminderService:
         except ReminderStorageError:
             raise
         except ReminderValidationError as error:
-            raise ReminderServiceError(str(error), user_message=f"Cortana: {error}") from error
+            raise ReminderServiceError(
+                str(error),
+                user_message=cortana_domain_message(
+                    error,
+                    fallback="Cortana: I couldn't save that reminder.",
+                ),
+            ) from error
 
     def list_scheduled(self, *, limit: int = MAX_REMINDER_LIST_RESULTS) -> list[ReminderView]:
         """List scheduled reminders ordered by due_at then reminder_id."""

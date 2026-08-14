@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from src.config import (
     MAX_WORKFLOW_LIST_PREVIEW_CHARS,
@@ -61,11 +62,14 @@ WORKFLOW_COMMAND_NAMES = frozenset(
 PLAYBOOK_RUN_USAGE = (
     "Cortana: Usage: /playbook-run <name> | <scope-id> "
     "or /playbook-run <name> --execute | <scope-id> "
+    "or /playbook-run <name> --execute --new-operation | <scope-id> "
     "or /playbook-run <name> | <scope-id> | <incident-id> "
-    "or /playbook-run <name> --execute | <scope-id> | <incident-id>"
+    "or /playbook-run <name> --execute | <scope-id> | <incident-id> "
+    "or /playbook-run <name> --execute --new-operation | <scope-id> | <incident-id>"
 )
 PLAYBOOKS_EMPTY = "Cortana: No defensive playbooks are registered."
 EXECUTE_TOKEN = "--execute"
+NEW_OPERATION_TOKEN = "--new-operation"
 INCIDENT_LINKAGE_DISABLED_MESSAGE = (
     "Cortana: Workflow incident linkage is disabled."
 )
@@ -201,10 +205,10 @@ def _handle_playbook_show(context: WorkflowCommandContext) -> WorkflowCommandRes
 
 def _parse_playbook_run_argument(
     argument: str,
-) -> tuple[str, bool, str, str | None] | None:
+) -> tuple[str, bool, bool, str, str | None] | None:
     """Parse playbook-run grammar with optional trailing incident ID.
 
-    Returns ``(playbook_name, dry_run, scope_id, incident_id)``.
+    Returns ``(playbook_name, dry_run, new_operation, scope_id, incident_id)``.
     """
     fields = split_delimited_fields(argument, 3)
     incident_id: str | None
@@ -232,12 +236,21 @@ def _parse_playbook_run_argument(
         playbook_name = name_tokens[0]
         if "|" in playbook_name:
             return None
-        return playbook_name, True, cleaned_scope, incident_id
+        return playbook_name, True, False, cleaned_scope, incident_id
     if len(name_tokens) == 2 and name_tokens[1] == EXECUTE_TOKEN:
         playbook_name = name_tokens[0]
         if "|" in playbook_name:
             return None
-        return playbook_name, False, cleaned_scope, incident_id
+        return playbook_name, False, False, cleaned_scope, incident_id
+    if (
+        len(name_tokens) == 3
+        and name_tokens[1] == EXECUTE_TOKEN
+        and name_tokens[2] == NEW_OPERATION_TOKEN
+    ):
+        playbook_name = name_tokens[0]
+        if "|" in playbook_name:
+            return None
+        return playbook_name, False, True, cleaned_scope, incident_id
     return None
 
 
@@ -250,7 +263,7 @@ def _handle_playbook_run(context: WorkflowCommandContext) -> WorkflowCommandResu
     if parsed is None:
         return WorkflowCommandResult(message=PLAYBOOK_RUN_USAGE)
 
-    playbook_name, dry_run, scope_id, incident_id = parsed
+    playbook_name, dry_run, new_operation, scope_id, incident_id = parsed
 
     if incident_id is not None and not WORKFLOW_INCIDENT_LINKAGE_ENABLED:
         return WorkflowCommandResult(message=INCIDENT_LINKAGE_DISABLED_MESSAGE)
@@ -267,6 +280,7 @@ def _handle_playbook_run(context: WorkflowCommandContext) -> WorkflowCommandResu
             scope_id=scope.scope_id,
             dry_run=dry_run,
             incident_id=incident_id,
+            operation_id=str(uuid4()) if new_operation else None,
         )
         result = context.workflow_executor.run(run_request)
     except (

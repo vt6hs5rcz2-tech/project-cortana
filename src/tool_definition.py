@@ -14,6 +14,9 @@ from src.config import (
     MAX_TOOL_TIMEOUT_SECONDS,
 )
 from src.tool_common import (
+    GATED_TOOL_CAPABILITY_CLASSES,
+    RESERVED_TOOL_CAPABILITY_CLASSES,
+    TOOL_CAPABILITY_CLASSES,
     TOOL_CATEGORIES,
     TOOL_EXECUTION_MODES,
     TOOL_OBJECTIVE_TYPES,
@@ -23,6 +26,7 @@ from src.tool_common import (
     TOOL_TARGET_TYPES,
     BlankToolFieldError,
     InvalidToolEnumError,
+    ToolCapabilityClass,
     ToolCategory,
     ToolExecutionMode,
     ToolObjectiveType,
@@ -93,6 +97,7 @@ class DefensiveToolDefinition:
     enabled: bool
     implementation_identifier: str
     process_isolation: ToolProcessIsolation
+    capability_class: ToolCapabilityClass
 
 
 def create_parameter_definition(
@@ -196,6 +201,7 @@ def create_tool_definition(
     enabled: bool = True,
     implementation_identifier: str,
     process_isolation: str = "prohibited",
+    capability_class: str = "internal-readonly",
 ) -> DefensiveToolDefinition:
     """Create one validated immutable defensive tool definition."""
     cleaned_tool_id = validate_tool_id(tool_id)
@@ -274,6 +280,24 @@ def create_tool_definition(
             "Future-external tools cannot be enabled in this milestone."
         )
 
+    cleaned_capability = validate_controlled_value(
+        capability_class,
+        field_name="tool capability class",
+        allowed=TOOL_CAPABILITY_CLASSES,
+    )
+    if cleaned_capability in GATED_TOOL_CAPABILITY_CLASSES and not requires_approval:
+        raise ToolValidationError(
+            "Gated capability classes require explicit human approval."
+        )
+    if cleaned_capability == "internal-mutating" and not requires_approval:
+        raise ToolValidationError(
+            "Side-effecting internal tools require explicit human approval."
+        )
+    if cleaned_capability in RESERVED_TOOL_CAPABILITY_CLASSES and enabled:
+        raise ToolValidationError(
+            "Reserved capability classes cannot be enabled."
+        )
+
     cleaned_isolation = validate_controlled_value(
         process_isolation,
         field_name="process isolation",
@@ -338,6 +362,7 @@ def create_tool_definition(
         enabled=bool(enabled),
         implementation_identifier=implementation,
         process_isolation=cleaned_isolation,  # type: ignore[arg-type]
+        capability_class=cleaned_capability,  # type: ignore[arg-type]
     )
 
 

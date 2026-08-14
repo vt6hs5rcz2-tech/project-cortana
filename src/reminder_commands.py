@@ -32,6 +32,7 @@ from src.reminder_service import (
     ReminderView,
 )
 from src.command_argument_utils import extract_command_argument
+from src.user_facing import cortana_domain_message
 
 logger = logging.getLogger("ProjectCortana")
 
@@ -140,7 +141,12 @@ def handle_reminder_command(
     except ReminderStorageError as error:
         return ReminderCommandResult(message=error.user_message)
     except ReminderValidationError as error:
-        return ReminderCommandResult(message=f"Cortana: {error}")
+        return ReminderCommandResult(
+            message=cortana_domain_message(
+                error,
+                fallback="Cortana: I couldn't save that reminder.",
+            )
+        )
 
 
 def _handle_reminder_add(context: ReminderCommandContext) -> ReminderCommandResult:

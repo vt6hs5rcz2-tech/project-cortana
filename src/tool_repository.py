@@ -15,7 +15,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from src.config import TOOL_CONTROL_REPOSITORY_SCHEMA_VERSION
+from src.config import (
+    MAX_STORED_TOOL_APPROVALS,
+    MAX_STORED_TOOL_REQUESTS,
+    MAX_STORED_TOOL_RESULTS,
+    MAX_STORED_TOOL_SCOPES,
+    MAX_TOOL_AUDIT_ENTRIES,
+    TOOL_CONTROL_REPOSITORY_SCHEMA_VERSION,
+)
 from src.tool_approval import ToolApprovalRecord, validate_tool_approval
 from src.tool_audit import ToolAuditEntry, create_tool_audit_entry, validate_tool_audit_entry
 from src.tool_common import ToolTargetType, ToolValidationError
@@ -40,6 +47,16 @@ class ToolStorageError(RuntimeError):
     def __init__(self, message: str = TOOL_LOAD_ERROR_MESSAGE) -> None:
         super().__init__(message)
         self.user_message = message
+
+
+class ToolCountLimitError(ToolStorageError):
+    """Raised when adding a tool-control record would exceed a configured cap."""
+
+    def __init__(self, *, collection: str, max_count: int) -> None:
+        super().__init__(
+            f"Cortana: Tool {collection} capacity reached. "
+            f"A maximum of {max_count} can be stored."
+        )
 
 
 @dataclass
@@ -117,8 +134,24 @@ class ToolControlRepository(Protocol):
 class JsonToolControlRepository:
     """UTF-8 JSON-backed coordinated repository for tool-control data."""
 
-    def __init__(self, file_path: Path) -> None:
+    def __init__(
+        self,
+        file_path: Path,
+        *,
+        max_scopes: int = MAX_STORED_TOOL_SCOPES,
+        max_requests: int = MAX_STORED_TOOL_REQUESTS,
+        max_approvals: int = MAX_STORED_TOOL_APPROVALS,
+        max_results: int = MAX_STORED_TOOL_RESULTS,
+        max_audit_entries: int = MAX_TOOL_AUDIT_ENTRIES,
+    ) -> None:
+        if min(max_scopes, max_requests, max_approvals, max_results, max_audit_entries) < 1:
+            raise ValueError("Tool repository retention caps must be at least 1.")
         self._file_path = file_path
+        self._max_scopes = max_scopes
+        self._max_requests = max_requests
+        self._max_approvals = max_approvals
+        self._max_results = max_results
+        self._max_audit_entries = max_audit_entries
         self._state: _ToolRepositoryState | None = None
         self._load_error: ToolStorageError | None = None
 
@@ -141,6 +174,7 @@ class JsonToolControlRepository:
         validated = validate_authorized_scope(scope)
         if any(item.scope_id == validated.scope_id for item in state.scopes):
             raise ToolStorageError("Cortana: Duplicate scope ID rejected.")
+        self._assert_can_add(len(state.scopes), self._max_scopes, "scope")
         state.scopes.append(validated)
         state.audit_entries.append(
             create_tool_audit_entry(
@@ -185,6 +219,7 @@ class JsonToolControlRepository:
             raise ToolStorageError("Cortana: Duplicate request ID rejected.")
         if self._find_scope(state, validated.scope_id) is None:
             raise ToolStorageError("Cortana: Referenced scope was not found.")
+        self._assert_can_add(len(state.requests), self._max_requests, "request")
         state.requests.append(validated)
         state.audit_entries.append(
             create_tool_audit_entry(
@@ -247,6 +282,7 @@ class JsonToolControlRepository:
             raise ToolStorageError(
                 "Cortana: Approval fingerprint does not match the request."
             )
+        self._assert_can_add(len(state.approvals), self._max_approvals, "approval")
         state.approvals.append(validated)
         state.audit_entries.append(
             create_tool_audit_entry(
@@ -276,6 +312,7 @@ class JsonToolControlRepository:
             raise ToolStorageError("Cortana: Duplicate result ID rejected.")
         if self._find_request(state, validated.request_id) is None:
             raise ToolStorageError("Cortana: Referenced request was not found.")
+        self._assert_can_add(len(state.results), self._max_results, "result")
         state.results.append(validated)
 
         action = "dry-run-generated" if validated.dry_run else None
@@ -342,6 +379,7 @@ class JsonToolControlRepository:
                 raise ToolStorageError
             state = self._deserialize_state(payload)
             self._validate_referential_integrity(state)
+            self._assert_loaded_collection_caps(state)
             self._state = state
             return self._state
         except ToolStorageError as error:
@@ -422,7 +460,34 @@ class JsonToolControlRepository:
                 logger.error("Tool-control repository has dangling result request.")
                 raise ToolStorageError
 
+    def _assert_can_add(self, current_count: int, max_count: int, collection: str) -> None:
+        if current_count >= max_count:
+            raise ToolCountLimitError(collection=collection, max_count=max_count)
+
+    def _assert_loaded_collection_caps(self, state: _ToolRepositoryState) -> None:
+        checks = (
+            (state.scopes, self._max_scopes, "scopes"),
+            (state.requests, self._max_requests, "requests"),
+            (state.approvals, self._max_approvals, "approvals"),
+            (state.results, self._max_results, "results"),
+            (state.audit_entries, self._max_audit_entries, "audit_entries"),
+        )
+        for collection, max_count, name in checks:
+            if len(collection) > max_count:
+                logger.error(
+                    "Tool-control repository exceeds %s cap count=%s",
+                    name,
+                    len(collection),
+                )
+                raise ToolStorageError
+
+    def _enforce_audit_retention(self, state: _ToolRepositoryState) -> None:
+        overflow = len(state.audit_entries) - self._max_audit_entries
+        if overflow > 0:
+            del state.audit_entries[:overflow]
+
     def _persist(self, state: _ToolRepositoryState) -> None:
+        self._enforce_audit_retention(state)
         self._validate_referential_integrity(state)
         payload = {
             "version": TOOL_CONTROL_REPOSITORY_SCHEMA_VERSION,

@@ -163,3 +163,11 @@ def test_registry_does_not_load_plugins_dynamically() -> None:
     assert "pkgutil" not in source
     registry = ToolRegistry()
     assert registry.count() == 0
+
+
+def test_builtin_tools_are_not_gated_capabilities() -> None:
+    registry = build_default_tool_registry()
+    for definition in registry.list_all():
+        assert definition.capability_class == "internal-readonly"
+        assert_requestable(definition)
+        assert_executable(definition)

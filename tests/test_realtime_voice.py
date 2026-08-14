@@ -417,6 +417,9 @@ def test_barge_in_aborts_and_rejects_stale_audio() -> None:
         FakeEvent(type="input_audio_buffer.speech_started", item_id="item_a")
     )
     connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="item_a")
+    )
+    connection.socket.push(
         FakeEvent(
             type="response.created",
             response=FakeResponse(id="resp_a", status="in_progress"),
@@ -855,6 +858,9 @@ def test_output_queue_overflow_terminates_session() -> None:
         FakeEvent(type="input_audio_buffer.speech_started", item_id="item_o")
     )
     connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="item_o")
+    )
+    connection.socket.push(
         FakeEvent(
             type="response.created",
             response=FakeResponse(id="resp_o", status="in_progress"),
@@ -1177,6 +1183,9 @@ def test_barge_in_unaffected_by_conversational_intelligence_wiring() -> None:
         FakeEvent(type="input_audio_buffer.speech_started", item_id="item_a")
     )
     connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="item_a")
+    )
+    connection.socket.push(
         FakeEvent(
             type="response.created",
             response=FakeResponse(id="resp_a", status="in_progress"),
@@ -1330,6 +1339,9 @@ def test_m25_barge_in_correction_is_interruption_context_only() -> None:
     state.set_active_goal("schedule the briefing for Monday")
     thread, session, _result_box, _printed = _run_session(
         connection, history, conversation_state=state
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="item_a")
     )
     connection.socket.push(
         FakeEvent(
@@ -1665,6 +1677,9 @@ def test_m25_session_cleanup_drops_interrupted_fingerprint_for_later_session() -
     )
     connection.socket.push(
         FakeEvent(type="input_audio_buffer.speech_started", item_id="item_a")
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="item_a")
     )
     connection.socket.push(
         FakeEvent(

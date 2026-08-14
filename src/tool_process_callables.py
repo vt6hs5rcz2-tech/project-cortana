@@ -47,6 +47,8 @@ def run_system_summary(
         ),
         "architecture": platform.machine() or "unknown",
         "cortana_version": VERSION,
+        # Reported for operator visibility. Enforcement lives in tool_policy
+        # before any implementation, including this child callable, is invoked.
         "capability_flags": {
             "defensive_tool_framework": DEFENSIVE_TOOL_FRAMEWORK_ENABLED,
             "scope_enforcement": TOOL_SCOPE_ENFORCEMENT_ENABLED,

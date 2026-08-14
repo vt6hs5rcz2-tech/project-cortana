@@ -43,7 +43,7 @@ Project Cortana is an early software milestone focused on:
 | Session conversational state (M27) | Current session only | Updated by the conversational-intelligence layer for continuity; cleared with `/clear`; bounded; never permanent memory | Yes, as separated developer metadata only |
 | Speech delivery state (M29) | Current session only | Tracks recent spoken openings, acknowledgments, chunk fingerprints, and interrupted-response fingerprints for pacing/repetition control; cleared with `/clear`; never stores audio | No; used only to shape a spoken delivery copy or advisory pacing instructions |
 | Explicit persistent memory | Survives restarts | Saved only through local `/remember` or explicit NL `remember …` routing | No, unless activated |
-| Active memory context | Current session only | Selected with `/recall`; cleared with `/release`, `/release-all`, or restart | Yes, only while active |
+| Active memory context | Current session only | Selected with `/recall`; cleared with `/clear`, `/release`, `/release-all`, or restart. Persistent memories stay stored. | Yes, only while active |
 | Knowledge Vault documents | Survives restarts | Ingested only through local `/add-document` | No by default |
 | Retrieved document passages | Current request/session only | Selected by `/search-docs` (local), explicit NL document-search routing (lexical only), or grounded AI commands (`/ask-docs`, `/doc-summary`, `/docs-compare`) | Only selected chunks through grounded document AI commands |
 | Security incidents and evidence | Survives restarts | Created only through explicit local Milestone 8 commands | Never in this milestone |
@@ -333,11 +333,14 @@ Behavior and limits:
 - Camera opens only after Realtime connect + session configuration, and only after one valid normalized frame is captured
 - Microphone opens only after that first valid camera frame
 - Local camera capture is approximately 2 FPS into a latest-frame buffer of capacity 1
+- `CameraCaptureSession.stop()` clears the latest frame and resets session-local sequence and consecutive-failure counters so a later start behaves like a fresh capture session
 - No local frame archive, video buffer, or disk-backed camera images
 - Provider disclosure is at most one current normalized PNG (`detail=low`) per user turn; no provider upload during silence
 - Visual frames are bound at `speech_stopped` / `input_audio_buffer.committed` using provider item IDs
 - Session uses server VAD with `create_response=false` and `interrupt_response=true`, then bare `response.create()` after optional visual item insertion. When the finalized transcript arrives in time, Milestone 28 injects pre-response planning first, and Milestone 29 may include spoken-delivery guidance in that same `session.update`. If the transcript does not arrive in time, the same `response.create()` still runs once without transcript-derived M28/M29 guidance.
-- Superseded/completed/cancelled visual conversation items are removed via `conversation.item.delete` from the active Realtime conversation context
+- In-session visual turns are hard-capped (`_MAX_VISUAL_TURNS = 16`). Unacknowledged visual items expire after `REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS` (default 8s). Local frame bytes are released on expiry, eviction, stale, or delete. Late or ambiguous visual acks are discarded and are never bound to a newer turn. Dropping an old visual turn is preferred over retaining unbounded frames or guessing correlation.
+- Visual-ack timeout does not create another assistant response and does not rewrite `ConversationState` from stale visual context.
+- Superseded/completed/cancelled/expired visual conversation items are removed via `conversation.item.delete` from the active Realtime conversation context when a remote id is known. Provider-side deletion is best-effort only.
 - Provider-side retention is governed by provider/service policy; Cortana does not claim provider-side permanent deletion
 - Barge-in remains immediate for local playback; vision work never delays playback abort
 - Local `ConversationHistory` remains text-only finalized transcripts
@@ -349,6 +352,8 @@ Behavior and limits:
 Centralized limits:
 
 - Max visual resolution: 1280×720
+- Max in-session visual turns: 16 (hard cap; oldest expired if all are still in flight)
+- Visual-ack wait: 8 seconds (clamped 0.25–30)
 - Max frame age: 3 seconds (monotonic)
 - Fresh-frame wait at turn binding: 0.75 seconds
 - Consecutive frame-failure threshold: 3
@@ -622,6 +627,7 @@ Supported record types and relationships:
 - Incidents can link many events, indicators, evidence records, and analyst notes
 - Indicators store normalized and original values without reputation lookups
 - Evidence metadata is stored in the incident repository JSON
+- Incident, event, indicator, evidence, note, and custody collections are fail-closed at documented count caps. Over-cap or malformed loads leave the file unchanged.
 - Evidence byte copies are stored separately under a user-local evidence directory
 - Chain-of-custody entries are append-only and tied to evidence records
 - Timelines are derived locally from events, notes, and custody entries and are never persisted as a separate source of truth
@@ -679,12 +685,13 @@ Behavior and limits:
 - No automatic collection, scanning, remediation, containment, malware execution, packet capture, vulnerability scanning, penetration-testing actions, threat-intelligence network lookups, cloud SIEM integrations, or telemetry.
 - Evidence files may be dangerous. Cortana stores opaque bytes and never executes, opens for parsing, imports, or inspects evidence contents beyond hashing and byte-copying.
 - SHA-256 is calculated locally with streaming reads.
+- If evidence metadata persistence fails after the byte copy, Cortana best-effort deletes the copied `.bin` and reports failure. The original source file is left untouched. Rollback unlink failure does not hide the original error.
 - `/evidence-verify` recalculates the stored copy hash, compares it to the recorded digest, appends a custody verification entry, and never repairs or deletes evidence automatically.
 - Chain-of-custody entries are append-only through normal application commands.
 - Repository and evidence storage live in user-local application data, outside the Git repository.
 - Atomic JSON writes prevent partial repository files during a single save.
 - Atomic writes do not coordinate concurrent Cortana processes. Last-writer-wins lost updates remain possible. Use one application instance per incident repository. Cross-process locking is not implemented yet.
-- `/clear` clears conversation history and the grounded source manifest only. It does not delete incidents or evidence.
+- `/clear` clears conversation history, conversational state, recalled active memories, and the grounded source manifest. It does not delete persistent memories, incidents, or evidence.
 - `/remember` does not create incidents or evidence.
 - `/add-document` / Knowledge Vault ingestion does not register evidence.
 - `/ask-docs` does not search incident records.
@@ -725,14 +732,21 @@ Workflow:
 Behavior and limits:
 
 - Tools execute only when registered, allowlisted, scope-validated, and authorized for their risk level.
-- Arbitrary shell execution is disabled. There is no unrestricted PowerShell, cmd, Bash, Python, or subprocess command interface.
-- External tool execution and autonomous remediation are disabled.
+- Every tool declaration has an explicit `capability_class`. Classification is metadata on the definition, not inferred from the tool ID.
+- Capability classes: `internal-readonly` (built-in bounded tools), `arbitrary-shell`, `external-process`, `autonomous-remediation`, and reserved `ai-context-injection`.
+- Kill-switches are enforced at `tool_policy.assert_executable` before any implementation runs. Direct executor invocation and workflow steps use the same gate. Registering a `ToolDefinition` does not bypass it.
+- `ARBITRARY_SHELL_EXECUTION_ENABLED` (default False) is **ENFORCED**. Tools classified `arbitrary-shell` cannot execute while it is False. There is no unrestricted PowerShell, cmd, Bash, Python, or subprocess command interface.
+- `EXTERNAL_TOOL_EXECUTION_ENABLED` (default False) is **ENFORCED**. Tools classified `external-process` cannot execute while it is False. Enabled `future-external` definitions remain structurally rejected.
+- `AUTONOMOUS_REMEDIATION_ENABLED` (default False) is **ENFORCED**. Tools classified `autonomous-remediation` cannot execute while it is False, even with a stored approval. This flag does **not** disable user-explicit, approved bounded read-only tools (`internal-readonly`). Enabling it still requires explicit approval and dry-run; conversational "yes" and tool results cannot approve execution.
+- `TOOL_AI_CONTEXT_INJECTION_ENABLED` (default False) is **RESERVED / not implemented**. No production path injects tool results into AI context. `/status` reports it as reserved. This is distinct from `WORKFLOW_AI_CONTEXT_INJECTION_ENABLED`, which only gates Milestone 12 packet selection.
+- `PROCESS_CHILD_STARTUP_TIMEOUT_SECONDS` is **RESERVED / unused**. There is no child startup handshake. Process-isolated execution waits with the tool's `timeout_seconds` on `communicate()`. `/status` reports it as reserved.
 - The AI does not select tools and does not execute tools.
 - All file-based tools are read-only. They reject symlinks/reparse points and never delete, modify, or execute target files.
 - Built-in tools remain bounded and read-only. With process isolation disabled (default), execution uses in-process worker threads: timeouts stop the caller from waiting, but workers are not forcibly terminated, and late completion is never published.
 - Milestone 13 optionally enables process-isolated execution for a tiny allowlisted subset (`system-summary`, `simulated-log-check`) via `subprocess.Popen` and schema-validated JSON IPC. Milestones 15–16 extend isolation to reviewed file tools under dual gates. See the process-isolation sections below.
 - Evidence and incident systems remain separate unless a request explicitly links an existing incident ID as metadata.
 - Tool-control persistence uses atomic UTF-8 JSON outside the Git repository.
+- Scopes, requests, approvals, and results fail closed at documented count caps. Tool audit entries trim oldest-first on write, matching other bounded audit logs.
 - Atomic writes do not coordinate concurrent Cortana processes. Use one application instance per tool-control repository. Cross-process locking is not implemented yet.
 - Audit records support accountability and do not claim legal forensic certification.
 - Prohibited capabilities remain out of scope: penetration testing, exploit execution, credential dumping, persistence, evasion, malware execution, destructive remediation, firewall changes, account disabling, process termination, file deletion, registry modification, remote access, real network scanning, internet threat-intelligence lookups, and cloud SIEM integrations.
@@ -863,6 +877,7 @@ Behavior:
 
 - Persist reminders in user-local `reminders.json` with atomic writes and sticky fail-closed corruption handling
 - Require explicit local wall time plus an IANA timezone on create (no guessed timezone; abbreviations such as EST/PST are rejected)
+- Nonexistent spring-forward and ambiguous fall-back local times are rejected; reminder and calendar share the same wall-time conversion
 - Persist absolute instants as UTC ISO-8601 with trailing `Z`; store the intended IANA timezone separately
 - Persist only three statuses: `scheduled`, `completed`, `cancelled`
 - Derive overdue as `status == scheduled` and `due_at <= now` (no persisted `due` status; no write-on-read reconciliation)
@@ -898,9 +913,10 @@ Behavior:
 - Desktop OAuth loopback via `InstalledAppFlow.run_local_server()` using `CORTANA_GOOGLE_OAUTH_CLIENT_FILE`
 - Exact scopes: `calendar.calendarlist.readonly`, `calendar.events`, `calendar.freebusy`
 - Persist only the Google refresh token in the OS credential store (`keyring` / Windows Credential Manager); never in `calendar_control.json`, audit, logs, AI history, or tool child process env
+- Google Calendar and keyring are optional. If those packages are missing, Cortana core still starts and calendar commands/status report unavailable. Provider-side deletion/revocation remains best-effort.
 - Local `calendar_control.json` stores one account metadata object, proposals, and bounded audits only (no event catalog, no tokens)
 - Default calendar starts as Google's stable `primary` alias; change with `/calendar-use`
-- Timed local wall times are interpreted in the selected calendar's IANA timezone (never OS timezone guessing)
+- Timed local wall times are interpreted in the selected calendar's IANA timezone (never OS timezone guessing). Nonexistent and ambiguous DST local times are rejected, matching reminders.
 - Reads: list calendars, list/show events, free/busy
 - Writes: timed non-recurring create/reschedule/cancel only after `/calendar-confirm`
 - Create proposals generate a Google-compliant `client_event_id` once at prepare time and reuse it for recovery
@@ -1076,6 +1092,8 @@ Behavior and limits:
 - `DefensiveToolExecutor` remains the sole tool execution boundary.
 - Dry-run is the default. `/playbook-run <name> | <scope-id>` calls `plan_dry_run` for each reached step and never calls `execute`.
 - Explicit execution uses `/playbook-run <name> --execute | <scope-id>` and still requires scope, policy, and step-specific fingerprint-bound approvals where Milestone 9 requires them.
+- Built-in playbooks are read-only and remain replay-safe: a later `/playbook-run ... --execute` starts from step 0 without extra confirmation.
+- Side-effecting steps (any tool whose `capability_class` is not `internal-readonly`) persist a bounded operation claim before live execution. Repeating the same playbook/step/parameters without a new operation instance is denied. A genuinely new execution uses `/playbook-run <name> --execute --new-operation | <scope-id>`.
 - Optional incident linkage uses `/playbook-run <name> | <scope-id> | <incident-id>` or `/playbook-run <name> --execute | <scope-id> | <incident-id>`.
 - Incident linkage reuses `assert_incident_authorized` and requires the incident to exist before step one. On successful completion, exactly one bounded `summary` incident note is appended.
 - Execution is strictly sequential and stop-on-failure. There is no parallel execution, silent retry, nested playbook, dynamic output piping, background worker, or arbitrary scripting interface.
@@ -1135,7 +1153,7 @@ Centralized defaults:
 | --- | --- |
 | `/help` | List available commands |
 | `/status` | Show safe local session information |
-| `/clear` | Clear temporary conversation history and the latest grounded source manifest |
+| `/clear` | Clear session conversation context, including recalled active memories; persistent memories stay stored |
 | `/remember <text>` | Save one explicit persistent memory |
 | `/memories` | List saved persistent memories |
 | `/forget <memory-id>` | Delete one saved memory by ID |
@@ -1210,6 +1228,7 @@ Centralized defaults:
 | `/playbook-show <name>` | Show one defensive playbook |
 | `/playbook-run <name> \| <scope-id>` | Dry-run one trusted playbook |
 | `/playbook-run <name> --execute \| <scope-id>` | Execute one trusted playbook after validations |
+| `/playbook-run <name> --execute --new-operation \| <scope-id>` | Execute a new side-effecting operation instance of the same playbook |
 | `/playbook-run <name> \| <scope-id> \| <incident-id>` | Dry-run one trusted playbook linked to an existing incident |
 | `/playbook-run <name> --execute \| <scope-id> \| <incident-id>` | Execute one trusted playbook linked to an existing incident |
 | `/playbook-status <run-id>` | Show one workflow run |
@@ -1261,9 +1280,22 @@ Activation is rejected with a clear local message when either limit would be exc
 - Memories are saved only through explicit local commands.
 - Storage uses a local JSON file under the user-local application data directory.
 - If the memory file is missing, Cortana starts with an empty memory list.
-- If the memory file is empty, malformed, or structurally invalid, Cortana returns a clear local error, leaves the file unchanged for inspection, and does not attempt automatic repair in this milestone.
+- If the memory file is empty, malformed, structurally invalid, over the count cap, contains overlong text, or contains duplicate IDs, Cortana returns a clear local error, leaves the file unchanged for inspection, and does not attempt automatic repair in this milestone.
 - Atomic writes protect against partial or corrupt files during a single save.
 - This milestone assumes a single Cortana instance per memory file. Running multiple instances against the same file may cause last-writer-wins lost updates; cross-process locking is not implemented yet.
+
+## Current accepted limitations
+
+These are accepted product limits, not unfinished Batch 1–6 defects:
+
+- **M25 `response.created` correlation:** `/voice-realtime` keeps `create_response=true`. The provider often starts the auto-response at or before the local transcript event, so Cortana cannot reliably bind `response.created` to the just-finalized user turn. Changing response ownership is out of scope.
+- **M26 visual-ack correlation:** late or ambiguous visual acks are discarded. They are never written onto a stale turn and never bound to a newer turn.
+- **Orphan visual-ack debt:** `_orphan_visual_ack_debt` is an intentionally uncapped skip counter. Capping it would risk binding a late ack to the wrong later turn.
+- **Workflow side-effect retry:** a persisted claim means the mutating step was already attempted. Reconstruction/retry does not re-execute that operation and does not assert that the prior side effect succeeded. A new execution requires `--new-operation` or a new `operation_id`. Oldest claims are dropped after `MAX_WORKFLOW_COMPLETED_EFFECT_KEYS` (200).
+- **Provider-side delete:** Realtime `conversation.item.delete` and calendar/keyring revocation remain best-effort.
+- **Extreme speech:** very long or adversarial spoken input is bounded and fail-open to the existing response path; it is not a complete abuse-resistant speech stack.
+- **Duplicate memories/reminders:** explicit user commands may create another memory or reminder with the same text. Duplicate IDs in a memory file fail closed on load. There is no silent merge of same-text records.
+- **DST:** nonexistent and ambiguous local wall times are rejected for reminders and calendar events. Recurring expansions skip DST-invalid local days. This is current behavior, not a limitation to “silently fold.”
 
 ## Running tests
 

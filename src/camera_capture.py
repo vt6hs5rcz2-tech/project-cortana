@@ -379,6 +379,8 @@ class CameraCaptureSession:
         release_ok = self._release_capture()
         with self._lock:
             self._latest = None
+        self._sequence = 0
+        self._consecutive_failures = 0
         self._opened = False
         logger.info("Camera stopped")
 

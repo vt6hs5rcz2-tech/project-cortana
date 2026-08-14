@@ -1206,8 +1206,10 @@ def test_m26_interrupted_turn_before_timeout_does_not_create() -> None:
     session._clear_transcript_wait("user_1")
     time.sleep(MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS + 0.4)
     assert connection.response.response_creates == 0
-    assert session._visual_turns["user_1"].prepare_enqueued is False
-    assert session._visual_turns["user_1"].response_create_sent is False
+    turn = session._visual_turns.get("user_1")
+    assert turn is None or (
+        turn.prepare_enqueued is False and turn.response_create_sent is False
+    )
     session.request_stop(error_type="cancelled")
     thread.join(timeout=5)
 

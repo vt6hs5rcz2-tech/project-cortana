@@ -28,6 +28,7 @@ from src.config import (
 )
 from src.reminder import (
     LOCAL_WALL_FORMAT,
+    ReminderValidationError,
     local_wall_to_utc_iso,
     parse_local_wall_datetime,
     validate_iana_timezone,
@@ -576,8 +577,11 @@ def local_wall_pair_to_utc(
     validate_iana_timezone(timezone_name)
     start_wall = parse_local_wall_datetime(start_local, field_name="Start time")
     end_wall = parse_local_wall_datetime(end_local, field_name="End time")
-    start_utc = local_wall_to_utc_iso(start_wall, timezone_name)
-    end_utc = local_wall_to_utc_iso(end_wall, timezone_name)
+    try:
+        start_utc = local_wall_to_utc_iso(start_wall, timezone_name)
+        end_utc = local_wall_to_utc_iso(end_wall, timezone_name)
+    except ReminderValidationError as error:
+        raise CalendarValidationError(str(error)) from error
     if parse_utc_timestamp(start_utc) >= parse_utc_timestamp(end_utc):
         raise CalendarValidationError("End time must be after start time.")
     return start_utc, end_utc

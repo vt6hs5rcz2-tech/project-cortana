@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from datetime import datetime, timezone
-from typing import Literal, Protocol
+from hashlib import sha256
+from typing import Any, Literal, Mapping, Protocol
 
 from src.config import (
     MAX_WORKFLOW_NAME_LENGTH,
@@ -121,6 +123,17 @@ ABANDONED_AFTER_RESTART_ERROR_CODE = "AbandonedAfterRestart"
 ABANDONED_AFTER_RESTART_MESSAGE = (
     "Workflow run was abandoned after process restart and cannot be resumed."
 )
+DEFAULT_WORKFLOW_OPERATION_INSTANCE = "default"
+SIDE_EFFECT_REEXECUTION_ERROR_CODE = "SideEffectReexecutionRequired"
+SIDE_EFFECT_REEXECUTION_MESSAGE = (
+    "This side-effecting workflow step was already attempted. "
+    "A new explicit operation is required."
+)
+SIDE_EFFECT_CLAIM_FAILED_ERROR_CODE = "SideEffectClaimFailed"
+SIDE_EFFECT_CLAIM_FAILED_MESSAGE = (
+    "The side-effecting workflow step could not be recorded safely "
+    "and was not executed."
+)
 
 PLAYBOOK_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,62}$")
 PLAYBOOK_VERSION_PATTERN = re.compile(r"^\d+\.\d+\.\d+$")
@@ -187,6 +200,28 @@ class ManualWorkflowClock:
     def advance(self, seconds: float) -> None:
         """Advance the monotonic clock by the given number of seconds."""
         self._monotonic += float(seconds)
+
+
+def compute_workflow_side_effect_key(
+    *,
+    playbook_name: str,
+    playbook_version: str,
+    step_id: str,
+    tool_id: str,
+    static_parameters: Mapping[str, Any],
+    operation_id: str | None,
+) -> str:
+    """Return a stable SHA-256 key for one side-effecting workflow operation."""
+    payload = {
+        "playbook_name": playbook_name,
+        "playbook_version": playbook_version,
+        "step_id": step_id,
+        "tool_id": tool_id,
+        "static_parameters": dict(static_parameters),
+        "operation_id": operation_id or DEFAULT_WORKFLOW_OPERATION_INSTANCE,
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return sha256(blob.encode("utf-8")).hexdigest()
 
 
 def validate_playbook_name(value: str) -> str:
@@ -290,6 +325,7 @@ __all__ = [
     "WorkflowStepStatus",
     "WorkflowStorageError",
     "WorkflowValidationError",
+    "compute_workflow_side_effect_key",
     "normalize_safe_error_message",
     "validate_playbook_name",
     "validate_playbook_version",
