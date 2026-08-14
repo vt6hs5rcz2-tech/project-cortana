@@ -26,6 +26,14 @@ def test_topic_and_goal_are_bounded() -> None:
     assert state.active_goal == "Investigate suspicious login"
 
 
+def test_unresolved_question_constructor_implies_waiting() -> None:
+    state = ConversationState(unresolved_question="Which option do you prefer?")
+    assert state.waiting_for_user is True
+    waiting_only = ConversationState(waiting_for_user=True)
+    assert waiting_only.unresolved_question is None
+    assert waiting_only.waiting_for_user is True
+
+
 def test_unresolved_question_sets_waiting_for_user() -> None:
     state = ConversationState()
     state.set_unresolved_question("Which option do you prefer?")

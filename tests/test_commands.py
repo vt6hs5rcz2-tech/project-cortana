@@ -1,6 +1,7 @@
 """Tests for Project Cortana local slash commands."""
 
 import logging
+import tempfile
 from pathlib import Path
 from typing import Any, cast
 
@@ -21,6 +22,7 @@ from src.commands import (
     FORGET_NOT_FOUND_TEMPLATE,
     HELP_TEXT,
     MEMORIES_EMPTY,
+    REMEMBER_CAPACITY,
     REMEMBER_MISSING_TEXT,
     REMEMBER_TOO_LONG,
     CommandOutcome,
@@ -38,13 +40,14 @@ from src.config import (
     MAX_ACTIVE_MEMORIES,
     MAX_ACTIVE_MEMORY_CHARS,
     MAX_MEMORY_TEXT_LENGTH,
+    MAX_STORED_MEMORIES,
 )
 from src.conversation import ConversationHistory, SHUTDOWN_MESSAGE
 from src.conversation_loop import handle_message, run_conversation_loop
 from src.memory import BlankMemoryTextError, MemoryTextTooLongError
 from src.document_extractor import DefaultTextExtractor
 from src.document_vault import JsonDocumentVault
-from src.memory_store import JsonMemoryStore
+from src.memory_store import JsonMemoryStore, MemoryCountLimitError
 from src.settings import Settings
 
 FAKE_CLIENT = cast(OpenAIClient, object())
@@ -107,7 +110,13 @@ def test_parse_slash_input_recognizes_command_like_messages() -> None:
     assert parse_slash_input("/help") == COMMAND_HELP
     assert parse_slash_input("  /STATUS  ") == COMMAND_STATUS
     assert parse_slash_input("/unknown") == "unknown"
-    assert parse_slash_input("/") == ""
+    assert parse_slash_input(" /help") == COMMAND_HELP
+    assert parse_slash_input("/HELP") == COMMAND_HELP
+    assert parse_slash_input("/") is None
+    assert parse_slash_input("/ ") is None
+    assert parse_slash_input(" / ") is None
+    assert parse_slash_input(" / help") is None
+    assert parse_slash_input("/helper") == "helper"
 
 
 def test_parse_slash_input_ignores_path_like_messages() -> None:
@@ -148,6 +157,7 @@ def test_handle_slash_command_help_lists_commands(tmp_path: Path) -> None:
 
     assert result.outcome == CommandOutcome.CONTINUE
     assert result.message == HELP_TEXT
+    assert "/help" in result.message
     assert "/status" in result.message
     assert "/clear" in result.message
     assert "/remember" in result.message
@@ -212,6 +222,7 @@ def test_handle_slash_command_status_reports_session_information(
     assert f"History persistence: {persistence_label}" in result.message
     assert f"Explicit persistent memory: {memory_label}" in result.message
     assert "Saved memories: 1" in result.message
+    assert f"Maximum stored memories: {MAX_STORED_MEMORIES}" in result.message
     assert "Active memories: 0" in result.message
     assert f"Maximum active memories: {MAX_ACTIVE_MEMORIES}" in result.message
     assert "Active memory characters: 0" in result.message
@@ -374,6 +385,25 @@ def test_remember_saves_memory_and_returns_id(tmp_path: Path) -> None:
     assert memories[0].id in result.message
 
 
+def test_slash_remember_remains_authoritative_for_deictic_looking_text(
+    tmp_path: Path,
+) -> None:
+    """Slash /remember still persists explicit text that NL memory would reject."""
+    store = _memory_store(tmp_path)
+    result = handle_slash_command(
+        "/remember this forever",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
+        memory_store=store,
+    )
+    assert result.message is not None
+    assert "Memory saved" in result.message
+    assert [item.text for item in store.list_memories()] == ["this forever"]
+
+
 def test_remember_preserves_argument_capitalization(tmp_path: Path) -> None:
     """Memory text should preserve the user's original capitalization."""
     store = _memory_store(tmp_path)
@@ -443,6 +473,39 @@ def test_remember_rejects_oversized_text(tmp_path: Path) -> None:
 
     assert result.message == REMEMBER_TOO_LONG
     assert store.list_memories() == []
+
+
+def test_remember_rejects_when_store_is_at_capacity(tmp_path: Path) -> None:
+    store = JsonMemoryStore(tmp_path / "memories.json", max_memories=1)
+    store.add_memory("kept")
+
+    result = handle_slash_command(
+        "/remember another fact",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
+        memory_store=store,
+    )
+
+    assert result.message == MemoryCountLimitError(max_memories=1).user_message
+    assert result.message.startswith("Cortana:")
+    assert REMEMBER_CAPACITY == MemoryCountLimitError().user_message
+    assert [memory.text for memory in store.list_memories()] == ["kept"]
+
+
+def test_help_ignores_oversized_extra_arguments(tmp_path: Path) -> None:
+    result = handle_slash_command(
+        "/help " + ("x" * 200_000),
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
+        memory_store=_memory_store(tmp_path),
+    )
+    assert result.message == HELP_TEXT
 
 
 def test_remember_maps_validation_errors_by_type_not_message_text(
@@ -976,3 +1039,43 @@ def test_status_storage_error_does_not_crash_session(tmp_path: Path) -> None:
     assert result.outcome == CommandOutcome.CONTINUE
     assert result.message is not None
     assert "could not be loaded safely" in result.message
+
+
+def _cortana_temp_dir_names() -> set[str]:
+    root = Path(tempfile.gettempdir())
+    return {path.name for path in root.glob("cortana-*") if path.is_dir()}
+
+
+def test_uninjected_help_does_not_leak_ephemeral_temp_dirs(tmp_path: Path) -> None:
+    before = _cortana_temp_dir_names()
+    result = handle_slash_command(
+        "/help",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
+        memory_store=_memory_store(tmp_path),
+    )
+    after = _cortana_temp_dir_names()
+    assert result.message == HELP_TEXT
+    assert after - before == set()
+
+
+def test_uninjected_reminders_uses_lazy_fallback_then_cleans_up(
+    tmp_path: Path,
+) -> None:
+    before = _cortana_temp_dir_names()
+    result = handle_slash_command(
+        "/reminders",
+        settings=_settings(),
+        conversation_history=ConversationHistory(),
+        active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
+        memory_store=_memory_store(tmp_path),
+    )
+    after = _cortana_temp_dir_names()
+    assert result.message is not None
+    assert result.message.startswith("Cortana:")
+    assert after - before == set()

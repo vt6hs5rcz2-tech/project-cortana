@@ -10,7 +10,7 @@ from src.config import (
     MAX_TOOL_TEXT_SEARCH_PREVIEW_CHARS,
     MAX_TOOL_TEXT_SEARCH_QUERY_CHARS,
 )
-from src.tool_common import ToolValidationError, validate_tool_id
+from src.tool_common import ToolValidationError, UnknownToolIdError, validate_tool_id
 from src.tool_definition import (
     DefensiveToolDefinition,
     create_parameter_definition,
@@ -64,7 +64,7 @@ class ToolRegistry:
         """Return one tool definition or raise when missing."""
         definition = self.get(tool_id)
         if definition is None:
-            raise ToolValidationError(f"Unknown tool ID '{tool_id}'.")
+            raise UnknownToolIdError(f"Unknown tool ID '{tool_id}'.")
         return definition
 
     def list_all(self) -> list[DefensiveToolDefinition]:

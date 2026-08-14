@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import cast
+
+import pytest
 
 from src.ai_service import AIResponse, ResponsesClient, generate_response
 from src.conversation import ConversationApiInput, ConversationHistory
@@ -123,6 +126,35 @@ def test_date_and_continue_follow_ups() -> None:
     tuesday = intel.interpret("Tuesday", state)
     assert tuesday.confidence == "high"
     assert "tuesday" in (tuesday.effective_user_text or "").casefold()
+
+    for phrase in (
+        "actually, Tuesday",
+        "actually Tuesday",
+        "no, Tuesday",
+        "I meant Tuesday",
+    ):
+        prefixed_state = ConversationState()
+        prefixed_state.set_active_goal("schedule the review")
+        prefixed_state.set_unresolved_question("Which day?")
+        guidance = intel.interpret(phrase, prefixed_state)
+        assert guidance.authorizes_privileged_action is False
+        assert guidance.turn_taking == "correction"
+        assert guidance.correction_summary is not None
+        assert "tuesday" in guidance.correction_summary.casefold()
+        assert "tuesday" in (prefixed_state.active_goal or "").casefold()
+
+    stale = intel.interpret("actually, Tuesday", ConversationState())
+    assert stale.confidence == "low"
+    assert stale.preserves_uncertainty is True
+    assert stale.turn_taking != "complete_request"
+
+    backups = intel.interpret(
+        "Actually, I want to discuss backups",
+        ConversationState(),
+    )
+    assert backups.turn_taking in {"complete_request", "topic_change"}
+    assert backups.correction_summary is None
+    assert backups.authorizes_privileged_action is False
 
     state2 = ConversationState()
     state2.set_active_goal("explain the incident timeline")
@@ -430,6 +462,22 @@ def test_safe_interpret_fail_safe_returns_none() -> None:
 
     result = safe_interpret(BrokenIntelligence(), "hello", ConversationState())
     assert result is None
+
+
+def test_safe_interpret_logs_error_type_without_user_secret(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "user-secret-credential-xyz"
+
+    class BrokenIntelligence(ConversationIntelligence):
+        def interpret(self, *args: object, **kwargs: object) -> ConversationalGuidance:
+            raise RuntimeError(secret)
+
+    with caplog.at_level(logging.ERROR, logger="ProjectCortana"):
+        result = safe_interpret(BrokenIntelligence(), secret, ConversationState())
+    assert result is None
+    assert "RuntimeError" in caplog.text
+    assert secret not in caplog.text
 
 
 def test_normalize_user_utterance_is_stable() -> None:

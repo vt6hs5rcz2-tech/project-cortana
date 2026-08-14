@@ -16,7 +16,7 @@ from src.document_vault import JsonDocumentVault
 from src.incident_repository import JsonIncidentRepository
 from src.memory_store import JsonMemoryStore
 from src.settings import Settings
-from src.tool_commands import TOOL_COMMAND_NAMES
+from src.tool_commands import TOOL_COMMAND_NAMES, TOOL_REQUEST_UNKNOWN, TOOL_REQUEST_USAGE
 from src.tool_executor import DefensiveToolExecutor
 from src.tool_registry import build_default_tool_registry
 from src.tool_repository import JsonToolControlRepository
@@ -314,3 +314,35 @@ def test_incident_link_and_nonexistent_incident(tmp_path: Path) -> None:
     assert incidents.event_count() == before_events
     assert len(incidents.list_notes(incident.incident_id)) == before_notes
     assert incidents.evidence_count() == 0
+
+
+def test_unknown_tool_id_is_rejected_without_persisting_request(tmp_path: Path) -> None:
+    create, repo, _ = _run(
+        "/scope-new Lab | system-summary | none | justification text",
+        tmp_path,
+    )
+    assert "Authorized scope created" in (create.message or "")
+    scope_id = repo.list_scopes()[0].scope_id
+
+    unknown, repo, _ = _run(
+        f"/tool-request not-a-tool | {scope_id} | [] | please run",
+        tmp_path,
+    )
+    assert unknown.message == TOOL_REQUEST_UNKNOWN.format(tool_id="not-a-tool")
+    assert "Usage" not in (unknown.message or "")
+    assert repo.list_requests() == []
+
+    malformed, repo, _ = _run(
+        "/tool-request system-summary | only-one-field",
+        tmp_path,
+    )
+    assert malformed.message == TOOL_REQUEST_USAGE
+    assert repo.list_requests() == []
+
+    known, repo, _ = _run(
+        f"/tool-request system-summary | {scope_id} | {{}} | because",
+        tmp_path,
+    )
+    assert "Tool request created" in (known.message or "")
+    assert len(repo.list_requests()) == 1
+    assert repo.list_requests()[0].tool_id == "system-summary"

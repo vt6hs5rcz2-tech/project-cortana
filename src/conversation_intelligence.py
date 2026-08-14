@@ -8,6 +8,7 @@ incident operations, document writes, or confirmation bypass.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Literal, TypedDict, cast
@@ -18,6 +19,8 @@ from src.config import (
     MAX_CONVERSATIONAL_GOAL_CHARS,
 )
 from src.conversation_state import ConversationState, ConversationalReferent
+
+logger = logging.getLogger("ProjectCortana")
 
 ResponseDepth = Literal["brief", "normal", "detailed"]
 TurnTakingKind = Literal[
@@ -115,6 +118,10 @@ _TOPIC_CHANGE_MARKERS = (
     "on another note",
     "unrelated",
 )
+_TOPIC_CHANGE_PREFIX = re.compile(
+    r"^(?:anyway|new topic|switching gears|different question|"
+    r"change of subject|on another note|unrelated)\b"
+)
 _DETAILED_MARKERS = (
     "in detail",
     "detailed",
@@ -199,12 +206,16 @@ _CORRECTION_NOT_ASKED = re.compile(
 )
 _CORRECTION_GO_BACK = re.compile(r"^go back\.?$", re.IGNORECASE)
 _CORRECTION_FORGET = re.compile(
-    r"^forget that(?:\s+part)?\.?$",
+    r"^forget that\b(?P<rest>.*)$",
     re.IGNORECASE,
 )
-_DATE_WORD = re.compile(
-    r"^(?P<when>today|tomorrow|tonight|"
-    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)$",
+_DATE_WHEN = (
+    r"(?P<when>today|tomorrow|tonight|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+)
+_DATE_WORD = re.compile(rf"^{_DATE_WHEN}$", re.IGNORECASE)
+_DATE_CORRECTION_PREFIX = re.compile(
+    rf"^(?:no,?\s+|actually,?\s+){_DATE_WHEN}$",
     re.IGNORECASE,
 )
 _ANAPHORIC_FOLLOW_UP = re.compile(
@@ -382,7 +393,10 @@ class ConversationIntelligence:
             )
 
         # Ordinary complete request: update active goal/topic lightly.
-        if state.active_goal is None or self._substantive_request(normalized):
+        incidental_marker = self._has_incidental_topic_marker(normalized)
+        if state.active_goal is None or (
+            self._substantive_request(normalized) and not incidental_marker
+        ):
             state.set_active_goal(original)
             if state.current_topic is None:
                 state.set_topic(self._topic_from_text(original))
@@ -425,14 +439,7 @@ class ConversationIntelligence:
         options = self._extract_offered_options(cleaned)
         if options:
             state.set_offered_options(options)
-            for index, option in enumerate(options, start=1):
-                state.add_referent(
-                    ConversationalReferent(
-                        label=f"option {index}",
-                        description=option,
-                        ordinal=index,
-                    )
-                )
+            state.replace_option_referents(options)
 
         if any(marker in lower for marker in _ASSISTANT_QUESTION_MARKERS):
             # Keep a short unresolved question for yes/no / ordinal replies.
@@ -441,7 +448,8 @@ class ConversationIntelligence:
                 question = question[: MAX_CONVERSATIONAL_GOAL_CHARS - 1] + "…"
             state.set_unresolved_question(question)
         else:
-            state.waiting_for_user = False
+            # A finalized non-question reply replaces the prior exchange.
+            state.set_unresolved_question(None)
 
         if guidance.topic_changed and guidance.effective_user_text:
             state.set_topic(self._topic_from_text(guidance.effective_user_text))
@@ -593,6 +601,16 @@ class ConversationIntelligence:
                 correction_summary=target,
             )
 
+        prefixed_date = _DATE_CORRECTION_PREFIX.fullmatch(normalized)
+        if prefixed_date is not None:
+            when = prefixed_date.group("when").casefold()
+            return self._clarify_date_word(
+                original=original,
+                when=when,
+                state=state,
+                turn_taking="correction",
+            )
+
         change = _CORRECTION_CHANGE.fullmatch(normalized)
         if change is not None:
             target = (change.group("target") or "").strip()
@@ -709,15 +727,16 @@ class ConversationIntelligence:
                 preserves_uncertainty=prior is None,
             )
 
-        if _CORRECTION_FORGET.fullmatch(normalized):
+        if _CORRECTION_FORGET.fullmatch(normalized) is not None:
             # Conversational discard of the latest local interpretation only.
-            # Does NOT delete persistent memory.
+            # Prefix match covers "forget that and erase memory". That is not
+            # authority to delete persistent memory or call the memory store.
             state.set_latest_correction("forget that (conversational only)")
             state.set_unresolved_question(None)
             state.waiting_for_user = False
-            # Drop only the latest local correction target / offered focus.
             if state.offered_options:
                 state.set_offered_options(())
+            state.replace_option_referents(())
             return self._build_guidance(
                 original=original,
                 effective=original,
@@ -741,10 +760,12 @@ class ConversationIntelligence:
         original: str,
         state: ConversationState,
     ) -> ConversationalGuidance | None:
-        if not any(marker in normalized for marker in _TOPIC_CHANGE_MARKERS):
+        if _TOPIC_CHANGE_PREFIX.match(normalized) is None:
             # Heuristic: substantial new question while a prior goal exists and
             # the new text shares almost no tokens with the prior goal.
             if _ANAPHORIC_FOLLOW_UP.fullmatch(normalized):
+                return None
+            if re.match(r"^(?:is|was|are|were)\s+(?:that|this|it)\b", normalized):
                 return None
             if (
                 state.active_goal
@@ -752,11 +773,7 @@ class ConversationIntelligence:
                 and "?" in original
                 and not self._shares_topic_tokens(normalized, state.active_goal)
             ):
-                state.set_topic(self._topic_from_text(original))
-                state.set_active_goal(original)
-                state.set_unresolved_question(None)
-                state.waiting_for_user = False
-                state.set_latest_correction(None)
+                self._apply_topic_change(state, original)
                 return self._build_guidance(
                     original=original,
                     effective=original,
@@ -769,7 +786,7 @@ class ConversationIntelligence:
                 )
             return None
 
-        # Explicit marker: strip marker prefixes where obvious.
+        # Explicit start-of-utterance marker only — not an incidental substring.
         effective = original
         for marker in _TOPIC_CHANGE_MARKERS:
             pattern = re.compile(
@@ -778,11 +795,7 @@ class ConversationIntelligence:
             )
             effective = pattern.sub("", effective).strip() or original
 
-        state.set_topic(self._topic_from_text(effective))
-        state.set_active_goal(effective)
-        state.set_unresolved_question(None)
-        state.waiting_for_user = False
-        state.set_latest_correction(None)
+        self._apply_topic_change(state, effective)
         return self._build_guidance(
             original=original,
             effective=effective,
@@ -792,6 +805,24 @@ class ConversationIntelligence:
             acknowledgment="none",
             state=state,
             topic_changed=True,
+        )
+
+    def _apply_topic_change(self, state: ConversationState, effective: str) -> None:
+        """Establish a new topic/goal and drop stale thread-local continuity."""
+        state.set_topic(self._topic_from_text(effective))
+        state.set_active_goal(effective)
+        state.set_unresolved_question(None)
+        state.waiting_for_user = False
+        state.set_latest_correction(None)
+        state.set_offered_options(())
+        state.clear_referents()
+
+    def _has_incidental_topic_marker(self, normalized: str) -> bool:
+        if _TOPIC_CHANGE_PREFIX.match(normalized) is not None:
+            return False
+        return any(
+            re.search(rf"\b{re.escape(marker)}\b", normalized)
+            for marker in _TOPIC_CHANGE_MARKERS
         )
 
     def _detect_visual_reference(
@@ -864,6 +895,7 @@ class ConversationIntelligence:
                 else "Affirmative reply to the pending question."
             )
             state.waiting_for_user = False
+            state.set_unresolved_question(None)
             return self._build_guidance(
                 original=original,
                 effective=resolved,
@@ -884,6 +916,7 @@ class ConversationIntelligence:
                 else "Negative reply to the pending question."
             )
             state.waiting_for_user = False
+            state.set_unresolved_question(None)
             return self._build_guidance(
                 original=original,
                 effective=resolved,
@@ -1036,26 +1069,46 @@ class ConversationIntelligence:
         date_match = _DATE_WORD.fullmatch(normalized)
         if date_match is not None:
             when = date_match.group("when").casefold()
-            if state.waiting_for_user or state.unresolved_question or state.active_goal:
-                goal = state.active_goal or "prior request"
-                resolved = f"{goal} clarified to {when}"
-                state.set_active_goal(resolved)
-                state.set_latest_correction(when)
-                state.waiting_for_user = False
-                return self._build_guidance(
-                    original=original,
-                    effective=resolved,
-                    depth="brief",
-                    turn_taking="continuation",
-                    confidence="high",
-                    acknowledgment="okay",
-                    state=state,
-                    resolved_follow_up=resolved,
-                    correction_summary=when,
-                )
-            return self._ambiguous_follow_up(original, state)
+            return self._clarify_date_word(
+                original=original,
+                when=when,
+                state=state,
+                turn_taking="continuation",
+            )
 
         return None
+
+    def _clarify_date_word(
+        self,
+        *,
+        original: str,
+        when: str,
+        state: ConversationState,
+        turn_taking: TurnTakingKind,
+    ) -> ConversationalGuidance:
+        """Resolve a date-word against an active question or goal only."""
+        if not (
+            state.waiting_for_user
+            or state.unresolved_question
+            or state.active_goal
+        ):
+            return self._ambiguous_follow_up(original, state)
+        goal = state.active_goal or "prior request"
+        resolved = f"{goal} clarified to {when}"
+        state.set_active_goal(resolved)
+        state.set_latest_correction(when)
+        state.waiting_for_user = False
+        return self._build_guidance(
+            original=original,
+            effective=resolved,
+            depth="brief",
+            turn_taking=turn_taking,
+            confidence="high",
+            acknowledgment="okay",
+            state=state,
+            resolved_follow_up=resolved,
+            correction_summary=when,
+        )
 
     def _ambiguous_follow_up(
         self,
@@ -1078,20 +1131,13 @@ class ConversationIntelligence:
         user_text: str,
         state: ConversationState,
     ) -> AcknowledgmentHint:
-        normalized = normalize_user_utterance(user_text)
-        # Prefer no acknowledgment for ordinary questions/answers.
-        if "?" in user_text or len(normalized.split()) >= 6:
-            return "none"
-        if normalized in _YES_PHRASES:
-            return "none" if "yes" in state.recent_ack_phrases else "yes"
-        # Avoid repeating the same acknowledgment phrase.
-        for candidate in ("got_it", "okay"):
-            phrase = "got it" if candidate == "got_it" else "okay"
-            if phrase not in state.recent_ack_phrases:
-                # Still prefer none for complete requests unless very short.
-                if len(normalized.split()) <= 2:
-                    return "none"
-                return "none"
+        """Complete requests never get automatic filler acknowledgments.
+
+        Useful acknowledgments live on dedicated paths: correction uses
+        ``okay`` and yes-follow-up uses ``yes``. This helper is only called
+        from complete_request and is intentionally conservative.
+        """
+        del user_text, state
         return "none"
 
     def _repetition_avoid_phrases(
@@ -1269,5 +1315,9 @@ def safe_interpret(
             user_interrupted=user_interrupted,
             visual_context_authorized=visual_context_authorized,
         )
-    except Exception:
+    except Exception as error:
+        logger.error(
+            "Conversation interpret failed error_type=%s",
+            type(error).__name__,
+        )
         return None

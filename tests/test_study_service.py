@@ -184,14 +184,41 @@ def test_parse_document_ids_exact_grammar() -> None:
     a = "11111111-1111-1111-1111-111111111111"
     b = "22222222-2222-2222-2222-222222222222"
     assert parse_study_document_ids(f"{a},{b}") == (a, b)
-    with pytest.raises(StudyPartnerValidationError):
+    with pytest.raises(StudyPartnerValidationError) as spaced:
         parse_study_document_ids(f"{a}, {b}")
+    assert "Usage" in str(spaced.value)
     with pytest.raises(StudyPartnerValidationError):
         parse_study_document_ids(f"{a},")
     with pytest.raises(StudyPartnerValidationError):
         parse_study_document_ids(f",{a}")
     with pytest.raises(StudyPartnerValidationError):
         parse_study_document_ids(f"{a},,{b}")
+
+
+def test_parse_document_ids_rejects_malformed_and_duplicate_ids() -> None:
+    valid = "11111111-1111-1111-1111-111111111111"
+    with pytest.raises(StudyPartnerValidationError) as malformed:
+        parse_study_document_ids("not-a-uuid")
+    message = str(malformed.value)
+    assert "not a valid document ID" in message
+    assert "was not found" not in message
+
+    with pytest.raises(StudyPartnerValidationError) as spaced_uuid:
+        parse_study_document_ids("11111111-1111-1111-1111-1111 11111111")
+    assert "Usage" in str(spaced_uuid.value)
+
+    with pytest.raises(StudyPartnerValidationError) as duplicate:
+        parse_study_document_ids(f"{valid},{valid}")
+    assert "Duplicate" in str(duplicate.value)
+
+
+def test_start_session_missing_document_is_not_found(tmp_path: Path) -> None:
+    service, _, fake, _ = _service(tmp_path)
+    missing = "99999999-9999-9999-9999-999999999999"
+    with pytest.raises(StudyPartnerValidationError) as error:
+        service.start_session(missing)
+    assert f"Document '{missing}' was not found." in str(error.value)
+    assert fake.fake.calls == 0
 
 
 def test_start_session_bounds_and_resume(tmp_path: Path) -> None:

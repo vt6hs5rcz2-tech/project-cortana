@@ -9,8 +9,11 @@ import pytest
 import main as main_module
 from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient
-from src.conversation import ConversationHistory, SHUTDOWN_MESSAGE, STARTUP_GREETING
-from src.conversation_loop import handle_message, run_conversation_loop
+from src.commands import HELP_TEXT
+from src.conversation import ConversationHistory, MESSAGE_TOO_LONG, SHUTDOWN_MESSAGE, STARTUP_GREETING
+from src.conversation_loop import handle_message, process_conversation_turn, run_conversation_loop
+from src.conversation_state import ConversationState
+from src.config import MAX_CONVERSATION_MESSAGE_CHARS
 from src.document_chunker import DocumentChunker
 from src.document_extractor import DefaultTextExtractor
 from src.document_retrieval import LexicalDocumentRetriever
@@ -787,3 +790,137 @@ def test_main_orchestrates_conversation_loop(
     assert calendar_path.parent.exists()
     assert study_path.parent.exists()
     assert received_workflow_registry.count() >= 2
+
+
+def test_process_conversation_turn_accepts_message_at_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history = ConversationHistory()
+    calls = {"count": 0}
+
+    def fake_generate(**kwargs: Any) -> str:
+        calls["count"] += 1
+        return "ok"
+
+    monkeypatch.setattr("src.conversation_loop.generate_response", fake_generate)
+    text = "A" * MAX_CONVERSATION_MESSAGE_CHARS
+    answer = process_conversation_turn(
+        client=FAKE_CLIENT,
+        settings=Settings(openai_api_key="test-api-key", openai_model="test-model"),
+        user_message=text,
+        logger=FakeLogger(),
+        conversation_history=history,
+    )
+    assert answer == "ok"
+    assert calls["count"] == 1
+    assert history.turns[0].content == text
+
+
+def test_process_conversation_turn_rejects_oversized_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history = ConversationHistory()
+    state = ConversationState()
+    state.set_topic("keep dns")
+    prior = state.snapshot()
+    calls = {"count": 0}
+
+    def fake_generate(**kwargs: Any) -> str:
+        calls["count"] += 1
+        return "should not run"
+
+    monkeypatch.setattr("src.conversation_loop.generate_response", fake_generate)
+    for payload in ("A" * (MAX_CONVERSATION_MESSAGE_CHARS + 1), "A" * 200_000, "é" * (MAX_CONVERSATION_MESSAGE_CHARS + 1)):
+        history.clear()
+        answer = process_conversation_turn(
+            client=FAKE_CLIENT,
+            settings=Settings(openai_api_key="test-api-key", openai_model="test-model"),
+            user_message=payload,
+            logger=FakeLogger(),
+            conversation_history=history,
+            conversation_state=state,
+        )
+        assert answer == MESSAGE_TOO_LONG
+        assert history.turns == []
+        assert state.snapshot() == prior
+    assert calls["count"] == 0
+
+
+def test_process_conversation_turn_unicode_at_limit_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history = ConversationHistory()
+    monkeypatch.setattr(
+        "src.conversation_loop.generate_response",
+        lambda **kwargs: "ok",
+    )
+    text = "é" * MAX_CONVERSATION_MESSAGE_CHARS
+    answer = process_conversation_turn(
+        client=FAKE_CLIENT,
+        settings=Settings(openai_api_key="test-api-key", openai_model="test-model"),
+        user_message=text,
+        logger=FakeLogger(),
+        conversation_history=history,
+    )
+    assert answer == "ok"
+    assert history.turns[0].content == text
+
+
+def test_handle_message_prints_too_long_without_history(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    history = ConversationHistory()
+    monkeypatch.setattr(
+        "src.conversation_loop.generate_response",
+        lambda **kwargs: "nope",
+    )
+    handle_message(
+        client=FAKE_CLIENT,
+        settings=Settings(openai_api_key="test-api-key", openai_model="test-model"),
+        user_message="B" * 200_000,
+        logger=FakeLogger(),
+        conversation_history=history,
+    )
+    output = capsys.readouterr().out
+    assert MESSAGE_TOO_LONG in output
+    assert output.count("Cortana:") == 1
+    assert history.turns == []
+
+
+def test_max_conversation_message_chars_is_sixteen_thousand_three_hundred_eighty_four() -> None:
+    assert MAX_CONVERSATION_MESSAGE_CHARS == 16_384
+
+
+def test_run_conversation_loop_slash_commands_bypass_message_size_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    logger = FakeLogger()
+    ai_calls = 0
+    inputs = iter(["/help " + ("x" * 200_000), "exit"])
+
+    def fake_handle_message(**kwargs: object) -> None:
+        nonlocal ai_calls
+        ai_calls += 1
+
+    monkeypatch.setattr("src.conversation_loop.handle_message", fake_handle_message)
+
+    run_conversation_loop(
+        client=FAKE_CLIENT,
+        settings=Settings(
+            openai_api_key="test-api-key",
+            openai_model="test-model",
+        ),
+        logger=logger,
+        active_memory_context=_active_memory_context(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=_document_extractor(),
+        memory_store=_memory_store(tmp_path),
+        read_input=lambda: next(inputs),
+    )
+
+    output = capsys.readouterr().out
+    assert HELP_TEXT in output
+    assert ai_calls == 0

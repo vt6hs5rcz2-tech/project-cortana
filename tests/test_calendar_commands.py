@@ -122,6 +122,12 @@ def test_create_requires_confirm(
         calendar_service=service,
     )
     assert "prepared" in prepared.lower()
+    assert "client_event_id" not in prepared.lower()
+    assert "operation=" not in prepared
+    assert "operation:" not in prepared.lower()
+    assert "status=" not in prepared
+    assert "status:" not in prepared.lower()
+    assert "/calendar-confirm" in prepared
     assert len(provider.create_calls) == 0
     proposal_id = prepared.split("(")[1].split(")")[0]
     confirmed = _run(
@@ -129,7 +135,12 @@ def test_create_requires_confirm(
         tmp_path=tmp_path,
         calendar_service=service,
     )
-    assert "executed" in confirmed.lower()
+    assert "was added to your calendar" in confirmed.lower()
+    assert "Meet" in confirmed
+    assert "operation=" not in confirmed
+    assert "status=" not in confirmed
+    assert confirmed.startswith("Cortana:")
+    assert "Cortana: Cortana:" not in confirmed
     assert len(provider.create_calls) == 1
 
 
@@ -175,3 +186,82 @@ def test_status_shows_bounded_calendar_state(
     assert "Calendar provider: google" in status
     assert "refresh" not in status.lower()
     assert "token" not in status.lower()
+
+
+def test_confirm_reschedule_and_cancel_use_plain_language(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = FakeCalendarProvider(
+        calendars=[primary_calendar(timezone_name="UTC")],
+        events={
+            ("primary", "evt1"): timed_event(
+                event_id="evt1",
+                start="2026-06-01T16:00:00.000000Z",
+                end="2026-06-01T17:00:00.000000Z",
+            )
+        },
+    )
+    service = _wired_service(tmp_path, provider, monkeypatch)
+    _run("/calendar-connect", tmp_path=tmp_path, calendar_service=service)
+    prepared = _run(
+        "/calendar-reschedule - | evt1 | 2026-06-01 18:00 | 2026-06-01 19:00",
+        tmp_path=tmp_path,
+        calendar_service=service,
+    )
+    assert "prepared" in prepared.lower()
+    assert "client_event_id" not in prepared.lower()
+    assert "reschedule this event" in prepared.lower()
+    proposal_id = prepared.split("(")[1].split(")")[0]
+    confirmed = _run(
+        f"/calendar-confirm {proposal_id}",
+        tmp_path=tmp_path,
+        calendar_service=service,
+    )
+    assert "rescheduled" in confirmed.lower()
+    assert "operation=" not in confirmed
+    assert "status=" not in confirmed
+
+    cancel_prepared = _run(
+        "/calendar-cancel - | evt1",
+        tmp_path=tmp_path,
+        calendar_service=service,
+    )
+    assert "cancel this event" in cancel_prepared.lower()
+    cancel_id = cancel_prepared.split("(")[1].split(")")[0]
+    cancelled = _run(
+        f"/calendar-confirm {cancel_id}",
+        tmp_path=tmp_path,
+        calendar_service=service,
+    )
+    assert "cancelled" in cancelled.lower()
+    assert "operation=" not in cancelled
+    assert "status=" not in cancelled
+
+
+def test_provider_failure_does_not_use_success_wording(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = FakeCalendarProvider(calendars=[primary_calendar(timezone_name="UTC")])
+    provider.network_fail_create = True
+    service = _wired_service(tmp_path, provider, monkeypatch)
+    _run("/calendar-connect", tmp_path=tmp_path, calendar_service=service)
+    prepared = _run(
+        "/calendar-create - | Meet | 2026-06-01 16:00 | 2026-06-01 17:00",
+        tmp_path=tmp_path,
+        calendar_service=service,
+    )
+    proposal_id = prepared.split("(")[1].split(")")[0]
+    failed = _run(
+        f"/calendar-confirm {proposal_id}",
+        tmp_path=tmp_path,
+        calendar_service=service,
+    )
+    lowered = failed.lower()
+    assert failed.startswith("Cortana:")
+    assert "was added" not in lowered
+    assert "rescheduled" not in lowered
+    assert "cancelled" not in lowered
+    assert "operation=" not in failed
+    assert "status=" not in failed

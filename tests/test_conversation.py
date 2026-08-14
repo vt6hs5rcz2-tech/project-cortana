@@ -139,3 +139,6 @@ def test_startup_and_shutdown_messages_are_defined() -> None:
     """Greeting and shutdown messages should be available for the loop."""
     assert "Hello" in STARTUP_GREETING
     assert "Goodbye" in SHUTDOWN_MESSAGE
+    assert STARTUP_GREETING.startswith("Cortana:")
+    assert STARTUP_GREETING.count("/help") == 1
+    assert "Type /help to see available commands." in STARTUP_GREETING

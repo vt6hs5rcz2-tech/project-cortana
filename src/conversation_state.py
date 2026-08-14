@@ -75,6 +75,18 @@ class ConversationState:
     turn_window: int = CONVERSATIONAL_RECENT_TURN_WINDOW
     _character_budget_used: int = 0
 
+    def __post_init__(self) -> None:
+        """Keep constructor state coherent with setter semantics.
+
+        Invariant A: a non-empty unresolved_question implies
+        waiting_for_user=True. waiting_for_user may still be True without a
+        stored question (for example an incomplete thought).
+        """
+        if self.unresolved_question is not None and not self.unresolved_question.strip():
+            self.unresolved_question = None
+        if self.unresolved_question is not None:
+            self.waiting_for_user = True
+
     def reset(self) -> None:
         """Clear all session conversational state."""
         self.current_topic = None
@@ -100,7 +112,7 @@ class ConversationState:
             self.current_topic = None
         else:
             self.current_topic = _clip(topic, MAX_CONVERSATIONAL_TOPIC_CHARS)
-        self._recompute_budget()
+        self._after_mutation()
 
     def set_active_goal(self, goal: str | None) -> None:
         """Update the active conversational goal/request."""
@@ -108,7 +120,7 @@ class ConversationState:
             self.active_goal = None
         else:
             self.active_goal = _clip(goal, MAX_CONVERSATIONAL_GOAL_CHARS)
-        self._recompute_budget()
+        self._after_mutation()
 
     def set_unresolved_question(self, question: str | None) -> None:
         """Track an unresolved assistant clarifying question."""
@@ -121,7 +133,7 @@ class ConversationState:
                 MAX_CONVERSATIONAL_QUESTION_CHARS,
             )
             self.waiting_for_user = True
-        self._recompute_budget()
+        self._after_mutation()
 
     def set_latest_correction(self, correction: str | None) -> None:
         """Record the latest conversational correction/clarification."""
@@ -132,7 +144,7 @@ class ConversationState:
                 correction,
                 MAX_CONVERSATIONAL_GOAL_CHARS,
             )
-        self._recompute_budget()
+        self._after_mutation()
 
     def set_offered_options(self, options: tuple[str, ...] | list[str]) -> None:
         """Replace offered options used by ordinal follow-ups."""
@@ -144,7 +156,7 @@ class ConversationState:
             if len(clipped) >= MAX_CONVERSATIONAL_REFERENTS:
                 break
         self.offered_options = tuple(clipped)
-        self._recompute_budget()
+        self._after_mutation()
 
     def add_referent(self, referent: ConversationalReferent) -> None:
         """Append one referent and trim to the configured bound."""
@@ -155,8 +167,29 @@ class ConversationState:
         overflow = len(self.recent_referents) - MAX_CONVERSATIONAL_REFERENTS
         if overflow > 0:
             del self.recent_referents[0:overflow]
-        self._recompute_budget()
-        self._trim_to_character_budget()
+        self._after_mutation()
+
+    def clear_referents(self) -> None:
+        """Drop all recent referents."""
+        self.recent_referents.clear()
+        self._after_mutation()
+
+    def replace_option_referents(self, options: tuple[str, ...] | list[str]) -> None:
+        """Replace option-derived referents; keep referents without ordinals."""
+        kept = [item for item in self.recent_referents if item.ordinal is None]
+        self.recent_referents = kept
+        for index, option in enumerate(options, start=1):
+            clipped = ConversationalReferent(
+                label=f"option {index}",
+                description=option,
+                ordinal=index,
+            ).clipped()
+            if clipped.label or clipped.description:
+                self.recent_referents.append(clipped)
+        overflow = len(self.recent_referents) - MAX_CONVERSATIONAL_REFERENTS
+        if overflow > 0:
+            del self.recent_referents[0:overflow]
+        self._after_mutation()
 
     def set_visual_context_ref(self, ref_id: str | None) -> None:
         """Set or clear the optional M26 visual-context reference identifier.
@@ -165,12 +198,14 @@ class ConversationState:
         """
         if ref_id is None or not ref_id.strip():
             self.visual_context_ref_id = None
-            return
-        self.visual_context_ref_id = _clip(ref_id.strip(), 128)
+        else:
+            self.visual_context_ref_id = _clip(ref_id.strip(), 128)
+        self._after_mutation()
 
     def clear_visual_context_ref(self) -> None:
         """Clear any current visual-context reference identifier."""
         self.visual_context_ref_id = None
+        self._after_mutation()
 
     def record_acknowledgment(self, phrase: str) -> None:
         """Track a recently used lightweight acknowledgment phrase."""
@@ -181,6 +216,7 @@ class ConversationState:
         overflow = len(self.recent_ack_phrases) - MAX_RECENT_ASSISTANT_ACK_TRACK
         if overflow > 0:
             del self.recent_ack_phrases[0:overflow]
+        self._after_mutation()
 
     def record_restatement_fingerprint(self, fingerprint: str) -> None:
         """Track a recent request-restatement fingerprint for repetition control."""
@@ -193,6 +229,46 @@ class ConversationState:
         )
         if overflow > 0:
             del self.recent_restatement_fingerprints[0:overflow]
+        self._after_mutation()
+
+    def clone(self) -> ConversationState:
+        """Return a detached copy of this session state."""
+        copied = ConversationState(
+            current_topic=self.current_topic,
+            active_goal=self.active_goal,
+            unresolved_question=self.unresolved_question,
+            latest_correction=self.latest_correction,
+            waiting_for_user=self.waiting_for_user,
+            recent_interaction_mode=self.recent_interaction_mode,
+            visual_context_ref_id=self.visual_context_ref_id,
+            offered_options=self.offered_options,
+            recent_referents=list(self.recent_referents),
+            recent_ack_phrases=list(self.recent_ack_phrases),
+            recent_restatement_fingerprints=list(
+                self.recent_restatement_fingerprints
+            ),
+            turn_window=self.turn_window,
+            _character_budget_used=self._character_budget_used,
+        )
+        return copied
+
+    def restore(self, other: ConversationState) -> None:
+        """Replace this state's fields with a previously cloned snapshot."""
+        self.current_topic = other.current_topic
+        self.active_goal = other.active_goal
+        self.unresolved_question = other.unresolved_question
+        self.latest_correction = other.latest_correction
+        self.waiting_for_user = other.waiting_for_user
+        self.recent_interaction_mode = other.recent_interaction_mode
+        self.visual_context_ref_id = other.visual_context_ref_id
+        self.offered_options = other.offered_options
+        self.recent_referents = list(other.recent_referents)
+        self.recent_ack_phrases = list(other.recent_ack_phrases)
+        self.recent_restatement_fingerprints = list(
+            other.recent_restatement_fingerprints
+        )
+        self.turn_window = other.turn_window
+        self._character_budget_used = other._character_budget_used
 
     def snapshot(self) -> dict[str, object]:
         """Return a deterministic serializable snapshot of current state."""
@@ -241,6 +317,10 @@ class ConversationState:
             and not self.recent_restatement_fingerprints
         )
 
+    def _after_mutation(self) -> None:
+        self._recompute_budget()
+        self._trim_to_character_budget()
+
     def _recompute_budget(self) -> None:
         total = 0
         for value in (
@@ -263,11 +343,34 @@ class ConversationState:
         self._character_budget_used = total
 
     def _trim_to_character_budget(self) -> None:
-        """Drop oldest referents until within the configured character budget."""
+        """Drop low-value historical state until within the aggregate cap.
+
+        Preference order: restatement fingerprints, acknowledgments, oldest
+        referents, older options, then correction/question/visual scalars.
+        Active topic and goal are not truncated into nonsense.
+        """
         self._recompute_budget()
+        guard = 0
         while (
             self._character_budget_used > MAX_CONVERSATIONAL_STATE_CHARS
-            and self.recent_referents
+            and guard < 64
         ):
-            self.recent_referents.pop(0)
+            guard += 1
+            if self.recent_restatement_fingerprints:
+                self.recent_restatement_fingerprints.pop(0)
+            elif self.recent_ack_phrases:
+                self.recent_ack_phrases.pop(0)
+            elif self.recent_referents:
+                self.recent_referents.pop(0)
+            elif self.offered_options:
+                self.offered_options = self.offered_options[1:]
+            elif self.latest_correction is not None:
+                self.latest_correction = None
+            elif self.unresolved_question is not None:
+                self.unresolved_question = None
+                self.waiting_for_user = False
+            elif self.visual_context_ref_id is not None:
+                self.visual_context_ref_id = None
+            else:
+                break
             self._recompute_budget()

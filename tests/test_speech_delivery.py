@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import get_type_hints
 
-from src.config import MAX_SPEECH_CHUNKS
+from src.config import MAX_SPEECH_CHUNKS, MAX_TTS_CHARS
 from src.conversation_intelligence import ConversationIntelligence
 from src.conversation_state import ConversationState
 from src.speech_delivery import (
@@ -434,6 +434,29 @@ def test_max_speech_chunks_merges_overflow_without_truncation() -> None:
         assert f"topic {index:02d}" in spoken_join
 
 
+def test_extreme_speech_keeps_tts_limit_without_content_loss() -> None:
+    sentences = [
+        f"Spoken pacing topic {index:03d} keeps unique words available for synthesis."
+        for index in range(1, 201)
+    ]
+    text = " ".join(sentences)
+    plan = _plan(response_depth="detailed")
+    chunks = chunk_spoken_text(text, plan)
+    assert all(len(chunk.text) <= MAX_TTS_CHARS for chunk in chunks)
+    joined = " ".join(chunk.text for chunk in chunks)
+    for index in range(1, 201):
+        assert f"topic {index:03d}" in joined
+    assert chunk_spoken_text(text, plan) == chunks
+    exact_plan = _plan(
+        response_depth="detailed",
+        user_text="read that hash aloud exactly",
+        canonical_text="a" * 5000,
+    )
+    exact_chunks = chunk_spoken_text("a" * 5000, exact_plan)
+    assert all(len(chunk.text) <= MAX_TTS_CHARS for chunk in exact_chunks)
+    assert "a" * 5000 == "".join(chunk.text for chunk in exact_chunks).replace(" ", "")
+
+
 def test_normalization_preserves_technical_tokens() -> None:
     uuid = "550e8400-e29b-41d4-a716-446655440000"
     git_hash = "a1b2c3d"
@@ -504,3 +527,14 @@ def test_clear_resets_speech_delivery_state() -> None:
     assert history.turns == []
     assert state.last_spoken_opening is None
     assert state.pop_pending_chunk() is None
+
+
+def test_load_pending_rejects_when_tts_chunk_cap_would_drop_tail() -> None:
+    from src.config import MAX_TTS_CHARS
+    from src.speech_delivery import MAX_PENDING_SPEECH_CHUNKS
+
+    state = SpeechDeliveryState()
+    chunks = ["x" * MAX_TTS_CHARS for _ in range(MAX_PENDING_SPEECH_CHUNKS + 8)]
+    state.load_pending(chunks)
+    assert state.pending_rejected is True
+    assert state.pending_chunks == []

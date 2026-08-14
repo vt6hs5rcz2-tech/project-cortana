@@ -50,6 +50,12 @@ from src.tool_commands import create_default_tool_services
 from src.tool_repository import JsonToolControlRepository
 from src.workflow_commands import create_default_workflow_services
 
+AI_NOT_CONNECTED_MESSAGE = (
+    "Cortana: Not connected to OpenAI yet. "
+    "Add your API key to the private .env file."
+)
+AI_CONNECTION_CONFIGURED_MESSAGE = "Cortana: AI connection is configured."
+
 
 def initialize_ai(
     logger: logging.Logger,
@@ -60,7 +66,7 @@ def initialize_ai(
     except ValueError as error:
         logger.error("%s", error)
         print(
-            "Cortana is not connected to OpenAI yet. "
+            "Cortana: Not connected to OpenAI yet. "
             "Add your API key to the private .env file."
         )
         return None
@@ -84,7 +90,7 @@ def main() -> None:
         return
 
     settings, client = initialized
-    print("Cortana's AI connection is configured.")
+    print("Cortana: AI connection is configured.")
 
     memory_store = JsonMemoryStore(get_default_memory_file_path())
     active_memory_context = ActiveMemoryContext()

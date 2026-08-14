@@ -236,6 +236,10 @@ class InvalidToolIdError(ToolValidationError):
     """Raised when a tool-related ID is invalid."""
 
 
+class UnknownToolIdError(ToolValidationError):
+    """Raised when a syntactically valid tool ID is not registered."""
+
+
 class InvalidToolEnumError(ToolValidationError):
     """Raised when a controlled vocabulary value is not allowed."""
 

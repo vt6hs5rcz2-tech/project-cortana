@@ -1267,6 +1267,24 @@ Activation is rejected with a clear local message when either limit would be exc
 
 ## Running tests
 
+Everyday development uses the normal suite, which excludes the Pre-M30
+hardening files:
+
 ```bash
-python -m pytest
+python -m pytest --ignore-glob="tests/test_pre_m30_*_adversarial.py"
 ```
+
+`python -m pytest` still runs the full tree, including hardening and extended
+stress tests.
+
+Intended tiers:
+
+- **Normal:** existing everyday tests, excluding `tests/test_pre_m30_*_adversarial.py`.
+- **Hardening:** `tests/test_pre_m30_hardening_adversarial.py`, the Bug Hunt #2
+  domain suites, and Bug Hunt #3 first-run, end-to-end, restart, and
+  user-experience suites.
+- **Extended stress:** `tests/test_pre_m30_long_session_adversarial.py`.
+
+Windows `%TEMP%\cortana-*` directories from older development are a historical
+environment artifact. They are not in git. Current leak tests are green; those
+directories can be cleaned on the developer machine separately.

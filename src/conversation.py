@@ -9,10 +9,14 @@ DEFAULT_MAX_COMPLETED_TURNS = 20
 
 STARTUP_GREETING = (
     "Cortana: Hello. I am Cortana, your cybersecurity assistant. "
+    "Type /help to see available commands. "
     "Type your message, or say exit, quit, or goodbye to end the session."
 )
 
 SHUTDOWN_MESSAGE = "Cortana: Goodbye. Stay secure."
+MESSAGE_TOO_LONG = (
+    "Cortana: That message is too long. Please shorten it and try again."
+)
 
 
 def is_exit_command(message: str) -> bool:

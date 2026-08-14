@@ -324,22 +324,33 @@ def _handle_calendar_confirm(context: CalendarCommandContext) -> CalendarCommand
     if not proposal_id or " | " in proposal_id:
         return CalendarCommandResult(message=CALENDAR_CONFIRM_USAGE)
     proposal = context.calendar_service.confirm(proposal_id)
-    return CalendarCommandResult(
-        message=(
-            f"Cortana: Calendar proposal executed ({proposal.proposal_id}). "
-            f"operation={proposal.operation} status={proposal.status}"
-        )
-    )
+    return CalendarCommandResult(message=_format_confirm_success(proposal))
+
+
+def _format_confirm_success(proposal: CalendarChangeProposal) -> str:
+    payload = proposal.normalized_payload
+    if proposal.operation == "create":
+        tz = payload["timezone"]
+        title = _preview(payload["title"])
+        when = format_local_wall_from_utc(payload["start_utc"], tz)
+        return f"Cortana: '{title}' was added to your calendar for {when}."
+    if proposal.operation == "reschedule":
+        tz = payload["timezone"]
+        when = format_local_wall_from_utc(payload["start_utc"], tz)
+        return f"Cortana: The calendar event was rescheduled for {when}."
+    return "Cortana: The calendar event was cancelled."
 
 
 def _format_proposal_summary(proposal: CalendarChangeProposal) -> str:
     payload = proposal.normalized_payload
+    action = {
+        "create": "add this event",
+        "reschedule": "reschedule this event",
+        "cancel": "cancel this event",
+    }[proposal.operation]
     lines = [
         f"Cortana: Calendar change prepared ({proposal.proposal_id}).",
-        f"  operation: {proposal.operation}",
-        f"  calendar_id: {proposal.calendar_id}",
-        f"  status: {proposal.status}",
-        f"  expires_at: {proposal.expires_at}",
+        f"  Action: {action}",
         "  Confirm with: "
         f"/calendar-confirm {proposal.proposal_id}",
     ]
@@ -347,10 +358,9 @@ def _format_proposal_summary(proposal: CalendarChangeProposal) -> str:
         tz = payload["timezone"]
         lines.extend(
             [
-                f"  client_event_id: {proposal.client_event_id}",
                 f"  title: {_preview(payload['title'])}",
-                f"  start_local: {format_local_wall_from_utc(payload['start_utc'], tz)}",
-                f"  end_local: {format_local_wall_from_utc(payload['end_utc'], tz)}",
+                f"  start: {format_local_wall_from_utc(payload['start_utc'], tz)}",
+                f"  end: {format_local_wall_from_utc(payload['end_utc'], tz)}",
                 f"  timezone: {tz}",
             ]
         )
@@ -358,14 +368,14 @@ def _format_proposal_summary(proposal: CalendarChangeProposal) -> str:
         tz = payload["timezone"]
         lines.extend(
             [
-                f"  event_id: {proposal.event_id}",
-                f"  start_local: {format_local_wall_from_utc(payload['start_utc'], tz)}",
-                f"  end_local: {format_local_wall_from_utc(payload['end_utc'], tz)}",
+                f"  event: {proposal.event_id}",
+                f"  start: {format_local_wall_from_utc(payload['start_utc'], tz)}",
+                f"  end: {format_local_wall_from_utc(payload['end_utc'], tz)}",
                 f"  timezone: {tz}",
             ]
         )
     else:
-        lines.append(f"  event_id: {proposal.event_id}")
+        lines.append(f"  event: {proposal.event_id}")
     return "\n".join(lines)
 
 

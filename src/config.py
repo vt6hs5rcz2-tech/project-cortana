@@ -21,6 +21,7 @@ VERSION = "0.1.0"
 
 # Session capabilities
 HISTORY_PERSISTENCE_ENABLED = False
+MAX_CONVERSATION_MESSAGE_CHARS = 16_384
 EXPLICIT_PERSISTENT_MEMORY_ENABLED = True
 ACTIVE_MEMORY_PERSISTENCE_ENABLED = False
 KNOWLEDGE_VAULT_ENABLED = True
@@ -32,6 +33,7 @@ SOURCE_MANIFEST_PERSISTENCE_ENABLED = False
 
 # Explicit persistent memory limits and storage
 MAX_MEMORY_TEXT_LENGTH = 2000
+MAX_STORED_MEMORIES = 500
 MEMORY_FILENAME = "memories.json"
 
 # Active memory context limits (session-only AI reference context)

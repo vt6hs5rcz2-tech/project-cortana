@@ -11,9 +11,11 @@ import pytest
 from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient
 from src.conversation import ConversationHistory
+from src.conversation_state import ConversationState
 from src.settings import Settings
 from src.speech_delivery import SpeechDeliveryState
 from src.voice_commands import (
+    VOICE_EMPTY_TRANSCRIPT,
     VoiceCommandContext,
     create_default_voice_services,
     handle_voice_command,
@@ -57,6 +59,7 @@ def _context(
     history: ConversationHistory | None = None,
     stop_signal: Any = None,
     speech_delivery_state: SpeechDeliveryState | None = None,
+    conversation_state: ConversationState | None = None,
 ) -> VoiceCommandContext:
     return VoiceCommandContext(
         message="/voice-turn",
@@ -69,6 +72,7 @@ def _context(
         capture=capture,
         voice_service=voice_service,
         speech_delivery_state=speech_delivery_state,
+        conversation_state=conversation_state,
     )
 
 
@@ -430,3 +434,48 @@ def test_voice_turn_cancel_before_first_chunk_plays_nothing(
     service.synthesize.assert_not_called()
     assert played == []
     assert delivery_state.pop_pending_chunk() is None
+
+
+@pytest.mark.parametrize("transcript", ["", "   ", "\n\t  \n"])
+def test_voice_turn_blank_transcript_skips_chat_history_and_tts(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    transcript: str,
+) -> None:
+    history = ConversationHistory()
+    state = ConversationState()
+    state.set_topic("keep this topic")
+    prior = state.snapshot()
+    capture = MagicMock(spec=MicrophoneCaptureAdapter)
+    capture.capture.return_value = _audio()
+    service = MagicMock(spec=VoiceService)
+    service.transcribe.return_value = transcript
+    process_calls = {"count": 0}
+
+    def boom_process(**kwargs: object) -> str | None:
+        process_calls["count"] += 1
+        return "should not chat"
+
+    monkeypatch.setattr(
+        "src.conversation_loop.process_conversation_turn",
+        boom_process,
+    )
+    monkeypatch.setattr("src.voice_commands.sys.platform", "win32")
+
+    result = handle_voice_command(
+        "voice-turn",
+        _context(
+            capture=capture,
+            voice_service=service,
+            history=history,
+            conversation_state=state,
+        ),
+    )
+    assert result is not None
+    assert result.message == VOICE_EMPTY_TRANSCRIPT
+    assert history.turns == []
+    assert state.snapshot() == prior
+    assert process_calls["count"] == 0
+    service.synthesize.assert_not_called()
+    service.transcribe.assert_called_once()
+    assert "(Heard)" not in capsys.readouterr().out

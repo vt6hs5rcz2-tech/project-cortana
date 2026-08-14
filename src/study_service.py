@@ -37,7 +37,7 @@ from src.config import (
     MAX_STUDY_TOPIC_CHARS,
     STUDY_PARTNER_ENABLED,
 )
-from src.document import DocumentValidationError, validate_document_id
+from src.document import InvalidDocumentIdError, validate_document_id
 from src.document_chunk import DocumentChunk
 from src.document_chunker import DocumentChunker, DocumentChunkingError
 from src.document_knowledge_service import (
@@ -810,36 +810,25 @@ def parse_study_document_ids(argument: str) -> tuple[str, ...]:
         raise StudyPartnerValidationError(STUDY_START_USAGE)
     if raw.startswith(",") or raw.endswith(",") or ",," in raw:
         raise StudyPartnerValidationError(STUDY_START_USAGE)
-    if " " in raw.replace(",", ""):
-        # IDs are UUIDs; spaces outside commas are invalid in this grammar.
-        pass
+    if " " in raw:
+        raise StudyPartnerValidationError(STUDY_START_USAGE)
 
     parts = raw.split(",")
-    if any(not part.strip() or part != part.strip() for part in parts):
-        # Reject empty segments and surrounding whitespace around commas.
-        if any(not part.strip() for part in parts):
-            raise StudyPartnerValidationError(STUDY_START_USAGE)
-        # Allow trimming each segment after validating no empty segments.
-    cleaned_parts = [part.strip() for part in parts]
-    if not cleaned_parts or any(not part for part in cleaned_parts):
+    if any(not part for part in parts):
         raise StudyPartnerValidationError(STUDY_START_USAGE)
-    if not (1 <= len(cleaned_parts) <= MAX_STUDY_DOCUMENTS):
+    if not (1 <= len(parts) <= MAX_STUDY_DOCUMENTS):
         raise StudyPartnerValidationError(
             f"Cortana: Provide between 1 and {MAX_STUDY_DOCUMENTS} document IDs."
         )
 
-    # Exact grammar: no spaces around commas.
-    if raw != ",".join(cleaned_parts):
-        raise StudyPartnerValidationError(STUDY_START_USAGE)
-
     document_ids: list[str] = []
     seen: set[str] = set()
-    for part in cleaned_parts:
+    for part in parts:
         try:
             document_id = validate_document_id(part)
-        except DocumentValidationError as error:
+        except InvalidDocumentIdError as error:
             raise StudyPartnerValidationError(
-                f"Cortana: Document '{part}' was not found."
+                f"Cortana: '{part}' is not a valid document ID."
             ) from error
         if document_id in seen:
             raise StudyPartnerValidationError(

@@ -26,12 +26,16 @@ from src.document_retrieval import (
 from src.document_vault import DocumentStorageError, DocumentVault
 from src.incident_repository import IncidentRepository, IncidentStorageError
 from src.memory import MemoryTextTooLongError, MemoryValidationError
-from src.memory_store import MemoryStorageError, MemoryStore
+from src.memory_store import MemoryCountLimitError, MemoryStorageError, MemoryStore
 from src.security_common import InvalidSecurityIdError, validate_security_id
 from src.security_incident import SecurityIncident
 
 _MEMORY_WRITE_PATTERN = re.compile(
     r"^remember\s*[:\-]?\s+(?P<text>.+)$",
+    re.IGNORECASE,
+)
+_DEICTIC_MEMORY_TEXT = re.compile(
+    r"^(?:this|that|it)(?:\s+forever)?$",
     re.IGNORECASE,
 )
 _DOCUMENT_SEARCH_PATTERN = re.compile(
@@ -207,6 +211,12 @@ _CALENDAR_SCHEDULE_GUIDANCE = (
 )
 
 
+def _is_deictic_memory_text(text: str) -> bool:
+    """Return True when the remember payload is too ambiguous to persist."""
+    cleaned = text.strip().rstrip(".,!?").strip()
+    return _DEICTIC_MEMORY_TEXT.fullmatch(cleaned) is not None
+
+
 @dataclass(frozen=True)
 class OrchestrationResult:
     """Bounded safe outcome for one high-confidence orchestration match."""
@@ -268,6 +278,9 @@ class UnifiedAssistantOrchestrator:
             return None
 
         text = match.group("text")
+        if _is_deictic_memory_text(text):
+            return None
+
         try:
             record = self._memory_store.add_memory(text)
         except MemoryTextTooLongError:
@@ -277,6 +290,14 @@ class UnifiedAssistantOrchestrator:
                 confidence="high",
                 missing_fields=(),
                 safe_user_message=_MEMORY_TOO_LONG,
+            )
+        except MemoryCountLimitError as error:
+            return OrchestrationResult(
+                domain="memory",
+                action="write",
+                confidence="high",
+                missing_fields=(),
+                safe_user_message=error.user_message,
             )
         except MemoryValidationError:
             return OrchestrationResult(

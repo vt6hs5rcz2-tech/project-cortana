@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from src.memory_store import JsonMemoryStore, MemoryStorageError
+from src.config import MAX_MEMORY_TEXT_LENGTH, MAX_STORED_MEMORIES
+from src.memory import MemoryTextTooLongError
+from src.memory_store import JsonMemoryStore, MemoryCountLimitError, MemoryStorageError
 
 
 def _store(tmp_path: Path) -> JsonMemoryStore:
@@ -195,3 +197,57 @@ def test_memory_text_is_not_written_to_logs(
     combined_logs = " ".join(record.getMessage() for record in caplog.records)
     assert secret_text not in combined_logs
     assert "{bad-json" not in combined_logs
+
+
+def test_memory_store_enforces_count_cap(tmp_path: Path) -> None:
+    path = tmp_path / "memories.json"
+    store = JsonMemoryStore(path, max_memories=3)
+    first = store.add_memory("one")
+    store.add_memory("two")
+    store.add_memory("three")
+    assert len(store.list_memories()) == 3
+
+    with pytest.raises(MemoryCountLimitError) as error:
+        store.add_memory("four")
+    assert "capacity" in error.value.user_message.casefold()
+    assert "3" in error.value.user_message
+    assert [memory.text for memory in store.list_memories()] == ["one", "two", "three"]
+
+    reloaded = JsonMemoryStore(path, max_memories=3)
+    assert [memory.text for memory in reloaded.list_memories()] == [
+        "one",
+        "two",
+        "three",
+    ]
+
+    assert store.delete_memory(first.id) is True
+    added = store.add_memory("four")
+    assert added.text == "four"
+    assert [memory.text for memory in JsonMemoryStore(path, max_memories=3).list_memories()] == [
+        "two",
+        "three",
+        "four",
+    ]
+
+
+def test_memory_store_text_limit_still_applies_at_capacity(tmp_path: Path) -> None:
+    store = JsonMemoryStore(tmp_path / "memories.json", max_memories=1)
+    store.add_memory("kept")
+    with pytest.raises(MemoryTextTooLongError):
+        store.add_memory("x" * (MAX_MEMORY_TEXT_LENGTH + 1))
+    assert [memory.text for memory in store.list_memories()] == ["kept"]
+
+
+def test_memory_store_load_rejects_over_capacity_file(tmp_path: Path) -> None:
+    writer = JsonMemoryStore(tmp_path / "memories.json", max_memories=3)
+    writer.add_memory("a")
+    writer.add_memory("b")
+    original = (tmp_path / "memories.json").read_text(encoding="utf-8")
+    reader = JsonMemoryStore(tmp_path / "memories.json", max_memories=1)
+    with pytest.raises(MemoryStorageError):
+        reader.list_memories()
+    assert (tmp_path / "memories.json").read_text(encoding="utf-8") == original
+
+
+def test_max_stored_memories_default_is_five_hundred() -> None:
+    assert MAX_STORED_MEMORIES == 500

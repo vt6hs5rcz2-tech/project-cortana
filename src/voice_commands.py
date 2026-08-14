@@ -11,14 +11,16 @@ from typing import cast
 from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient
 from src.config import (
+    MAX_TTS_CHARS,
     MAX_VOICE_UTTERANCE_SECONDS,
     VOICE_INTERACTION_ENABLED,
     VOICE_SAMPLE_RATE_HZ,
 )
-from src.conversation import ConversationHistory
+from src.conversation import ConversationHistory, MESSAGE_TOO_LONG
 from src.conversation_state import ConversationState
 from src.settings import Settings
 from src.speech_delivery import (
+    MAX_PENDING_SPEECH_CHUNKS,
     SpeechDeliveryState,
     SpokenDelivery,
     build_speech_delivery_plan,
@@ -51,8 +53,17 @@ VOICE_COMMAND_NAMES = frozenset(
 )
 
 VOICE_CHAT_FAILED = "Cortana: I could not complete that request."
+VOICE_EMPTY_TRANSCRIPT = (
+    "Cortana: I did not hear anything. Please try again."
+)
 VOICE_PLAYBACK_FAILED = (
     "Cortana: I could not play the spoken response."
+)
+VOICE_SPEECH_PARTIAL_FAILED = (
+    "Cortana: Spoken delivery stopped. The full answer is on screen."
+)
+VOICE_SPEECH_TOO_LONG = (
+    "Cortana: That answer is too long to speak. The full text is on screen."
 )
 VOICE_UNSUPPORTED_PLATFORM = (
     "Cortana: Voice interaction requires Windows in this milestone."
@@ -188,7 +199,8 @@ def _play_spoken_delivery(
 
     Canonical history text is not modified. Remaining chunks stop on
     cancel. Cancellation before the first chunk synthesizes and plays
-    nothing. Fail-open for the first chunk uses the original assistant text.
+    nothing. Fail-open for the first chunk may retry the canonical text only
+    when that text is no longer than the failed chunk and within MAX_TTS_CHARS.
     """
     texts = [chunk.text for chunk in delivery.chunks if chunk.text.strip()]
     if not texts:
@@ -203,6 +215,10 @@ def _play_spoken_delivery(
         return
     if delivery_state is not None:
         delivery_state.load_pending(texts)
+        if delivery_state.pending_rejected:
+            raise VoiceServiceError(VOICE_SPEECH_TOO_LONG)
+    elif len(texts) > MAX_PENDING_SPEECH_CHUNKS:
+        raise VoiceServiceError(VOICE_SPEECH_TOO_LONG)
 
     first = True
     while True:
@@ -221,14 +237,23 @@ def _play_spoken_delivery(
             return
         try:
             speech_bytes = service.synthesize(piece)
-        except VoiceServiceError:
+        except VoiceServiceError as error:
             if not first:
+                if delivery_state is not None:
+                    delivery_state.abort_pending()
+                raise VoiceServiceError(VOICE_SPEECH_PARTIAL_FAILED) from error
+            fallback = canonical.strip()
+            if (
+                not fallback
+                or len(fallback) > MAX_TTS_CHARS
+                or len(fallback) > len(piece)
+            ):
                 if delivery_state is not None:
                     delivery_state.abort_pending()
                 raise
             if delivery_state is not None:
                 delivery_state.clear_pending_chunks()
-            speech_bytes = service.synthesize(canonical)
+            speech_bytes = service.synthesize(fallback)
             try:
                 _play_wav_synchronously(speech_bytes)
             except VoiceServiceError:
@@ -238,9 +263,11 @@ def _play_spoken_delivery(
             return
         try:
             _play_wav_synchronously(speech_bytes)
-        except VoiceServiceError:
+        except VoiceServiceError as error:
             if delivery_state is not None:
                 delivery_state.abort_pending()
+            if not first:
+                raise VoiceServiceError(VOICE_SPEECH_PARTIAL_FAILED) from error
             raise
         finally:
             del speech_bytes
@@ -269,12 +296,15 @@ def _handle_voice_turn(context: VoiceCommandContext) -> VoiceCommandResult:
 
     service = _require_service(context)
     transcript = service.transcribe(audio)
-    print(f"Cortana: (Heard) {transcript}")
+    cleaned = transcript.strip()
+    if not cleaned:
+        return VoiceCommandResult(message=VOICE_EMPTY_TRANSCRIPT)
+    print(f"Cortana: (Heard) {cleaned}")
 
     answer = process_conversation_turn(
         client=context.client,
         settings=context.settings,
-        user_message=transcript,
+        user_message=cleaned,
         logger=context.logger,
         conversation_history=context.conversation_history,
         active_memory_context=context.active_memory_context,
@@ -283,6 +313,8 @@ def _handle_voice_turn(context: VoiceCommandContext) -> VoiceCommandResult:
     )
     if answer is None:
         return VoiceCommandResult(message=VOICE_CHAT_FAILED)
+    if answer == MESSAGE_TOO_LONG:
+        return VoiceCommandResult(message=MESSAGE_TOO_LONG)
 
     print(f"Cortana: {answer}")
 
@@ -290,7 +322,7 @@ def _handle_voice_turn(context: VoiceCommandContext) -> VoiceCommandResult:
     plan = build_speech_delivery_plan(
         delivery_mode="voice_turn",
         interaction_mode="voice",
-        user_text=transcript,
+        user_text=cleaned,
         canonical_text=answer,
         delivery_state=delivery_state,
         user_interrupted=False,

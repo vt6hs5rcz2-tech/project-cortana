@@ -90,6 +90,8 @@ REALTIME_CONNECTION_FAILED = (
 _MAX_ASSEMBLER_COMPLETED_PENDING = 32
 _WORKER_JOIN_TIMEOUT_SECONDS = 5.0
 _MAX_PENDING_REALTIME_PLANS = 8
+_MAX_PLANNED_TRANSCRIPT_ITEMS = 32
+_MAX_INVALID_PENDING_RESPONSES = 8
 REALTIME_SESSION_FAILED = (
     "Cortana: Realtime voice session failed. "
     "You can use /voice-turn for one spoken turn."
@@ -172,7 +174,12 @@ class RealtimeSessionState(str, Enum):
 
 
 class OutboundActionKind(str, Enum):
-    """Internal actions drained only by the session/network worker."""
+    """Internal actions drained only by the session/network worker.
+
+    CANCEL_RESPONSE is reserved for the drain handler only. Normal barge-in
+    uses ``interrupt_response=True`` plus local abort and never queues this
+    kind. Do not add a second client-side cancellation system.
+    """
 
     APPEND_AUDIO = "append_audio"
     CLOSE_SESSION = "close_session"
@@ -395,6 +402,16 @@ class TurnCommitResult:
     user_item_id: str | None = None
 
 
+def _trim_assembler_map(mapping: dict[str, str]) -> None:
+    while len(mapping) > _MAX_ASSEMBLER_COMPLETED_PENDING:
+        mapping.pop(next(iter(mapping)), None)
+
+
+def _trim_assembler_set(store: set[str]) -> None:
+    while len(store) > _MAX_ASSEMBLER_COMPLETED_PENDING:
+        store.discard(next(iter(store)))
+
+
 _NO_COMMIT = TurnCommitResult(outcome="none")
 
 
@@ -416,15 +433,80 @@ class _TurnAssembler:
         self._non_completed_responses: set[str] = set()
         self._committed_responses: set[str] = set()
         self._committed_user_only_items: set[str] = set()
+        self._committed_user_items: set[str] = set()
+        self._committed_user_order: deque[str] = deque()
+        self._unbound_response_ids: deque[str] = deque()
         self._user_only_items: set[str] = set()
         self._current_user_item_id: str | None = None
 
     def set_current_user_item(self, item_id: str) -> None:
         self._current_user_item_id = item_id
+        self._bind_unbound_responses(item_id)
 
     def bind_response(self, response_id: str) -> None:
-        if self._current_user_item_id is not None:
-            self._response_user_item[response_id] = self._current_user_item_id
+        current = self._current_user_item_id
+        if current is not None and self._is_bindable_user_item(current):
+            self._response_user_item[response_id] = current
+            _trim_assembler_map(self._response_user_item)
+            return
+        if (
+            response_id not in self._response_user_item
+            and response_id not in self._unbound_response_ids
+        ):
+            self._unbound_response_ids.append(response_id)
+            while len(self._unbound_response_ids) > _MAX_ASSEMBLER_COMPLETED_PENDING:
+                self._unbound_response_ids.popleft()
+
+    def _is_bindable_user_item(self, item_id: str) -> bool:
+        return (
+            item_id not in self._committed_user_items
+            and item_id not in self._committed_user_only_items
+        )
+
+    def _bind_unbound_responses(self, item_id: str) -> None:
+        if not self._is_bindable_user_item(item_id):
+            return
+        live: list[str] = []
+        for response_id in self._unbound_response_ids:
+            if (
+                response_id in self._committed_responses
+                or response_id in self._response_user_item
+                or response_id in self._non_completed_responses
+            ):
+                continue
+            live.append(response_id)
+        self._unbound_response_ids.clear()
+        # A single out-of-order created can bind (F9). Multiple orphans are
+        # ambiguous and must not attach to an unrelated later user turn.
+        if len(live) == 1:
+            self._response_user_item[live[0]] = item_id
+            _trim_assembler_map(self._response_user_item)
+
+    def reset(self) -> None:
+        """Clear session-local pairing maps. Shared history is unchanged."""
+        self._pending_user.clear()
+        self._pending_assistant.clear()
+        self._response_user_item.clear()
+        self._completed_responses.clear()
+        self._completed_order.clear()
+        self._non_completed_responses.clear()
+        self._committed_responses.clear()
+        self._committed_user_only_items.clear()
+        self._committed_user_items.clear()
+        self._committed_user_order.clear()
+        self._unbound_response_ids.clear()
+        self._user_only_items.clear()
+        self._current_user_item_id = None
+
+    def _mark_user_item_committed(self, item_id: str) -> None:
+        if item_id not in self._committed_user_items:
+            self._committed_user_items.add(item_id)
+            self._committed_user_order.append(item_id)
+            while len(self._committed_user_order) > _MAX_ASSEMBLER_COMPLETED_PENDING:
+                oldest = self._committed_user_order.popleft()
+                self._committed_user_items.discard(oldest)
+        if self._current_user_item_id == item_id:
+            self._current_user_item_id = None
 
     def store_user_transcript(
         self, item_id: str, transcript: str
@@ -432,9 +514,13 @@ class _TurnAssembler:
         cleaned = transcript.strip()
         if not cleaned or len(cleaned) > MAX_VOICE_TRANSCRIPT_CHARS:
             return _NO_COMMIT
-        if item_id in self._committed_user_only_items:
+        if (
+            item_id in self._committed_user_only_items
+            or item_id in self._committed_user_items
+        ):
             return _NO_COMMIT
         self._pending_user[item_id] = cleaned
+        _trim_assembler_map(self._pending_user)
         if item_id in self._user_only_items:
             self._commit_user_only(item_id, cleaned)
             return TurnCommitResult(outcome="user_only", user_item_id=item_id)
@@ -455,6 +541,7 @@ class _TurnAssembler:
             # Interrupted/cancelled/failed/incomplete: never commit assistant text.
             return
         self._pending_assistant[response_id] = cleaned
+        _trim_assembler_map(self._pending_assistant)
         self._try_commit_pair(response_id)
 
     def peek_pending_assistant(self, response_id: str) -> str | None:
@@ -475,8 +562,10 @@ class _TurnAssembler:
 
         # Interrupted/cancelled/failed/incomplete: never commit assistant text.
         self._non_completed_responses.add(response_id)
+        _trim_assembler_set(self._non_completed_responses)
         self._completed_responses.discard(response_id)
         self._pending_assistant.pop(response_id, None)
+        self._discard_unbound_response(response_id)
         user_item = self._response_user_item.pop(response_id, None)
         if user_item is None:
             return _NO_COMMIT
@@ -487,6 +576,7 @@ class _TurnAssembler:
             self._commit_user_only(user_item, user)
             return TurnCommitResult(outcome="user_only", user_item_id=user_item)
         self._user_only_items.add(user_item)
+        _trim_assembler_set(self._user_only_items)
         return _NO_COMMIT
 
     def _mark_completed(self, response_id: str) -> None:
@@ -517,20 +607,31 @@ class _TurnAssembler:
         self._history.add_user_message(user)
         self._history.add_assistant_message(assistant)
         self._committed_responses.add(response_id)
+        _trim_assembler_set(self._committed_responses)
         self._pending_user.pop(user_item, None)
         self._pending_assistant.pop(response_id, None)
         self._response_user_item.pop(response_id, None)
         self._completed_responses.discard(response_id)
         self._user_only_items.discard(user_item)
+        self._discard_unbound_response(response_id)
+        self._mark_user_item_committed(user_item)
         return TurnCommitResult(outcome="pair", user_item_id=user_item)
+
+    def _discard_unbound_response(self, response_id: str) -> None:
+        if response_id in self._unbound_response_ids:
+            self._unbound_response_ids = deque(
+                item for item in self._unbound_response_ids if item != response_id
+            )
 
     def _commit_user_only(self, item_id: str, user: str) -> None:
         if item_id in self._committed_user_only_items:
             return
         self._history.add_user_message(user)
         self._committed_user_only_items.add(item_id)
+        _trim_assembler_set(self._committed_user_only_items)
         self._user_only_items.discard(item_id)
         self._pending_user.pop(item_id, None)
+        self._mark_user_item_committed(item_id)
 
 
 class RealtimeVoiceSession:
@@ -566,6 +667,8 @@ class RealtimeVoiceSession:
         self._conversation_intelligence = ConversationIntelligence()
         self._base_instructions = ""
         self._plans_by_item: dict[str, RealtimeConversationPlan] = {}
+        self._planned_transcript_items: set[str] = set()
+        self._planned_transcript_order: deque[str] = deque()
         self._interrupted_item_ids: set[str] = set()
         self._state_writes_closed = threading.Event()
         self._logger = logger_ or logger
@@ -612,8 +715,15 @@ class RealtimeVoiceSession:
         )
         self._cancelled_set: set[str] = set()
         self._responding = False
+        self._auto_response_pending = False
+        self._preempt_upcoming_response = False
+        self._invalid_pending_response_count = 0
+        self._response_generation = 0
+        self._pending_response_generation: int | None = None
+        self._active_response_generation: int | None = None
         self._assembler = _TurnAssembler(conversation_history)
         self._playback_abort = threading.Event()
+        self._abort_generation = 0
         self._playback_active_response_id: str | None = None
         self._playback_stream: Any | None = None
         self._playback_stream_lock = threading.Lock()
@@ -982,14 +1092,10 @@ class RealtimeVoiceSession:
             self._on_speech_started(event)
             return
         if event_type == "input_audio_buffer.speech_stopped":
-            item_id = getattr(event, "item_id", None)
-            if isinstance(item_id, str) and item_id:
-                self._assembler.set_current_user_item(item_id)
+            self._on_user_audio_committed(event)
             return
         if event_type == "input_audio_buffer.committed":
-            item_id = getattr(event, "item_id", None)
-            if isinstance(item_id, str) and item_id:
-                self._assembler.set_current_user_item(item_id)
+            self._on_user_audio_committed(event)
             return
         if event_type == "conversation.item.input_audio_transcription.completed":
             self._on_user_transcript(event)
@@ -1024,30 +1130,50 @@ class RealtimeVoiceSession:
     def _is_cancelled(self, response_id: str | None) -> bool:
         return bool(response_id and response_id in self._cancelled_set)
 
+    def _on_user_audio_committed(self, event: object) -> None:
+        item_id = getattr(event, "item_id", None)
+        if isinstance(item_id, str) and item_id:
+            self._assembler.set_current_user_item(item_id)
+        self._response_generation += 1
+        self._pending_response_generation = self._response_generation
+        self._auto_response_pending = True
+
     def _on_speech_started(self, event: object) -> None:
         item_id = getattr(event, "item_id", None)
         if isinstance(item_id, str) and item_id:
             self._assembler.set_current_user_item(item_id)
-        if not self._responding or self._active_response_id is None:
+        if self._responding and self._active_response_id is not None:
+            response_id = self._active_response_id
+            # Local interruption first; server auto-cancels via interrupt_response.
+            self._mark_response_cancelled(response_id)
+            if isinstance(item_id, str) and item_id:
+                self._interrupted_item_ids.add(item_id)
+            self._note_interrupted_delivery(response_id)
+            self._raise_playback_abort()
+            self._abort_playback_stream_now()
+            self._discard_playback_for_response(response_id)
+            self._responding = False
+            self._active_response_id = None
+            self._preempt_upcoming_response = True
             self._set_state(RealtimeSessionState.LISTENING)
+            self._logger.info(
+                "Realtime barge-in local_session_id=%s response_id=%s",
+                self._local_session_id,
+                response_id,
+            )
             return
-        response_id = self._active_response_id
-        # Local interruption first; server auto-cancels via interrupt_response.
-        self._mark_response_cancelled(response_id)
-        if isinstance(item_id, str) and item_id:
-            self._interrupted_item_ids.add(item_id)
-        self._note_interrupted_delivery(response_id)
-        self._playback_abort.set()
-        self._abort_playback_stream_now()
-        self._discard_playback_for_response(response_id)
-        self._responding = False
-        self._active_response_id = None
+        if self._auto_response_pending:
+            if self._invalid_pending_response_count < _MAX_INVALID_PENDING_RESPONSES:
+                self._invalid_pending_response_count += 1
+            self._pending_response_generation = None
+            self._auto_response_pending = False
+            self._preempt_upcoming_response = True
+            self._raise_playback_abort()
         self._set_state(RealtimeSessionState.LISTENING)
-        self._logger.info(
-            "Realtime barge-in local_session_id=%s response_id=%s",
-            self._local_session_id,
-            response_id,
-        )
+
+    def _raise_playback_abort(self) -> None:
+        self._abort_generation += 1
+        self._playback_abort.set()
 
     def _on_user_transcript(self, event: object) -> None:
         item_id = getattr(event, "item_id", None)
@@ -1055,7 +1181,8 @@ class RealtimeVoiceSession:
         if not isinstance(item_id, str) or not isinstance(transcript, str):
             return
         cleaned = transcript.strip()
-        if cleaned:
+        already_planned = item_id in self._planned_transcript_items
+        if cleaned and not already_planned:
             self._print(f"Cortana: (Heard) {cleaned}")
             plan = self._plan_finalized_user_transcript(item_id, cleaned)
             if plan is not None:
@@ -1063,6 +1190,7 @@ class RealtimeVoiceSession:
                 while len(self._plans_by_item) > _MAX_PENDING_REALTIME_PLANS:
                     oldest = next(iter(self._plans_by_item))
                     self._plans_by_item.pop(oldest, None)
+            self._remember_planned_transcript_item(item_id)
         outcome = self._assembler.store_user_transcript(item_id, transcript)
         if outcome.outcome == "pair":
             self._observe_completed_turn(user_item_id=outcome.user_item_id)
@@ -1076,9 +1204,45 @@ class RealtimeVoiceSession:
             return
         if self._is_cancelled(response_id):
             return
+        if self._auto_response_pending:
+            # The newly committed generation owns the next created. Do not
+            # spend anonymous invalid-response debt against it (B3-R1).
+            self._auto_response_pending = False
+            self._preempt_upcoming_response = False
+            self._active_response_generation = self._pending_response_generation
+            self._pending_response_generation = None
+            self._active_response_id = response_id
+            self._responding = True
+            self._playback_active_response_id = response_id
+            self._assembler.bind_response(response_id)
+            self._set_state(RealtimeSessionState.RESPONDING)
+            return
+        if self._invalid_pending_response_count > 0:
+            self._mark_response_cancelled(response_id)
+            self._invalid_pending_response_count -= 1
+            self._logger.info(
+                "Realtime rejected stale pending response local_session_id=%s "
+                "response_id=%s",
+                self._local_session_id,
+                response_id,
+            )
+            return
+        if self._preempt_upcoming_response:
+            self._mark_response_cancelled(response_id)
+            self._preempt_upcoming_response = False
+            self._logger.info(
+                "Realtime preempted upcoming response local_session_id=%s "
+                "response_id=%s",
+                self._local_session_id,
+                response_id,
+            )
+            return
+        self._auto_response_pending = False
+        self._preempt_upcoming_response = False
+        self._active_response_generation = self._pending_response_generation
+        self._pending_response_generation = None
         self._active_response_id = response_id
         self._responding = True
-        self._playback_abort.clear()
         self._playback_active_response_id = response_id
         self._assembler.bind_response(response_id)
         self._set_state(RealtimeSessionState.RESPONDING)
@@ -1131,7 +1295,15 @@ class RealtimeVoiceSession:
         response = getattr(event, "response", None)
         response_id = getattr(response, "id", None)
         status = getattr(response, "status", None)
-        if not isinstance(response_id, str):
+        if not isinstance(response_id, str) or not response_id:
+            if self._responding or self._active_response_id is not None:
+                active = self._active_response_id
+                if isinstance(active, str) and active:
+                    self._discard_playback_for_response(active)
+                self._active_response_id = None
+                self._responding = False
+                self._raise_playback_abort()
+                self._set_state(RealtimeSessionState.LISTENING)
             return
         status_text = str(status or "")
         if self._is_cancelled(response_id) or status_text == "cancelled":
@@ -1213,6 +1385,15 @@ class RealtimeVoiceSession:
                 type(error).__name__,
             )
 
+    def _remember_planned_transcript_item(self, item_id: str) -> None:
+        if item_id in self._planned_transcript_items:
+            return
+        self._planned_transcript_items.add(item_id)
+        self._planned_transcript_order.append(item_id)
+        while len(self._planned_transcript_order) > _MAX_PLANNED_TRANSCRIPT_ITEMS:
+            oldest = self._planned_transcript_order.popleft()
+            self._planned_transcript_items.discard(oldest)
+
     def _plan_finalized_user_transcript(
         self,
         item_id: str,
@@ -1220,8 +1401,11 @@ class RealtimeVoiceSession:
     ) -> RealtimeConversationPlan | None:
         """Local M28 planning for one finalized user transcript.
 
-        Updates bounded ConversationState only. Does not inject into an
-        in-flight provider response and does not call response.create.
+        Updates bounded ConversationState from the heard user utterance only.
+        User-derived topic/goal/correction may remain even if the later
+        assistant generation fails. This does not inject into an in-flight
+        provider response, does not call response.create, and does not
+        observe assistant-derived options or questions.
         """
         state = self._conversation_state
         if state is None or not self._conversation_writes_allowed():
@@ -1529,6 +1713,24 @@ class RealtimeVoiceSession:
             self._playback_bytes_queued = 0
         if self._speech_delivery_state is not None:
             self._speech_delivery_state.clear_session_delivery_state()
+        self._plans_by_item.clear()
+        self._planned_transcript_items.clear()
+        self._planned_transcript_order.clear()
+        self._interrupted_item_ids.clear()
+        self._auto_response_pending = False
+        self._preempt_upcoming_response = False
+        self._invalid_pending_response_count = 0
+        self._response_generation = 0
+        self._pending_response_generation = None
+        self._active_response_generation = None
+        self._responding = False
+        self._active_response_id = None
+        self._playback_active_response_id = None
+        self._cancelled_set.clear()
+        self._cancelled_response_ids.clear()
+        self._playback_abort.clear()
+        self._abort_generation = 0
+        self._assembler.reset()
 
         if self._failed.is_set():
             self._set_state(RealtimeSessionState.FAILED)

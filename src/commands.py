@@ -45,6 +45,7 @@ from src.config import (
     MAX_ACTIVE_MEMORIES,
     MAX_ACTIVE_MEMORY_CHARS,
     MAX_MEMORY_TEXT_LENGTH,
+    MAX_STORED_MEMORIES,
     MAX_REMINDER_AUDIT_ENTRIES,
     MAX_COMPARE_CHUNKS_PER_DOCUMENT,
     MAX_COMPARE_CONTEXT_CHARS,
@@ -139,7 +140,7 @@ from src.incident_repository import (
     JsonIncidentRepository,
 )
 from src.memory import MemoryRecord, MemoryTextTooLongError, MemoryValidationError
-from src.memory_store import MemoryStorageError, MemoryStore
+from src.memory_store import MemoryCountLimitError, MemoryStorageError, MemoryStore
 from src.calendar_commands import (
     CALENDAR_COMMAND_NAMES,
     CalendarCommandContext,
@@ -443,6 +444,11 @@ REMEMBER_TOO_LONG = (
     "Cortana: Memory text is too long. "
     f"Maximum length is {MAX_MEMORY_TEXT_LENGTH} characters."
 )
+REMEMBER_CAPACITY = (
+    "Cortana: Memory capacity reached. "
+    f"A maximum of {MAX_STORED_MEMORIES} memories can be stored. "
+    "Delete an existing memory before adding another."
+)
 MEMORIES_EMPTY = "Cortana: No saved memories."
 FORGET_MISSING_ID = "Cortana: Please provide a memory ID. Usage: /forget <memory-id>"
 FORGET_NOT_FOUND_TEMPLATE = "Cortana: No saved memory found with ID '{memory_id}'."
@@ -594,18 +600,18 @@ class CommandContext:
     document_extractor: TextExtractor
     document_retriever: LexicalDocumentRetriever
     retrieval_session: RetrievalSession
-    incident_repository: IncidentRepository
-    evidence_store: EvidenceStore
-    tool_registry: ToolRegistry
-    tool_repository: ToolControlRepository
-    tool_executor: DefensiveToolExecutor
-    workflow_registry: WorkflowRegistry
-    workflow_run_repository: WorkflowRunRepository
-    workflow_executor: WorkflowExecutor
-    analysis_repository: InMemoryIncidentAnalysisRepository
-    analysis_audit_log: InMemoryIncidentAnalysisAuditLog
-    reminder_service: ReminderService
-    calendar_service: CalendarService
+    incident_repository: IncidentRepository | None = None
+    evidence_store: EvidenceStore | None = None
+    tool_registry: ToolRegistry | None = None
+    tool_repository: ToolControlRepository | None = None
+    tool_executor: DefensiveToolExecutor | None = None
+    workflow_registry: WorkflowRegistry | None = None
+    workflow_run_repository: WorkflowRunRepository | None = None
+    workflow_executor: WorkflowExecutor | None = None
+    analysis_repository: InMemoryIncidentAnalysisRepository | None = None
+    analysis_audit_log: InMemoryIncidentAnalysisAuditLog | None = None
+    reminder_service: ReminderService | None = None
+    calendar_service: CalendarService | None = None
     study_service: StudyPartnerService | None = None
     vision_loader: VisualInputLoader | None = None
     vision_service: VisualAnalysisService | None = None
@@ -617,9 +623,32 @@ class CommandContext:
 CommandHandler = Callable[[CommandContext], CommandResult]
 
 
-def _ephemeral_incident_services() -> tuple[IncidentRepository, EvidenceStore]:
+class _EphemeralDirectories:
+    """Command-scoped temporary directories for uninjected domain fallbacks."""
+
+    def __init__(self) -> None:
+        self._directories: list[tempfile.TemporaryDirectory[str]] = []
+
+    def make(self, prefix: str) -> Path:
+        """Create one tracked temporary directory and return its path."""
+        directory = tempfile.TemporaryDirectory(
+            prefix=prefix,
+            ignore_cleanup_errors=True,
+        )
+        self._directories.append(directory)
+        return Path(directory.name)
+
+    def cleanup(self) -> None:
+        """Remove every directory created for this command."""
+        while self._directories:
+            self._directories.pop().cleanup()
+
+
+def _ephemeral_incident_services(
+    ephemeral: _EphemeralDirectories,
+) -> tuple[IncidentRepository, EvidenceStore]:
     """Create disposable local stores for tests that omit Milestone 8 injection."""
-    root = Path(tempfile.mkdtemp(prefix="cortana-incident-"))
+    root = ephemeral.make("cortana-incident-")
     return (
         JsonIncidentRepository(root / "incidents.json"),
         LocalEvidenceStore(root / "evidence"),
@@ -628,9 +657,10 @@ def _ephemeral_incident_services() -> tuple[IncidentRepository, EvidenceStore]:
 
 def _ephemeral_tool_services(
     incident_repository: IncidentRepository,
+    ephemeral: _EphemeralDirectories,
 ) -> tuple[ToolRegistry, ToolControlRepository, DefensiveToolExecutor]:
     """Create disposable tool services for tests that omit Milestone 9 injection."""
-    root = Path(tempfile.mkdtemp(prefix="cortana-tools-"))
+    root = ephemeral.make("cortana-tools-")
     repository = JsonToolControlRepository(root / "tool_control.json")
     registry, executor = create_default_tool_services(
         tool_repository=repository,
@@ -665,20 +695,21 @@ def _ephemeral_analysis_services() -> tuple[
     )
 
 
-def _ephemeral_reminder_service() -> ReminderService:
+def _ephemeral_reminder_service(ephemeral: _EphemeralDirectories) -> ReminderService:
     """Create a disposable reminder service for tests that omit injection."""
-    root = Path(tempfile.mkdtemp(prefix="cortana-reminders-"))
+    root = ephemeral.make("cortana-reminders-")
     return create_default_reminder_service(
         repository_file_path=root / "reminders.json",
     )
 
 
 def _ephemeral_calendar_service(
+    ephemeral: _EphemeralDirectories,
     *,
     oauth_client_file: Path | None = None,
 ) -> CalendarService:
     """Create a disposable calendar service for tests that omit injection."""
-    root = Path(tempfile.mkdtemp(prefix="cortana-calendar-"))
+    root = ephemeral.make("cortana-calendar-")
     return create_default_calendar_service(
         repository_file_path=root / "calendar_control.json",
         secret_store=InMemorySecretStore(),
@@ -687,6 +718,7 @@ def _ephemeral_calendar_service(
 
 
 def _ephemeral_study_service(
+    ephemeral: _EphemeralDirectories,
     *,
     document_vault: DocumentVault,
     document_retriever: LexicalDocumentRetriever,
@@ -695,7 +727,7 @@ def _ephemeral_study_service(
     client: OpenAIClient | None,
 ) -> StudyPartnerService:
     """Create a disposable study service for tests that omit injection."""
-    root = Path(tempfile.mkdtemp(prefix="cortana-study-"))
+    root = ephemeral.make("cortana-study-")
     knowledge = DocumentKnowledgeService(
         vault=document_vault,
         retriever=document_retriever,
@@ -729,7 +761,7 @@ def parse_slash_input(message: str) -> str | None:
     command_token = stripped.split(maxsplit=1)[0]
     command_body = command_token.lstrip("/")
 
-    if "/" in command_body:
+    if not command_body or "/" in command_body:
         return None
 
     return command_body.lower()
@@ -789,29 +821,149 @@ def handle_slash_command(
     security commands, Milestone 9 tool commands, and Milestone 10/11
     workflow commands are always local. ``/vision-info`` and
     ``/voice-status`` remain local-only.
+
+    Uninjected domain stores are created lazily for the command that needs
+    them and cleaned up when that command returns.
     """
-    command_name = normalize_command_name(message)
-
-    if incident_repository is None or evidence_store is None:
-        ephemeral_repository, ephemeral_store = _ephemeral_incident_services()
-        incident_repository = incident_repository or ephemeral_repository
-        evidence_store = evidence_store or ephemeral_store
-
-    if tool_registry is None or tool_repository is None or tool_executor is None:
-        ephemeral_registry, ephemeral_tools, ephemeral_executor = (
-            _ephemeral_tool_services(incident_repository)
+    ephemeral = _EphemeralDirectories()
+    try:
+        return _dispatch_slash_command(
+            message,
+            settings=settings,
+            conversation_history=conversation_history,
+            memory_store=memory_store,
+            active_memory_context=active_memory_context,
+            document_vault=document_vault,
+            document_extractor=document_extractor,
+            document_retriever=document_retriever,
+            retrieval_session=retrieval_session,
+            incident_repository=incident_repository,
+            evidence_store=evidence_store,
+            tool_registry=tool_registry,
+            tool_repository=tool_repository,
+            tool_executor=tool_executor,
+            workflow_registry=workflow_registry,
+            workflow_run_repository=workflow_run_repository,
+            workflow_executor=workflow_executor,
+            analysis_repository=analysis_repository,
+            analysis_audit_log=analysis_audit_log,
+            reminder_service=reminder_service,
+            calendar_service=calendar_service,
+            study_service=study_service,
+            vision_loader=vision_loader,
+            vision_service=vision_service,
+            voice_capture=voice_capture,
+            voice_service=voice_service,
+            stop_signal=stop_signal,
+            client=client,
+            conversation_state=conversation_state,
+            speech_delivery_state=speech_delivery_state,
+            ephemeral=ephemeral,
         )
-        tool_registry = tool_registry or ephemeral_registry
-        tool_repository = tool_repository or ephemeral_tools
-        tool_executor = tool_executor or ephemeral_executor
+    finally:
+        ephemeral.cleanup()
+
+
+def _dispatch_slash_command(
+    message: str,
+    *,
+    settings: Settings,
+    conversation_history: ConversationHistory,
+    memory_store: MemoryStore,
+    active_memory_context: ActiveMemoryContext,
+    document_vault: DocumentVault,
+    document_extractor: TextExtractor,
+    document_retriever: LexicalDocumentRetriever | None = None,
+    retrieval_session: RetrievalSession | None = None,
+    incident_repository: IncidentRepository | None = None,
+    evidence_store: EvidenceStore | None = None,
+    tool_registry: ToolRegistry | None = None,
+    tool_repository: ToolControlRepository | None = None,
+    tool_executor: DefensiveToolExecutor | None = None,
+    workflow_registry: WorkflowRegistry | None = None,
+    workflow_run_repository: WorkflowRunRepository | None = None,
+    workflow_executor: WorkflowExecutor | None = None,
+    analysis_repository: InMemoryIncidentAnalysisRepository | None = None,
+    analysis_audit_log: InMemoryIncidentAnalysisAuditLog | None = None,
+    reminder_service: ReminderService | None = None,
+    calendar_service: CalendarService | None = None,
+    study_service: StudyPartnerService | None = None,
+    vision_loader: VisualInputLoader | None = None,
+    vision_service: VisualAnalysisService | None = None,
+    voice_capture: MicrophoneCaptureAdapter | None = None,
+    voice_service: VoiceService | None = None,
+    stop_signal: Callable[[], bool] | None = None,
+    client: OpenAIClient | None = None,
+    conversation_state: ConversationState | None = None,
+    speech_delivery_state: SpeechDeliveryState | None = None,
+    ephemeral: _EphemeralDirectories,
+) -> CommandResult:
+    """Dispatch one already-normalized slash command."""
+    command_name = normalize_command_name(message)
+    needs_incident = command_name in (
+        SECURITY_COMMAND_NAMES
+        | INCIDENT_EVIDENCE_COMMAND_NAMES
+        | TOOL_COMMAND_NAMES
+        | WORKFLOW_COMMAND_NAMES
+        | INCIDENT_ANALYSIS_COMMAND_NAMES
+    )
+    needs_tools = command_name in (
+        INCIDENT_EVIDENCE_COMMAND_NAMES
+        | TOOL_COMMAND_NAMES
+        | WORKFLOW_COMMAND_NAMES
+        | INCIDENT_ANALYSIS_COMMAND_NAMES
+    )
+    needs_workflow = command_name in (
+        INCIDENT_EVIDENCE_COMMAND_NAMES
+        | WORKFLOW_COMMAND_NAMES
+        | INCIDENT_ANALYSIS_COMMAND_NAMES
+    )
+    needs_analysis = command_name in INCIDENT_ANALYSIS_COMMAND_NAMES
+    needs_reminder = command_name in REMINDER_COMMAND_NAMES
+    needs_calendar = command_name in CALENDAR_COMMAND_NAMES
+    needs_study = command_name in STUDY_COMMAND_NAMES
+    needs_vision = command_name in (
+        VISION_COMMAND_NAMES | REALTIME_MULTIMODAL_COMMAND_NAMES
+    )
+    needs_voice = command_name in (
+        VOICE_COMMAND_NAMES
+        | REALTIME_VOICE_COMMAND_NAMES
+        | REALTIME_MULTIMODAL_COMMAND_NAMES
+    )
+
+    if needs_incident and (incident_repository is None or evidence_store is None):
+        created_repository, created_store = _ephemeral_incident_services(ephemeral)
+        incident_repository = incident_repository or created_repository
+        evidence_store = evidence_store or created_store
+
+    if needs_tools and (
+        tool_registry is None or tool_repository is None or tool_executor is None
+    ):
+        if incident_repository is None or evidence_store is None:
+            created_repository, created_store = _ephemeral_incident_services(
+                ephemeral
+            )
+            incident_repository = incident_repository or created_repository
+            evidence_store = evidence_store or created_store
+        assert incident_repository is not None
+        created_registry, created_tools, created_executor = _ephemeral_tool_services(
+            incident_repository,
+            ephemeral,
+        )
+        tool_registry = tool_registry or created_registry
+        tool_repository = tool_repository or created_tools
+        tool_executor = tool_executor or created_executor
 
     # Workflow services are all-or-nothing: a partial injection can otherwise
     # pair an executor with a different run repository than /playbook-status.
-    if (
+    if needs_workflow and (
         workflow_registry is None
         or workflow_run_repository is None
         or workflow_executor is None
     ):
+        assert tool_registry is not None
+        assert tool_repository is not None
+        assert tool_executor is not None
         (
             workflow_registry,
             workflow_run_repository,
@@ -824,21 +976,25 @@ def handle_slash_command(
 
     # Analysis services are all-or-nothing: a partial injection can otherwise
     # pair an analysis repository with a different audit log than later commands.
-    if analysis_repository is None or analysis_audit_log is None:
+    if needs_analysis and (
+        analysis_repository is None or analysis_audit_log is None
+    ):
         analysis_repository, analysis_audit_log = _ephemeral_analysis_services()
 
-    if reminder_service is None:
-        reminder_service = _ephemeral_reminder_service()
+    if needs_reminder and reminder_service is None:
+        reminder_service = _ephemeral_reminder_service(ephemeral)
 
-    if calendar_service is None:
+    if needs_calendar and calendar_service is None:
         calendar_service = _ephemeral_calendar_service(
+            ephemeral,
             oauth_client_file=settings.google_oauth_client_file,
         )
 
     active_retriever = document_retriever or LexicalDocumentRetriever()
     active_retrieval_session = retrieval_session or RetrievalSession()
-    if study_service is None and STUDY_PARTNER_ENABLED:
+    if needs_study and study_service is None and STUDY_PARTNER_ENABLED:
         study_service = _ephemeral_study_service(
+            ephemeral,
             document_vault=document_vault,
             document_retriever=active_retriever,
             retrieval_session=active_retrieval_session,
@@ -847,7 +1003,8 @@ def handle_slash_command(
         )
 
     if (
-        (vision_loader is None or vision_service is None)
+        needs_vision
+        and (vision_loader is None or vision_service is None)
         and VISION_ANALYSIS_ENABLED
     ):
         default_loader, default_vision = create_default_vision_services(
@@ -858,7 +1015,8 @@ def handle_slash_command(
         vision_service = vision_service or default_vision
 
     if (
-        (voice_capture is None or voice_service is None)
+        needs_voice
+        and (voice_capture is None or voice_service is None)
         and VOICE_INTERACTION_ENABLED
     ):
         default_capture, default_voice = create_default_voice_services(
@@ -871,6 +1029,8 @@ def handle_slash_command(
     active_stop_signal = stop_signal or poll_windows_console_enter_stop
 
     if command_name in SECURITY_COMMAND_NAMES:
+        assert incident_repository is not None
+        assert evidence_store is not None
         security_result = handle_security_command(
             command_name,
             SecurityCommandContext(
@@ -886,6 +1046,11 @@ def handle_slash_command(
             )
 
     if command_name in INCIDENT_EVIDENCE_COMMAND_NAMES:
+        assert incident_repository is not None
+        assert evidence_store is not None
+        assert tool_registry is not None
+        assert tool_repository is not None
+        assert workflow_run_repository is not None
         evidence_search_result = handle_incident_evidence_command(
             command_name,
             IncidentEvidenceCommandContext(
@@ -904,6 +1069,10 @@ def handle_slash_command(
             )
 
     if command_name in TOOL_COMMAND_NAMES:
+        assert incident_repository is not None
+        assert tool_registry is not None
+        assert tool_repository is not None
+        assert tool_executor is not None
         tool_result = handle_tool_command(
             command_name,
             ToolCommandContext(
@@ -921,6 +1090,13 @@ def handle_slash_command(
             )
 
     if command_name in WORKFLOW_COMMAND_NAMES:
+        assert incident_repository is not None
+        assert tool_registry is not None
+        assert tool_repository is not None
+        assert tool_executor is not None
+        assert workflow_registry is not None
+        assert workflow_run_repository is not None
+        assert workflow_executor is not None
         workflow_result = handle_workflow_command(
             command_name,
             WorkflowCommandContext(
@@ -941,6 +1117,11 @@ def handle_slash_command(
             )
 
     if command_name in INCIDENT_ANALYSIS_COMMAND_NAMES:
+        assert incident_repository is not None
+        assert tool_repository is not None
+        assert workflow_run_repository is not None
+        assert analysis_repository is not None
+        assert analysis_audit_log is not None
         analysis_result = handle_incident_analysis_command(
             command_name,
             IncidentAnalysisCommandContext(
@@ -961,6 +1142,7 @@ def handle_slash_command(
             )
 
     if command_name in REMINDER_COMMAND_NAMES:
+        assert reminder_service is not None
         reminder_result = handle_reminder_command(
             command_name,
             ReminderCommandContext(
@@ -975,6 +1157,7 @@ def handle_slash_command(
             )
 
     if command_name in CALENDAR_COMMAND_NAMES:
+        assert calendar_service is not None
         calendar_result = handle_calendar_command(
             command_name,
             CalendarCommandContext(
@@ -1209,6 +1392,11 @@ def _handle_remember(context: CommandContext) -> CommandResult:
         return CommandResult(
             outcome=CommandOutcome.CONTINUE,
             message=REMEMBER_TOO_LONG,
+        )
+    except MemoryCountLimitError as error:
+        return CommandResult(
+            outcome=CommandOutcome.CONTINUE,
+            message=error.user_message,
         )
     except MemoryValidationError:
         return CommandResult(
@@ -2001,6 +2189,7 @@ def format_status(
         "  Explicit persistent memory: "
         f"{'enabled' if EXPLICIT_PERSISTENT_MEMORY_ENABLED else 'disabled'}\n"
         f"  Saved memories: {saved_memory_count}\n"
+        f"  Maximum stored memories: {MAX_STORED_MEMORIES}\n"
         f"  Active memories: {active_count}\n"
         f"  Maximum active memories: {MAX_ACTIVE_MEMORIES}\n"
         f"  Active memory characters: {active_characters}\n"

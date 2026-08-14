@@ -16,6 +16,7 @@ from src.tool_common import (
     BlankToolFieldError,
     InvalidToolEnumError,
     InvalidToolIdError,
+    UnknownToolIdError,
     ToolAuthorizationError,
     ToolParameterError,
     ToolPolicyError,
@@ -96,6 +97,7 @@ TOOL_REQUEST_USAGE = (
     "Cortana: Usage: /tool-request <tool-id> | <scope-id> | "
     "<parameter-json> | <justification>"
 )
+TOOL_REQUEST_UNKNOWN = "Cortana: Unknown tool '{tool_id}'."
 TOOL_APPROVE_USAGE = (
     "Cortana: Usage: /tool-approve <request-id> | <reason>"
 )
@@ -372,10 +374,13 @@ def _handle_tool_request(context: ToolCommandContext) -> ToolCommandResult:
         return ToolCommandResult(
             message="Cortana: parameter-json must be valid strict JSON."
         )
+    except (InvalidToolIdError, UnknownToolIdError):
+        return ToolCommandResult(
+            message=TOOL_REQUEST_UNKNOWN.format(tool_id=tool_id.strip())
+        )
     except (
         BlankToolFieldError,
         InvalidToolEnumError,
-        InvalidToolIdError,
         ToolAuthorizationError,
         ToolParameterError,
         ToolPolicyError,

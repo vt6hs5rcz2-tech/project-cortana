@@ -26,7 +26,7 @@ from src.document_extractor import DefaultTextExtractor
 from src.document_retrieval import LexicalDocumentRetriever
 from src.document_vault import JsonDocumentVault
 from src.incident_repository import JsonIncidentRepository
-from src.memory_store import JsonMemoryStore
+from src.memory_store import JsonMemoryStore, MemoryCountLimitError
 from src.security_incident import create_security_incident
 from src.settings import Settings
 
@@ -294,6 +294,12 @@ def test_orchestrator_returns_none_for_unmatched_phrases(tmp_path: Path) -> None
         ("remember: keep the case notes offline", "keep the case notes offline"),
         ("remember - keep the case notes offline", "keep the case notes offline"),
         ("remember:  spaced payload", "spaced payload"),
+        ("remember: my preferred editor is Cursor", "my preferred editor is Cursor"),
+        ("remember my preferred timezone is Eastern", "my preferred timezone is Eastern"),
+        (
+            "remember that my project is called Cortana",
+            "that my project is called Cortana",
+        ),
     ],
 )
 def test_memory_write_anchored_forms(
@@ -345,6 +351,12 @@ def test_memory_write_collisions_do_not_trigger(tmp_path: Path) -> None:
         "I need to remember when this happened.",
         "Do you remember this?",
         "I need to remember when this started",
+        "remember this",
+        "remember that",
+        "remember it",
+        "remember this forever",
+        "remember that forever",
+        "remember it forever",
     ):
         assert orchestrator.try_handle(phrase) is None
     assert store.list_memories() == []
@@ -363,6 +375,23 @@ def test_memory_write_respects_store_length_validation(tmp_path: Path) -> None:
     assert result is not None
     assert "too long" in result.safe_user_message.lower()
     assert store.list_memories() == []
+
+
+def test_memory_write_respects_store_count_cap(tmp_path: Path) -> None:
+    store = JsonMemoryStore(tmp_path / "memories.json", max_memories=1)
+    store.add_memory("kept")
+    orchestrator = UnifiedAssistantOrchestrator(
+        memory_store=store,
+        document_vault=_document_vault(tmp_path),
+        document_retriever=LexicalDocumentRetriever(),
+        incident_repository=_incident_repository(tmp_path),
+    )
+    result = orchestrator.try_handle("remember another fact")
+    assert result is not None
+    assert result.domain == "memory"
+    assert result.action == "write"
+    assert result.safe_user_message == MemoryCountLimitError(max_memories=1).user_message
+    assert [memory.text for memory in store.list_memories()] == ["kept"]
 
 
 def test_memory_write_does_not_mutate_history_in_loop(
@@ -925,9 +954,9 @@ def test_orchestrator_does_not_synthesize_slash_commands(tmp_path: Path) -> None
 @pytest.mark.parametrize(
     "message",
     [
-        "remember this",
-        "Remember this",
-        "REMEMBER this",
+        "remember keep this offline",
+        "Remember keep this offline",
+        "REMEMBER keep this offline",
     ],
 )
 def test_memory_write_is_case_insensitive(tmp_path: Path, message: str) -> None:
@@ -945,7 +974,7 @@ def test_memory_write_is_case_insensitive(tmp_path: Path, message: str) -> None:
     assert result is not None
     assert result.domain == "memory"
     assert result.action == "write"
-    assert store.list_memories()[0].text == "this"
+    assert store.list_memories()[0].text == "keep this offline"
 
 
 def test_memory_write_preserves_captured_text_capitalization(tmp_path: Path) -> None:

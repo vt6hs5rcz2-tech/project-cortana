@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Protocol
 
+from src.config import MAX_STORED_MEMORIES
 from src.memory import MemoryRecord, create_memory
 
 logger = logging.getLogger("ProjectCortana")
@@ -25,6 +26,17 @@ class MemoryStorageError(RuntimeError):
     def __init__(self, message: str = MEMORY_LOAD_ERROR_MESSAGE) -> None:
         super().__init__(message)
         self.user_message = message
+
+
+class MemoryCountLimitError(MemoryStorageError):
+    """Raised when adding a memory would exceed the configured capacity."""
+
+    def __init__(self, *, max_memories: int = MAX_STORED_MEMORIES) -> None:
+        super().__init__(
+            "Cortana: Memory capacity reached. "
+            f"A maximum of {max_memories} memories can be stored. "
+            "Delete an existing memory before adding another."
+        )
 
 
 class MemoryStore(Protocol):
@@ -46,8 +58,16 @@ class MemoryStore(Protocol):
 class JsonMemoryStore:
     """Local JSON-backed store for explicit persistent memories."""
 
-    def __init__(self, file_path: Path) -> None:
+    def __init__(
+        self,
+        file_path: Path,
+        *,
+        max_memories: int = MAX_STORED_MEMORIES,
+    ) -> None:
+        if max_memories < 1:
+            raise ValueError("max_memories must be at least 1.")
         self._file_path = file_path
+        self._max_memories = max_memories
         self._memories: list[MemoryRecord] | None = None
         self._load_error: MemoryStorageError | None = None
 
@@ -64,6 +84,8 @@ class JsonMemoryStore:
         """Validate, append, and persist one new memory."""
         memories = self._ensure_loaded()
         record = create_memory(text)
+        if len(memories) >= self._max_memories:
+            raise MemoryCountLimitError(max_memories=self._max_memories)
         memories.append(record)
         self._persist(memories)
         return record
@@ -142,6 +164,12 @@ class JsonMemoryStore:
         records: list[MemoryRecord] = []
         for item in memories_payload:
             records.append(self._parse_record(item))
+        if len(records) > self._max_memories:
+            logger.error(
+                "Memory file exceeds configured memory count limit count=%s",
+                len(records),
+            )
+            raise MemoryStorageError
         return records
 
     def _parse_record(self, item: object) -> MemoryRecord:

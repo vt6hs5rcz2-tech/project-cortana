@@ -7,9 +7,11 @@ from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient, generate_response
 from src.assistant_orchestrator import UnifiedAssistantOrchestrator
 from src.commands import CommandOutcome, handle_slash_command, parse_slash_input
+from src.config import MAX_CONVERSATION_MESSAGE_CHARS
 from src.conversation import (
     STARTUP_GREETING,
     SHUTDOWN_MESSAGE,
+    MESSAGE_TOO_LONG,
     ApiInputMessage,
     ConversationHistory,
     is_exit_command,
@@ -88,11 +90,15 @@ def process_conversation_turn(
 
     On success, writes the user message and assistant answer to history when a
     history object is provided. On failure, returns None and leaves history
-    unchanged.
+    unchanged. Oversized user input returns MESSAGE_TOO_LONG without calling
+    the model or mutating history or conversational state.
 
     Milestone 27 conversational intelligence is advisory only. Internal
     failures degrade to the ordinary conversation path.
     """
+    if len(user_message.strip()) > MAX_CONVERSATION_MESSAGE_CHARS:
+        return MESSAGE_TOO_LONG
+
     active_memories = (
         active_memory_context.list_active()
         if active_memory_context is not None
@@ -108,7 +114,9 @@ def process_conversation_turn(
     context_messages: list[ApiInputMessage] | None = None
     intelligence = conversation_intelligence
     state = conversation_state
+    prior_state: ConversationState | None = None
     if state is not None:
+        prior_state = state.clone()
         if intelligence is None:
             intelligence = ConversationIntelligence()
         state.set_interaction_mode(interaction_mode)
@@ -130,6 +138,8 @@ def process_conversation_turn(
             conversational_context_messages=context_messages,
         )
     except Exception as error:
+        if prior_state is not None and state is not None:
+            state.restore(prior_state)
         logger.error(
             "The OpenAI request failed with error type: %s",
             type(error).__name__,
@@ -176,6 +186,9 @@ def handle_message(
     )
     if answer is None:
         print("Cortana: I could not complete that request.")
+        return
+    if answer == MESSAGE_TOO_LONG:
+        print(MESSAGE_TOO_LONG)
         return
 
     print(f"Cortana: {answer}")
