@@ -126,6 +126,14 @@ from src.config import (
     CONVERSATIONAL_RECENT_TURN_WINDOW,
     MAX_RECENT_ASSISTANT_ACK_TRACK,
     DEFAULT_RESPONSE_DEPTH,
+    SPEECH_DELIVERY_ENABLED,
+    SPEECH_CHUNK_CHARS_BRIEF,
+    SPEECH_CHUNK_CHARS_NORMAL,
+    SPEECH_CHUNK_CHARS_DETAILED,
+    MAX_SPEECH_CHUNKS,
+    MAX_SPOKEN_LIST_ITEMS,
+    MAX_SPEECH_DELIVERY_STATE_CHARS,
+    MAX_RECENT_SPOKEN_FINGERPRINTS,
     MAX_VOICE_UTTERANCE_SECONDS,
     MAX_VOICE_PCM_BYTES,
     MAX_VOICE_AUDIO_BYTES,
@@ -319,6 +327,20 @@ def test_conversational_intelligence_limits_are_centralized() -> None:
     assert CONVERSATIONAL_RECENT_TURN_WINDOW == 6
     assert MAX_RECENT_ASSISTANT_ACK_TRACK == 3
     assert DEFAULT_RESPONSE_DEPTH == "normal"
+
+
+def test_speech_delivery_limits_are_centralized() -> None:
+    """Milestone 29 speech-delivery bounds should be centralized."""
+    assert SPEECH_DELIVERY_ENABLED is True
+    assert SPEECH_CHUNK_CHARS_BRIEF == 320
+    assert SPEECH_CHUNK_CHARS_NORMAL == 220
+    assert SPEECH_CHUNK_CHARS_DETAILED == 140
+    assert SPEECH_CHUNK_CHARS_BRIEF > SPEECH_CHUNK_CHARS_NORMAL
+    assert SPEECH_CHUNK_CHARS_NORMAL > SPEECH_CHUNK_CHARS_DETAILED
+    assert MAX_SPEECH_CHUNKS == 24
+    assert MAX_SPOKEN_LIST_ITEMS == 6
+    assert MAX_SPEECH_DELIVERY_STATE_CHARS == 2_000
+    assert MAX_RECENT_SPOKEN_FINGERPRINTS == 8
 
 
 def test_default_memory_path_is_outside_project_source(

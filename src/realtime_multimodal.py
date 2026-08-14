@@ -57,6 +57,12 @@ from src.realtime_conversation_plan import (
     RealtimeConversationPlan,
     format_realtime_plan_instructions,
     safe_plan_realtime_turn,
+    speech_delivery_plan_from_realtime,
+)
+from src.speech_delivery import (
+    SpeechDeliveryState,
+    append_speech_delivery_policy,
+    fingerprint_spoken_text,
 )
 from src.realtime_voice import (
     EVENT_ALLOWLIST as VOICE_EVENT_ALLOWLIST,
@@ -209,7 +215,11 @@ def build_multimodal_instructions(
     active_memory_context: ActiveMemoryContext | None,
 ) -> str:
     """Build multimodal session instructions including optional memory snapshot."""
-    parts = [append_style_policy(MULTIMODAL_CONVERSATION_INSTRUCTIONS)]
+    parts = [
+        append_speech_delivery_policy(
+            append_style_policy(MULTIMODAL_CONVERSATION_INSTRUCTIONS)
+        )
+    ]
     if active_memory_context is not None:
         memories = active_memory_context.list_active()
         if memories:
@@ -349,12 +359,14 @@ class RealtimeMultimodalSession:
         sleep_fn: Callable[[float], None] = time.sleep,
         conversation_state: ConversationState | None = None,
         transcript_wait_seconds: float | None = None,
+        speech_delivery_state: SpeechDeliveryState | None = None,
     ) -> None:
         self._settings = settings
         self._client = client
         self._history = conversation_history
         self._active_memory = active_memory_context
         self._conversation_state = conversation_state
+        self._speech_delivery_state = speech_delivery_state
         self._conversation_intelligence = ConversationIntelligence()
         self._base_instructions = ""
         self._interrupted_item_ids: set[str] = set()
@@ -975,6 +987,7 @@ class RealtimeMultimodalSession:
         self._mark_response_cancelled(response_id)
         if isinstance(item_id, str) and item_id:
             self._interrupted_item_ids.add(item_id)
+        self._note_interrupted_delivery(response_id)
         user_item = self._response_to_user_item.get(response_id)
         if user_item is not None:
             turn = self._visual_turns.get(user_item)
@@ -1172,6 +1185,10 @@ class RealtimeMultimodalSession:
                     state,
                     plan.guidance,
                 )
+            if self._speech_delivery_state is not None:
+                self._speech_delivery_state.record_completed_chunk(
+                    assistant_turn.content
+                )
         except Exception as error:
             self._logger.error(
                 "Multimodal conversational intelligence observe failed "
@@ -1279,6 +1296,16 @@ class RealtimeMultimodalSession:
                 type(error).__name__,
             )
 
+    def _note_interrupted_delivery(self, response_id: str) -> None:
+        """Record bounded interruption recovery state. Does not change abort."""
+        state = self._speech_delivery_state
+        if state is None:
+            return
+        partial = self._assembler.peek_pending_assistant(response_id)
+        state.mark_interrupted(
+            fingerprint_spoken_text(partial) if partial else None
+        )
+
     def _inject_plan_before_response(
         self,
         connection: RealtimeConnectionLike,
@@ -1295,6 +1322,11 @@ class RealtimeMultimodalSession:
                 self._base_instructions,
                 plan,
                 self._conversation_state,
+                delivery_plan=speech_delivery_plan_from_realtime(
+                    plan,
+                    self._speech_delivery_state,
+                    delivery_mode="multimodal",
+                ),
             )
             payload = build_multimodal_session_update_payload(
                 settings=self._settings,
@@ -1637,6 +1669,8 @@ class RealtimeMultimodalSession:
                 break
         with self._playback_bytes_lock:
             self._playback_bytes_queued = 0
+        if self._speech_delivery_state is not None:
+            self._speech_delivery_state.clear_session_delivery_state()
         self._visual_turns.clear()
         self._transcript_deadlines.clear()
         self._transcript_ready.clear()
@@ -1691,6 +1725,7 @@ def run_realtime_multimodal_session(
     sleep_fn: Callable[[float], None] = time.sleep,
     conversation_state: ConversationState | None = None,
     transcript_wait_seconds: float | None = None,
+    speech_delivery_state: SpeechDeliveryState | None = None,
 ) -> str:
     """Run one explicit realtime multimodal session and return status text."""
     session = RealtimeMultimodalSession(
@@ -1709,5 +1744,6 @@ def run_realtime_multimodal_session(
         sleep_fn=sleep_fn,
         conversation_state=conversation_state,
         transcript_wait_seconds=transcript_wait_seconds,
+        speech_delivery_state=speech_delivery_state,
     )
     return session.run()

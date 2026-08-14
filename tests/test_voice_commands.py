@@ -12,6 +12,7 @@ from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient
 from src.conversation import ConversationHistory
 from src.settings import Settings
+from src.speech_delivery import SpeechDeliveryState
 from src.voice_commands import (
     VoiceCommandContext,
     create_default_voice_services,
@@ -55,6 +56,7 @@ def _context(
     voice_service: VoiceService | None = None,
     history: ConversationHistory | None = None,
     stop_signal: Any = None,
+    speech_delivery_state: SpeechDeliveryState | None = None,
 ) -> VoiceCommandContext:
     return VoiceCommandContext(
         message="/voice-turn",
@@ -63,9 +65,10 @@ def _context(
         conversation_history=history or ConversationHistory(),
         active_memory_context=ActiveMemoryContext(),
         logger=logging.getLogger("ProjectCortanaTest"),
-        stop_signal=stop_signal or (lambda: True),
+        stop_signal=stop_signal or (lambda: False),
         capture=capture,
         voice_service=voice_service,
+        speech_delivery_state=speech_delivery_state,
     )
 
 
@@ -248,3 +251,182 @@ def test_voice_turn_chat_failure_skips_tts(
     assert "could not complete" in result.message
     assert history.turns == []
     service.synthesize.assert_not_called()
+
+
+def test_voice_turn_uses_centralized_speech_delivery_without_changing_history(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    history = ConversationHistory()
+    delivery_state = SpeechDeliveryState()
+    capture = MagicMock(spec=MicrophoneCaptureAdapter)
+    capture.capture.return_value = _audio()
+    service = MagicMock(spec=VoiceService)
+    service.transcribe.return_value = "What are the steps?"
+    spoken_inputs: list[str] = []
+
+    def fake_synthesize(text: str) -> bytes:
+        spoken_inputs.append(text)
+        return b"RIFFWAVEdata"
+
+    service.synthesize.side_effect = fake_synthesize
+    canonical = (
+        "## Steps\n"
+        "1. Back up files.\n"
+        "2. Update software.\n"
+        "3. Restart."
+    )
+
+    def fake_process(**kwargs: Any) -> str:
+        history_obj = kwargs["conversation_history"]
+        history_obj.add_user_message(kwargs["user_message"])
+        history_obj.add_assistant_message(canonical)
+        return canonical
+
+    monkeypatch.setattr(
+        "src.conversation_loop.process_conversation_turn",
+        fake_process,
+    )
+    played: list[bytes] = []
+    monkeypatch.setattr(
+        "src.voice_commands._play_wav_synchronously",
+        lambda data: played.append(data),
+    )
+    monkeypatch.setattr("src.voice_commands.sys.platform", "win32")
+
+    result = handle_voice_command(
+        "voice-turn",
+        _context(
+            capture=capture,
+            voice_service=service,
+            history=history,
+            stop_signal=lambda: False,
+            speech_delivery_state=delivery_state,
+        ),
+    )
+    output = capsys.readouterr().out
+    assert result is not None
+    assert result.message == ""
+    assert canonical in output
+    assert history.turns[-1].content == canonical
+    assert spoken_inputs
+    assert spoken_inputs != [canonical]
+    assert any("First," in item for item in spoken_inputs)
+    assert "##" not in "".join(spoken_inputs)
+    assert played
+
+
+def test_voice_turn_stops_remaining_chunks_on_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history = ConversationHistory()
+    delivery_state = SpeechDeliveryState()
+    capture = MagicMock(spec=MicrophoneCaptureAdapter)
+    capture.capture.return_value = _audio()
+    service = MagicMock(spec=VoiceService)
+    service.transcribe.return_value = "Explain the options."
+    calls = {"count": 0}
+
+    def fake_synthesize(text: str) -> bytes:
+        calls["count"] += 1
+        return b"RIFFWAVEdata"
+
+    service.synthesize.side_effect = fake_synthesize
+    long_answer = (
+        "Alpha is the first idea and it continues with extra spoken words. "
+        "Beta is the second idea and it also needs extra spoken words. "
+        "Gamma is the third idea with still more spoken detail included. "
+        "Delta is the fourth idea that keeps the utterance moving forward. "
+        "Epsilon is the fifth idea for additional spoken pacing coverage. "
+        "Zeta is the sixth idea so remaining chunks can be cancelled."
+    )
+    played = {"count": 0}
+
+    def fake_play(_data: bytes) -> None:
+        played["count"] += 1
+
+    started = {"play_seen": False}
+
+    def stop_signal() -> bool:
+        return started["play_seen"]
+
+    def fake_process(**kwargs: Any) -> str:
+        history_obj = kwargs["conversation_history"]
+        history_obj.add_user_message(kwargs["user_message"])
+        history_obj.add_assistant_message(long_answer)
+        return long_answer
+
+    def recording_play(data: bytes) -> None:
+        fake_play(data)
+        started["play_seen"] = True
+
+    monkeypatch.setattr(
+        "src.conversation_loop.process_conversation_turn",
+        fake_process,
+    )
+    monkeypatch.setattr(
+        "src.voice_commands._play_wav_synchronously",
+        recording_play,
+    )
+    monkeypatch.setattr("src.voice_commands.sys.platform", "win32")
+
+    result = handle_voice_command(
+        "voice-turn",
+        _context(
+            capture=capture,
+            voice_service=service,
+            history=history,
+            stop_signal=stop_signal,
+            speech_delivery_state=delivery_state,
+        ),
+    )
+    assert result is not None
+    assert history.turns[-1].content == long_answer
+    assert calls["count"] == 1
+    assert played["count"] == 1
+    assert delivery_state.pop_pending_chunk() is None
+
+
+def test_voice_turn_cancel_before_first_chunk_plays_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history = ConversationHistory()
+    delivery_state = SpeechDeliveryState()
+    capture = MagicMock(spec=MicrophoneCaptureAdapter)
+    capture.capture.return_value = _audio()
+    service = MagicMock(spec=VoiceService)
+    service.transcribe.return_value = "Explain the options."
+    played: list[bytes] = []
+
+    def fake_process(**kwargs: Any) -> str:
+        history_obj = kwargs["conversation_history"]
+        history_obj.add_user_message(kwargs["user_message"])
+        history_obj.add_assistant_message("The first option is daily backups.")
+        return "The first option is daily backups."
+
+    monkeypatch.setattr(
+        "src.conversation_loop.process_conversation_turn",
+        fake_process,
+    )
+    monkeypatch.setattr(
+        "src.voice_commands._play_wav_synchronously",
+        lambda data: played.append(data),
+    )
+    monkeypatch.setattr("src.voice_commands.sys.platform", "win32")
+
+    result = handle_voice_command(
+        "voice-turn",
+        _context(
+            capture=capture,
+            voice_service=service,
+            history=history,
+            stop_signal=lambda: True,
+            speech_delivery_state=delivery_state,
+        ),
+    )
+    assert result is not None
+    assert result.message == ""
+    assert history.turns[-1].content == "The first option is daily backups."
+    service.synthesize.assert_not_called()
+    assert played == []
+    assert delivery_state.pop_pending_chunk() is None

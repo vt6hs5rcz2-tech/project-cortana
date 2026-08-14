@@ -21,6 +21,7 @@ Project Cortana is an early software milestone focused on:
 - Explicit realtime multimodal perception (voice + bounded live camera snapshots)
 - Bounded conversational intelligence for continuity, follow-ups, corrections, response depth, and consistent style (no privileged authority)
 - Realtime conversational planning that guides `/voice-realtime` and `/multimodal-realtime` from the same bounded session state without taking over response ownership
+- Natural speech delivery and conversational timing so spoken replies sound less like text being read aloud
 - Local human-controlled security event, incident, indicator, evidence, note, and timeline foundation
 - Local human-supervised defensive tool framework with scope controls, dry-run planning, and approval
 - Optional process-isolated execution for a tiny allowlisted defensive tool subset
@@ -40,6 +41,7 @@ Project Cortana is an early software milestone focused on:
 | --- | --- | --- | --- |
 | Temporary conversation history | Current session only | Built from unmatched chat turns; cleared with `/clear`; slash commands and orchestrator-handled routes are excluded | Yes, as prior turns |
 | Session conversational state (M27) | Current session only | Updated by the conversational-intelligence layer for continuity; cleared with `/clear`; bounded; never permanent memory | Yes, as separated developer metadata only |
+| Speech delivery state (M29) | Current session only | Tracks recent spoken openings, acknowledgments, chunk fingerprints, and interrupted-response fingerprints for pacing/repetition control; cleared with `/clear`; never stores audio | No; used only to shape a spoken delivery copy or advisory pacing instructions |
 | Explicit persistent memory | Survives restarts | Saved only through local `/remember` or explicit NL `remember …` routing | No, unless activated |
 | Active memory context | Current session only | Selected with `/recall`; cleared with `/release`, `/release-all`, or restart | Yes, only while active |
 | Knowledge Vault documents | Survives restarts | Ingested only through local `/add-document` | No by default |
@@ -257,6 +259,7 @@ Behavior and limits:
 - Canonical audio is in-memory PCM WAV, 16-bit mono 16 kHz; no temp files and no audio archive
 - Speech-to-text uses OpenAI transcriptions (`CORTANA_TRANSCRIPTION_MODEL`, default `gpt-4o-mini-transcribe`) with provider language auto-detection
 - Text-to-speech uses OpenAI speech (`CORTANA_TTS_MODEL` / `CORTANA_TTS_VOICE`, defaults `gpt-4o-mini-tts` / `coral`) and returns WAV for Windows `winsound` playback
+- Milestone 29 synthesizes a speech-only delivery copy of the canonical reply: markdown/lists/URLs are normalized and chunked locally, then spoken in order. History still stores the original assistant text
 - The text response is authoritative: TTS or playback failure still keeps the visible/history-committed conversational turn
 - Voice is a transport into ordinary conversation (`generate_response` + history + active memory)
 - Spoken transcripts intentionally have less operational authority than typed input in M24: they do not execute slash commands and do not enter Milestone 18 natural-language routing
@@ -297,6 +300,7 @@ Behavior and limits:
 - Input transcription (`gpt-4o-mini-transcribe` by default) is guidance of input audio content rather than precisely what the realtime model heard
 - Local `ConversationHistory` remains canonical; only finalized transcripts are committed. Interrupted assistant text is not committed
 - Milestone 28 plans each finalized transcript locally and refreshes next-turn session instructions after a completed pair; it does not change `create_response=true` or add a client `response.create` path
+- Milestone 29 adds advisory spoken-delivery guidance (pacing, acknowledgments, interruption recovery) to those same next-turn instructions. Provider realtime audio remains provider-owned; Cortana does not re-chunk or re-synthesize M25 audio locally
 - Spoken realtime content remains conversational only: no slash-command, M18, calendar/reminder, tool/workflow, or memory-write authority
 - Realtime function/tool calling is disabled (`tools=[]`, `tool_choice=none`)
 - Hard session cap: 20 minutes
@@ -332,7 +336,7 @@ Behavior and limits:
 - No local frame archive, video buffer, or disk-backed camera images
 - Provider disclosure is at most one current normalized PNG (`detail=low`) per user turn; no provider upload during silence
 - Visual frames are bound at `speech_stopped` / `input_audio_buffer.committed` using provider item IDs
-- Session uses server VAD with `create_response=false` and `interrupt_response=true`, then bare `response.create()` after optional visual item insertion. When the finalized transcript arrives in time, Milestone 28 injects pre-response planning first. If it does not, the same `response.create()` still runs once without transcript-derived M28 guidance.
+- Session uses server VAD with `create_response=false` and `interrupt_response=true`, then bare `response.create()` after optional visual item insertion. When the finalized transcript arrives in time, Milestone 28 injects pre-response planning first, and Milestone 29 may include spoken-delivery guidance in that same `session.update`. If the transcript does not arrive in time, the same `response.create()` still runs once without transcript-derived M28/M29 guidance.
 - Superseded/completed/cancelled visual conversation items are removed via `conversation.item.delete` from the active Realtime conversation context
 - Provider-side retention is governed by provider/service policy; Cortana does not claim provider-side permanent deletion
 - Barge-in remains immediate for local playback; vision work never delays playback abort
@@ -478,6 +482,116 @@ Known limitations:
 - `/multimodal-realtime` waits for the provider transcript before `response.create` when the transcript arrives in time, which adds transcript latency in exchange for true pre-response guidance
 - If a multimodal transcript does not arrive within the bounded deadline, that turn still gets exactly one `response.create` without transcript-derived M28 guidance. The late transcript is kept for history pairing when it eventually arrives, but it is not used to plan or rewrite that already-started response, and it is not applied to `ConversationState` when a newer turn is already active
 - No wake word, speaker ID, emotion detection, translation, lip-reading, browsing, Bluetooth, or autonomous workflows
+
+## Natural Speech Delivery & Conversational Timing
+
+Milestone 29 improves how Cortana **delivers** spoken responses so they sound less like text being read aloud and more like a natural conversational assistant. It is not a new reasoning engine and it does not take over assistant response ownership.
+
+Centralized speech-delivery policy:
+
+- `SpeechDeliveryPlan` is a small, frozen, typed plan: delivery mode, response depth, chunk size, pause hints, acknowledgment hint, list delivery mode, interruption recovery, concise spoken delivery, avoid-phrases, required-notice preservation, interruption/timing flags
+- `authorizes_privileged_action` is structurally false
+- Deterministic, bounded, no I/O, no network, no second model call, no tool calls
+- Shared by `/voice-turn`, `/voice-realtime`, and `/multimodal-realtime`
+
+Speech-friendly normalization:
+
+- Operates on a **delivery copy only**; canonical assistant text and conversation history are unchanged
+- Handles markdown headings, bullets, numbered lists, emphasis markers, code fences, extra blank lines, repeated punctuation, long parentheticals, raw URLs, and dense symbols
+- Converts written lists into spoken sequences such as “First, … Second, … Third, …”
+- Preserves numbers, dates, short IDs, required safety/authorization language, and uncertainty
+- Long URLs, hashes, and large code blocks are not read character-by-character by default; speech may say they are better viewed on screen while the canonical text remains on screen/history
+- Explicit exact/verbatim speech requests override that simplification. Phrases such as “spell it”, “read it aloud”, “dictate the command”, “word for word”, “character by character”, or “give me the exact URL/hash” keep hashes, URLs, commands, and code in the spoken delivery copy. Exactness then wins over speech elegance. A bare word such as “read” does not force exact-content mode
+
+Chunking:
+
+- Prefers sentence, then clause, then list-item boundaries, with a safe hard wrap
+- Avoids splitting numbers, URLs, abbreviations, dates/times, and token sequences where possible
+- Local and deterministic; no extra model call
+- First speech-safe chunk is prepared immediately so playback can start without waiting on later formatting
+
+Response-depth delivery:
+
+- **Brief**: fewer, larger chunks; direct opening; minimal acknowledgment; no recap. Safety/factual content is not truncated
+- **Normal**: ordinary spoken pacing
+- **Detailed**: more deliberate chunking and structured delivery, without reading a written report verbatim
+
+Acknowledgments:
+
+- Reuses Milestone 27 acknowledgment/repetition state
+- Does not automatically say “Got it”, “Okay”, “Sure”, or “Absolutely” before every spoken reply
+- A brief acknowledgment is allowed after a user correction such as “No, Tuesday.”
+- Required safety/authorization confirmations are not suppressed
+
+Interruption recovery:
+
+- Milestone 25 still owns barge-in and abort
+- After an interruption, delivery guidance says not to restart the aborted answer or repeat already-heard material
+- Uses Milestone 27/M28 correction state so the next reply continues from the corrected point
+- Tracks only short fingerprints of interrupted spoken text — never raw audio
+
+Repetition reduction:
+
+- Avoids repeating recent spoken openings, acknowledgments, summaries, and restatements of the user’s request
+- Does not suppress safety warnings, uncertainty, required confirmations, errors, or important constraints
+- “Repeat that” explicitly allows repetition
+
+`/voice-turn` behavior:
+
+- Canonical chat/history text is generated first and remains authoritative
+- A speech delivery copy is normalized and chunked locally
+- Chunks are synthesized and played in order through the existing TTS path
+- If the turn is already cancelled before playback begins, Cortana synthesizes and plays zero chunks, clears pending delivery state, and returns cleanly. Canonical history is unchanged
+- Remaining chunks stop when the turn is cancelled after the first chunk has started
+- Temporary audio is in-memory only; no committed audio artifacts
+
+`/voice-realtime` behavior:
+
+- `create_response=true`, server VAD, and `interrupt_response=true` are unchanged
+- Cortana never calls `response.create` and does not create a competing local TTS/audio stream
+- Provider-generated audio remains provider-owned and is not re-chunked or re-synthesized locally
+- Spoken-delivery style is included in session instructions, and per-turn delivery guidance is attached to the existing Milestone 28 next-turn `session.update` after a completed pair
+- Ending a realtime session clears session-specific delivery state, including interrupted-response fingerprints and pending local chunks. Conversation-wide repetition/opening fingerprints remain until `/clear`. A later realtime session on the same conversation object is not filtered by a stale interruption from a previous session
+- True per-utterance local audio control is **not architecturally available** while the provider owns streaming audio
+
+`/multimodal-realtime` behavior:
+
+- `create_response=false`, `interrupt_response=true`, visual lifecycle, and the single `response.create` owner are unchanged
+- Delivery guidance may be included with the existing Milestone 28 advisory `session.update` **before** that single `response.create`
+- The 2.5s transcript timeout/fallback is unchanged; fallback does not wait for another transcript event and does not create a second response
+- Session-end cleanup uses the same speech-delivery session boundary as `/voice-realtime`: interrupted-response fingerprints do not survive into a later session
+
+Perceived latency:
+
+- Normalization and chunking are local CPU-only work
+- The first speech-safe chunk is prepared first
+- No extra network, model, or tool calls
+- `/voice-turn` still synthesizes chunks sequentially over the existing TTS path. Multi-chunk replies can increase total spoken latency because later chunks wait for earlier synthesis and playback. This is a known limitation, not a parallel TTS architecture
+- Correctness is not sacrificed to shave milliseconds
+- No blocking sleeps are added to “sound human”
+
+Single response ownership:
+
+- Milestone 29 guides delivery; it does not create a second assistant response path
+- Fail-open uses the original assistant text for existing speech output; it does not skip safety or authorization checks
+
+Authority boundaries:
+
+- Speech-delivery instructions are style/delivery only
+- They never execute or authorize tools, workflows, calendar/reminder writes, memory writes, incident/document operations, confirmations, or other side effects
+- User-derived content inside delivery guidance has no elevated authority
+
+Exact-content limitations:
+
+- Dates, numbers, short IDs, versions, IPs, times, flags, paths, and similar technical tokens are preserved in the spoken copy
+- When the user asks to hear exact/verbatim/spelled/dictated/read-aloud content, hashes, URLs, commands, and code are spoken as written instead of being replaced with screen-view language
+- Without that explicit intent, longer code/URLs remain visually available rather than poorly verbalized
+
+Known provider limitations:
+
+- OpenAI Realtime audio for `/voice-realtime` and `/multimodal-realtime` is streamed by the provider. Cortana cannot safely re-chunk that audio locally without creating a competing stream
+- Pause/pacing on those paths is advisory session guidance, not a local TTS clock
+- `/voice-turn` can apply local chunk boundaries because TTS playback is locally owned; chunk gaps provide short natural pauses without fake punctuation or blocking sleeps
 
 Citation labels use a compact deterministic format such as `[DOC-1:C1]`. Each label maps through a session source manifest to:
 

@@ -280,6 +280,36 @@ def test_instruction_block_is_advisory_and_bounded() -> None:
     assert replaced.count(REALTIME_PLAN_BEGIN) == 1
 
 
+def test_instruction_block_can_include_speech_delivery_guidance() -> None:
+    from src.realtime_conversation_plan import speech_delivery_plan_from_realtime
+    from src.speech_delivery import SPEECH_DELIVERY_BEGIN
+
+    state = ConversationState()
+    plan = _plan("What time is the meeting?", state)
+    delivery = speech_delivery_plan_from_realtime(
+        plan,
+        None,
+        delivery_mode="realtime",
+    )
+    text = format_realtime_plan_instructions(
+        "base instructions",
+        plan,
+        state,
+        delivery_plan=delivery,
+    )
+    assert REALTIME_PLAN_BEGIN in text
+    assert SPEECH_DELIVERY_BEGIN in text
+    assert delivery.authorizes_privileged_action is False
+    replaced = format_realtime_plan_instructions(
+        text,
+        plan,
+        state,
+        delivery_plan=delivery,
+    )
+    assert replaced.count(REALTIME_PLAN_BEGIN) == 1
+    assert replaced.count(SPEECH_DELIVERY_BEGIN) == 1
+
+
 def test_planning_is_local_and_fast() -> None:
     state = ConversationState()
     state.set_offered_options(["a", "b", "c"])

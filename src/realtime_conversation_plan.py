@@ -22,6 +22,14 @@ from src.conversation_intelligence import (
     safe_interpret,
 )
 from src.conversation_state import ConversationState, InteractionMode
+from src.speech_delivery import (
+    SPEECH_DELIVERY_BEGIN,
+    DeliveryMode,
+    SpeechDeliveryPlan,
+    SpeechDeliveryState,
+    build_speech_delivery_plan,
+    format_speech_delivery_block,
+)
 
 REALTIME_PLAN_BEGIN = "<<<CORTANA_REALTIME_CONVERSATION_PLAN>>>"
 REALTIME_PLAN_END = "<<<END_CORTANA_REALTIME_CONVERSATION_PLAN>>>"
@@ -136,6 +144,36 @@ def plan_realtime_turn(
     )
 
 
+def speech_delivery_plan_from_realtime(
+    plan: RealtimeConversationPlan | None,
+    delivery_state: SpeechDeliveryState | None,
+    *,
+    delivery_mode: DeliveryMode,
+) -> SpeechDeliveryPlan:
+    """Derive M29 spoken-delivery policy from an M28 realtime plan."""
+    if plan is None:
+        interaction: InteractionMode = (
+            "realtime" if delivery_mode == "realtime" else "multimodal"
+        )
+        return build_speech_delivery_plan(
+            delivery_mode=delivery_mode,
+            interaction_mode=interaction,
+            delivery_state=delivery_state,
+        )
+    return build_speech_delivery_plan(
+        delivery_mode=delivery_mode,
+        interaction_mode=plan.interaction_mode,
+        response_depth=plan.response_depth,
+        acknowledgment_hint=plan.acknowledgment_hint,
+        avoid_phrases=plan.avoid_phrases,
+        user_interrupted=plan.user_interrupted,
+        turn_taking=plan.turn_taking,
+        user_text=plan.original_user_text,
+        delivery_state=delivery_state,
+        guidance=plan.guidance,
+    )
+
+
 def safe_plan_realtime_turn(
     intelligence: ConversationIntelligence,
     user_text: str,
@@ -171,21 +209,37 @@ def format_realtime_plan_instructions(
     base_instructions: str,
     plan: RealtimeConversationPlan | None,
     state: ConversationState | None,
+    delivery_plan: SpeechDeliveryPlan | None = None,
 ) -> str:
-    """Append a bounded advisory planning block to existing session instructions.
+    """Append bounded advisory planning and speech-delivery blocks.
 
-    The block is derived conversational metadata, not an independent
-    instruction and not a user-authored message. It carries no elevated
+    The blocks are derived conversational metadata, not independent
+    instructions and not user-authored messages. They carry no elevated
     authority.
     """
+    stripped = _strip_advisory_appendices(base_instructions)
     block = _format_plan_block(plan, state)
-    if not block:
+    delivery_block = format_speech_delivery_block(delivery_plan)
+    parts = [stripped]
+    if block:
+        parts.append(block)
+    if delivery_block:
+        parts.append(delivery_block)
+    if len(parts) == 1:
+        return stripped
+    return "\n\n".join(parts)
+
+
+def _strip_advisory_appendices(base_instructions: str) -> str:
+    """Drop previous M28/M29 advisory appendices; keep stable base instructions."""
+    cut_at: int | None = None
+    for marker in (REALTIME_PLAN_BEGIN, SPEECH_DELIVERY_BEGIN):
+        index = base_instructions.find(marker)
+        if index >= 0 and (cut_at is None or index < cut_at):
+            cut_at = index
+    if cut_at is None:
         return base_instructions
-    if REALTIME_PLAN_BEGIN in base_instructions:
-        prefix, _sep, _rest = base_instructions.partition(REALTIME_PLAN_BEGIN)
-        # Drop any previous plan appendix; keep the stable base instructions.
-        base_instructions = prefix.rstrip()
-    return f"{base_instructions}\n\n{block}"
+    return base_instructions[:cut_at].rstrip()
 
 
 def _format_plan_block(

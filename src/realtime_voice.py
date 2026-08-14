@@ -43,6 +43,12 @@ from src.realtime_conversation_plan import (
     RealtimeConversationPlan,
     format_realtime_plan_instructions,
     safe_plan_realtime_turn,
+    speech_delivery_plan_from_realtime,
+)
+from src.speech_delivery import (
+    SpeechDeliveryState,
+    append_speech_delivery_policy,
+    fingerprint_spoken_text,
 )
 from src.identity import CORTANA_SYSTEM_INSTRUCTIONS
 from src.memory_context import format_active_memory_context
@@ -267,7 +273,11 @@ def build_realtime_instructions(
     active_memory_context: ActiveMemoryContext | None,
 ) -> str:
     """Build session instructions including optional active-memory snapshot."""
-    parts = [append_style_policy(REALTIME_CONVERSATION_INSTRUCTIONS)]
+    parts = [
+        append_speech_delivery_policy(
+            append_style_policy(REALTIME_CONVERSATION_INSTRUCTIONS)
+        )
+    ]
     if active_memory_context is not None:
         memories = active_memory_context.list_active()
         if memories:
@@ -447,6 +457,10 @@ class _TurnAssembler:
         self._pending_assistant[response_id] = cleaned
         self._try_commit_pair(response_id)
 
+    def peek_pending_assistant(self, response_id: str) -> str | None:
+        """Return pending assistant transcript text for delivery fingerprinting."""
+        return self._pending_assistant.get(response_id)
+
     def on_response_done(
         self,
         *,
@@ -541,12 +555,14 @@ class RealtimeVoiceSession:
         monotonic_fn: Callable[[], float] = time.monotonic,
         sleep_fn: Callable[[float], None] = time.sleep,
         conversation_state: ConversationState | None = None,
+        speech_delivery_state: SpeechDeliveryState | None = None,
     ) -> None:
         self._settings = settings
         self._client = client
         self._history = conversation_history
         self._active_memory = active_memory_context
         self._conversation_state = conversation_state
+        self._speech_delivery_state = speech_delivery_state
         self._conversation_intelligence = ConversationIntelligence()
         self._base_instructions = ""
         self._plans_by_item: dict[str, RealtimeConversationPlan] = {}
@@ -1020,6 +1036,7 @@ class RealtimeVoiceSession:
         self._mark_response_cancelled(response_id)
         if isinstance(item_id, str) and item_id:
             self._interrupted_item_ids.add(item_id)
+        self._note_interrupted_delivery(response_id)
         self._playback_abort.set()
         self._abort_playback_stream_now()
         self._discard_playback_for_response(response_id)
@@ -1184,6 +1201,10 @@ class RealtimeVoiceSession:
                     state,
                     plan.guidance,
                 )
+            if self._speech_delivery_state is not None:
+                self._speech_delivery_state.record_completed_chunk(
+                    assistant_turn.content
+                )
             self._refresh_next_turn_instructions(plan)
         except Exception as error:
             self._logger.error(
@@ -1236,6 +1257,11 @@ class RealtimeVoiceSession:
                 self._base_instructions,
                 plan,
                 self._conversation_state,
+                delivery_plan=speech_delivery_plan_from_realtime(
+                    plan,
+                    self._speech_delivery_state,
+                    delivery_mode="realtime",
+                ),
             )
             payload = build_session_update_payload(
                 settings=self._settings,
@@ -1247,6 +1273,16 @@ class RealtimeVoiceSession:
                 "Realtime next-turn instruction update failed error_type=%s",
                 type(error).__name__,
             )
+
+    def _note_interrupted_delivery(self, response_id: str) -> None:
+        """Record bounded interruption recovery state. Does not change abort."""
+        state = self._speech_delivery_state
+        if state is None:
+            return
+        partial = self._assembler.peek_pending_assistant(response_id)
+        state.mark_interrupted(
+            fingerprint_spoken_text(partial) if partial else None
+        )
 
     def _conversation_writes_allowed(self) -> bool:
         return not self._state_writes_closed.is_set()
@@ -1491,6 +1527,8 @@ class RealtimeVoiceSession:
                 break
         with self._playback_bytes_lock:
             self._playback_bytes_queued = 0
+        if self._speech_delivery_state is not None:
+            self._speech_delivery_state.clear_session_delivery_state()
 
         if self._failed.is_set():
             self._set_state(RealtimeSessionState.FAILED)
@@ -1535,6 +1573,7 @@ def run_realtime_voice_session(
     monotonic_fn: Callable[[], float] = time.monotonic,
     sleep_fn: Callable[[float], None] = time.sleep,
     conversation_state: ConversationState | None = None,
+    speech_delivery_state: SpeechDeliveryState | None = None,
 ) -> str:
     """Run one explicit realtime voice session and return the status message."""
     session = RealtimeVoiceSession(
@@ -1550,5 +1589,6 @@ def run_realtime_voice_session(
         monotonic_fn=monotonic_fn,
         sleep_fn=sleep_fn,
         conversation_state=conversation_state,
+        speech_delivery_state=speech_delivery_state,
     )
     return session.run()

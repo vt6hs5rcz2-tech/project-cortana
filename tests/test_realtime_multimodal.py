@@ -26,6 +26,7 @@ from src.conversation import ConversationHistory
 from src.conversation_intelligence import ConversationIntelligence
 from src.conversation_state import ConversationState
 from src.realtime_conversation_plan import REALTIME_PLAN_BEGIN
+from src.speech_delivery import SPEECH_DELIVERY_BEGIN
 from src.realtime_multimodal import (
     MULTIMODAL_CAMERA_START_FAILED,
     MULTIMODAL_STARTED_MESSAGE,
@@ -1468,3 +1469,65 @@ def test_m26_no_transcript_equality_plan_identity() -> None:
     source = inspect.getsource(RealtimeMultimodalSession)
     assert "_take_plan_for_user_text" not in source
     assert "original_user_text == " not in source
+
+
+def test_m26_speech_delivery_is_included_before_single_response_create() -> None:
+    """M29 delivery guidance rides the existing M28 session.update path."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_1",
+            transcript="What time is the meeting?",
+        )
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert connection.response.response_creates == 1
+    latest = connection.session.updates[-1]
+    turn = latest["audio"]["input"]["turn_detection"]
+    assert turn["create_response"] is False
+    assert turn["interrupt_response"] is True
+    instructions = str(latest["instructions"])
+    assert REALTIME_PLAN_BEGIN in instructions
+    assert SPEECH_DELIVERY_BEGIN in instructions
+    assert "never authorizes" in instructions.casefold()
+    create_at = connection.call_order.index("response.create")
+    assert connection.call_order.count("response.create") == 1
+    assert create_at == connection.call_order.index("response.create")
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m26_fallback_still_omits_transcript_derived_delivery_guidance() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection,
+        history,
+        conversation_state=state,
+        transcript_wait_seconds=MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    create_at = connection.call_order.index("response.create")
+    updates_before = connection.call_order[:create_at].count("session.update")
+    fallback_update = connection.session.updates[updates_before - 1]
+    instructions = str(fallback_update.get("instructions", ""))
+    assert REALTIME_PLAN_BEGIN not in instructions
+    assert SPEECH_DELIVERY_BEGIN not in instructions
+    assert connection.response.response_creates == 1
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)

@@ -18,6 +18,12 @@ from src.config import (
 from src.conversation import ConversationHistory
 from src.conversation_state import ConversationState
 from src.settings import Settings
+from src.speech_delivery import (
+    SpeechDeliveryState,
+    SpokenDelivery,
+    build_speech_delivery_plan,
+    safe_prepare_spoken_delivery,
+)
 from src.voice_input import (
     VOICE_CANCELLED,
     VOICE_DISABLED,
@@ -67,6 +73,7 @@ class VoiceCommandContext:
     capture: MicrophoneCaptureAdapter | None = None
     voice_service: VoiceService | None = None
     conversation_state: ConversationState | None = None
+    speech_delivery_state: SpeechDeliveryState | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +176,79 @@ def _play_wav_synchronously(wav_bytes: bytes) -> None:
         raise VoiceServiceError(VOICE_PLAYBACK_FAILED) from error
 
 
+def _play_spoken_delivery(
+    *,
+    service: VoiceService,
+    canonical: str,
+    delivery: SpokenDelivery,
+    delivery_state: SpeechDeliveryState | None,
+    stop_signal: Callable[[], bool],
+) -> None:
+    """Synthesize and play spoken chunks in order for locally owned TTS.
+
+    Canonical history text is not modified. Remaining chunks stop on
+    cancel. Cancellation before the first chunk synthesizes and plays
+    nothing. Fail-open for the first chunk uses the original assistant text.
+    """
+    texts = [chunk.text for chunk in delivery.chunks if chunk.text.strip()]
+    if not texts:
+        texts = [canonical.strip()] if canonical.strip() else []
+    if not texts:
+        raise VoiceServiceError(
+            "Cortana: I could not generate speech for that response."
+        )
+    if stop_signal():
+        if delivery_state is not None:
+            delivery_state.abort_pending()
+        return
+    if delivery_state is not None:
+        delivery_state.load_pending(texts)
+
+    first = True
+    while True:
+        if not first and stop_signal():
+            if delivery_state is not None:
+                delivery_state.abort_pending()
+            return
+        piece: str | None
+        if delivery_state is not None:
+            piece = delivery_state.pop_pending_chunk()
+        elif texts:
+            piece = texts.pop(0)
+        else:
+            piece = None
+        if piece is None:
+            return
+        try:
+            speech_bytes = service.synthesize(piece)
+        except VoiceServiceError:
+            if not first:
+                if delivery_state is not None:
+                    delivery_state.abort_pending()
+                raise
+            if delivery_state is not None:
+                delivery_state.clear_pending_chunks()
+            speech_bytes = service.synthesize(canonical)
+            try:
+                _play_wav_synchronously(speech_bytes)
+            except VoiceServiceError:
+                raise
+            finally:
+                del speech_bytes
+            return
+        try:
+            _play_wav_synchronously(speech_bytes)
+        except VoiceServiceError:
+            if delivery_state is not None:
+                delivery_state.abort_pending()
+            raise
+        finally:
+            del speech_bytes
+        if delivery_state is not None:
+            delivery_state.record_completed_chunk(piece)
+        first = False
+
+
 def _handle_voice_turn(context: VoiceCommandContext) -> VoiceCommandResult:
     """Capture one utterance, chat ordinarily, then speak the reply."""
     # Lazy import avoids a module-level cycle:
@@ -206,17 +286,32 @@ def _handle_voice_turn(context: VoiceCommandContext) -> VoiceCommandResult:
 
     print(f"Cortana: {answer}")
 
+    delivery_state = context.speech_delivery_state
+    plan = build_speech_delivery_plan(
+        delivery_mode="voice_turn",
+        interaction_mode="voice",
+        user_text=transcript,
+        canonical_text=answer,
+        delivery_state=delivery_state,
+        user_interrupted=False,
+    )
+    spoken = safe_prepare_spoken_delivery(
+        answer,
+        plan,
+        delivery_state,
+        delivery_mode="voice_turn",
+        interaction_mode="voice",
+    )
     try:
-        speech_bytes = service.synthesize(answer)
+        _play_spoken_delivery(
+            service=service,
+            canonical=answer,
+            delivery=spoken,
+            delivery_state=delivery_state,
+            stop_signal=context.stop_signal,
+        )
     except VoiceServiceError as error:
         return VoiceCommandResult(message=error.user_message)
-
-    try:
-        _play_wav_synchronously(speech_bytes)
-    except VoiceServiceError as error:
-        return VoiceCommandResult(message=error.user_message)
-    finally:
-        del speech_bytes
 
     return VoiceCommandResult(message="")
 

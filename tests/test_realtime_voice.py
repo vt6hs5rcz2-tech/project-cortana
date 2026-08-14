@@ -38,6 +38,7 @@ from src.realtime_voice import (
     run_realtime_voice_session,
 )
 from src.realtime_conversation_plan import REALTIME_PLAN_BEGIN
+from src.speech_delivery import SPEECH_DELIVERY_BEGIN, SpeechDeliveryState
 from src.realtime_voice_input import (
     REALTIME_INPUT_OVERFLOW as INPUT_OVERFLOW_MESSAGE,
     RealtimeAudioFrame,
@@ -260,6 +261,7 @@ def _run_session(
     monotonic_fn: Callable[[], float] | None = None,
     sleep_fn: Callable[[float], None] | None = None,
     conversation_state: ConversationState | None = None,
+    speech_delivery_state: SpeechDeliveryState | None = None,
 ) -> tuple[threading.Thread, RealtimeVoiceSession, dict[str, str], list[str]]:
     FakePlaybackStream.instances.clear()
     lines = printed if printed is not None else []
@@ -280,6 +282,7 @@ def _run_session(
         monotonic_fn=monotonic_fn or time.monotonic,
         sleep_fn=sleep_fn or time.sleep,
         conversation_state=conversation_state,
+        speech_delivery_state=speech_delivery_state,
     )
 
     def _target() -> None:
@@ -1608,3 +1611,107 @@ def test_m25_create_response_true_unchanged_in_payload_builder() -> None:
     assert turn["create_response"] is True
     assert turn["interrupt_response"] is True
     assert turn["type"] == "server_vad"
+
+
+def test_m25_speech_delivery_is_advisory_and_does_not_change_ownership() -> None:
+    """M29 pacing guidance is next-turn advisory; M25 ownership is unchanged."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    _push_completed_turn(
+        connection,
+        item_id="item_1",
+        response_id="resp_1",
+        user_text="What time is the meeting?",
+        assistant_text="The meeting is at 3.",
+    )
+    assert _wait_until(lambda: len(connection.session.updates) >= 2, timeout=5)
+    latest = connection.session.updates[-1]
+    audio = latest["audio"]
+    turn = audio["input"]["turn_detection"]
+    assert turn["create_response"] is True
+    assert turn["interrupt_response"] is True
+    assert turn["type"] == "server_vad"
+    instructions = str(latest["instructions"])
+    assert REALTIME_PLAN_BEGIN in instructions
+    assert SPEECH_DELIVERY_BEGIN in instructions
+    assert "never authorizes" in instructions.casefold()
+    assert connection.response.created_items == []
+    source = inspect.getsource(RealtimeVoiceSession)
+    assert "connection.response.create()" not in source
+    assert "VoiceService" not in source
+    assert "synthesize(" not in source
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_m25_session_cleanup_drops_interrupted_fingerprint_for_later_session() -> None:
+    """Realtime cleanup must not leak session-A interruption into session B."""
+    from src.speech_delivery import (
+        build_speech_delivery_plan,
+        prepare_spoken_delivery,
+    )
+
+    delivery = SpeechDeliveryState()
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, _printed = _run_session(
+        connection,
+        history,
+        speech_delivery_state=delivery,
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="item_a")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(id="resp_a", status="in_progress"),
+        )
+    )
+    pcm = base64.b64encode(b"\x01\x00" * 80).decode("ascii")
+    connection.socket.push(
+        FakeEvent(type="response.output_audio.delta", response_id="resp_a", delta=pcm)
+    )
+    interrupted_text = "There are three options. The first is daily backups."
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio_transcript.done",
+            response_id="resp_a",
+            transcript=interrupted_text,
+        )
+    )
+    assert _wait_until(
+        lambda: session._assembler.peek_pending_assistant("resp_a") is not None
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="item_b")
+    )
+    assert _wait_until(
+        lambda: delivery.interrupted_response_fingerprint is not None
+    )
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+    assert delivery.interrupted_response_fingerprint is None
+    assert delivery.pop_pending_chunk() is None
+    assert delivery.pending_chunks == []
+
+    similar = (
+        "There are three options. The first is daily backups. "
+        "The second is weekly backups."
+    )
+    plan = build_speech_delivery_plan(
+        delivery_mode="voice_turn",
+        interaction_mode="voice",
+        user_interrupted=True,
+        turn_taking="correction",
+        user_text="No, the second one.",
+        canonical_text=similar,
+        delivery_state=delivery,
+    )
+    spoken = prepare_spoken_delivery(similar, plan, delivery)
+    assert "There are three options" in spoken.spoken_text
+    assert "weekly" in spoken.spoken_text.casefold()

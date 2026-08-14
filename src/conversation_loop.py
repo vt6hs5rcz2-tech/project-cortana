@@ -19,6 +19,7 @@ from src.conversation_intelligence import (
     safe_interpret,
 )
 from src.conversation_state import ConversationState, InteractionMode
+from src.speech_delivery import SpeechDeliveryState
 from src.document_chunker import DocumentChunker
 from src.document_extractor import TextExtractor
 from src.document_retrieval import LexicalDocumentRetriever
@@ -214,12 +215,18 @@ def run_conversation_loop(
     conversation_history: ConversationHistory | None = None,
     conversation_state: ConversationState | None = None,
     conversation_intelligence: ConversationIntelligence | None = None,
+    speech_delivery_state: SpeechDeliveryState | None = None,
 ) -> None:
     """Run the interactive conversation until the user exits."""
     input_reader = read_input or (lambda: input("You: "))
     voice_stop_signal = stop_signal or default_voice_stop_signal
     history = conversation_history or ConversationHistory()
     state = conversation_state if conversation_state is not None else ConversationState()
+    delivery_state = (
+        speech_delivery_state
+        if speech_delivery_state is not None
+        else SpeechDeliveryState()
+    )
     intelligence = (
         conversation_intelligence
         if conversation_intelligence is not None
@@ -283,6 +290,7 @@ def run_conversation_loop(
                 stop_signal=voice_stop_signal,
                 client=client,
                 conversation_state=state,
+                speech_delivery_state=delivery_state,
             )
             if command_result.message:
                 print(command_result.message)

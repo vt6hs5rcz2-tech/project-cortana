@@ -16,6 +16,7 @@ from src.active_memory import (
 )
 from src.ai_service import OpenAIClient
 from src.conversation_state import ConversationState
+from src.speech_delivery import SpeechDeliveryState
 from src.config import (
     ACTIVE_MEMORY_PERSISTENCE_ENABLED,
     ALLOWED_DOCUMENT_EXTENSIONS,
@@ -408,7 +409,8 @@ ABOUT_TEXT = (
     "perception combining voice with bounded live camera context, bounded "
     "conversational intelligence for continuity, follow-ups, corrections, "
     "response-depth selection, and consistent style without privileged "
-    "authority, a local "
+    "authority, natural speech delivery and conversational timing for spoken "
+    "responses, a local "
     "human-controlled security event, incident, indicator, evidence, and "
     "chain-of-custody foundation, a human-supervised defensive tool "
     "framework with scope controls and approval, optional process-isolated "
@@ -609,6 +611,7 @@ class CommandContext:
     vision_service: VisualAnalysisService | None = None
     client: OpenAIClient | None = None
     conversation_state: ConversationState | None = None
+    speech_delivery_state: SpeechDeliveryState | None = None
 
 
 CommandHandler = Callable[[CommandContext], CommandResult]
@@ -773,6 +776,7 @@ def handle_slash_command(
     stop_signal: Callable[[], bool] | None = None,
     client: OpenAIClient | None = None,
     conversation_state: ConversationState | None = None,
+    speech_delivery_state: SpeechDeliveryState | None = None,
 ) -> CommandResult:
     """Handle a slash command locally.
 
@@ -1029,6 +1033,7 @@ def handle_slash_command(
                 capture=voice_capture,
                 voice_service=voice_service,
                 conversation_state=conversation_state,
+                speech_delivery_state=speech_delivery_state,
             ),
         )
         if voice_result is not None:
@@ -1058,6 +1063,7 @@ def handle_slash_command(
                 active_memory_context=active_memory_context,
                 logger=logger,
                 conversation_state=conversation_state,
+                speech_delivery_state=speech_delivery_state,
             ),
         )
         if realtime_result is not None:
@@ -1077,6 +1083,7 @@ def handle_slash_command(
                 active_memory_context=active_memory_context,
                 logger=logger,
                 conversation_state=conversation_state,
+                speech_delivery_state=speech_delivery_state,
             ),
         )
         if multimodal_result is not None:
@@ -1120,6 +1127,7 @@ def handle_slash_command(
         vision_service=vision_service,
         client=client,
         conversation_state=conversation_state,
+        speech_delivery_state=speech_delivery_state,
     )
     return handler(context)
 
@@ -1171,6 +1179,7 @@ def _handle_clear(context: CommandContext) -> CommandResult:
             context.conversation_history,
             retrieval_session=context.retrieval_session,
             conversation_state=context.conversation_state,
+            speech_delivery_state=context.speech_delivery_state,
         ),
     )
 
@@ -2142,6 +2151,7 @@ def clear_conversation_history(
     *,
     retrieval_session: RetrievalSession | None = None,
     conversation_state: ConversationState | None = None,
+    speech_delivery_state: SpeechDeliveryState | None = None,
 ) -> str:
     """Clear in-memory history and grounded source manifest for the session."""
     history_was_empty = not conversation_history.turns
@@ -2150,6 +2160,8 @@ def clear_conversation_history(
         retrieval_session.clear()
     if conversation_state is not None:
         conversation_state.reset()
+    if speech_delivery_state is not None:
+        speech_delivery_state.reset()
 
     if history_was_empty:
         return CLEAR_ALREADY_EMPTY
