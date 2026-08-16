@@ -31,6 +31,27 @@ class FakeEvent:
 class FakeResponse:
     id: object
     status: str = "completed"
+    metadata: dict[str, str] | None = None
+
+
+_AUTO_METADATA = object()
+
+
+def _metadata_for(
+    session: RealtimeVoiceSession,
+    item_id: str | None,
+) -> dict[str, str] | None:
+    record = None
+    if item_id is not None:
+        record = session._generation_for_user_item(item_id)
+    elif session._expected_generation is not None:
+        record = session._generations.get(session._expected_generation)
+    if record is None or not record.user_item_id:
+        return None
+    return {
+        "cortana_user_item_id": record.user_item_id,
+        "cortana_generation": str(record.generation),
+    }
 
 
 def _settings() -> Settings:
@@ -65,9 +86,22 @@ def _speech(session: RealtimeVoiceSession, item_id: str) -> None:
     session._on_speech_started(FakeEvent(type="input_audio_buffer.speech_started", item_id=item_id))
 
 
-def _created(session: RealtimeVoiceSession, response_id: object) -> None:
+def _created(
+    session: RealtimeVoiceSession,
+    response_id: object,
+    *,
+    item_id: str | None = None,
+    metadata: object = _AUTO_METADATA,
+) -> None:
+    resolved = (
+        _metadata_for(session, item_id) if metadata is _AUTO_METADATA else metadata
+    )
+    meta = resolved if isinstance(resolved, dict) or resolved is None else None
     session._on_response_created(
-        FakeEvent(type="response.created", response=FakeResponse(id=response_id))
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(id=response_id, metadata=meta),
+        )
     )
 
 
@@ -98,8 +132,8 @@ def test_deep_m25_stale_a_arrives_before_b() -> None:
     _commit(session, "item_a")
     _speech(session, "item_b")
     _commit(session, "item_b")
-    _created(session, "resp_a")
-    _created(session, "resp_b")
+    _created(session, "resp_a", item_id="item_a")
+    _created(session, "resp_b", item_id="item_b")
     pairing = _pairing(session)
     assert session._active_response_id == "resp_b"
     assert "resp_a" in session._cancelled_set
@@ -112,7 +146,7 @@ def test_deep_m25_stale_a_arrives_after_b() -> None:
     _commit(session, "item_a")
     _speech(session, "item_b")
     _commit(session, "item_b")
-    _created(session, "resp_b")
+    _created(session, "resp_b", item_id="item_b")
     session._on_audio_delta(
         FakeEvent(
             type="response.output_audio.delta",
@@ -120,9 +154,10 @@ def test_deep_m25_stale_a_arrives_after_b() -> None:
             delta="AAEC",
         )
     )
-    _created(session, "resp_a")
-    assert session._active_response_id == "resp_b"
+    _done(session, "resp_b")
+    _created(session, "resp_a", item_id="item_a")
     assert "resp_a" in session._cancelled_set
+    assert "resp_b" not in session._cancelled_set
     pairing = _pairing(session)
     assert pairing.get("resp_b") == "item_b"
     assert pairing.get("resp_a") != "item_b"
@@ -208,20 +243,20 @@ def test_deep_m25_hundred_deterministic_sequence_variations() -> None:
                 _commit(session, "item_a")
                 _speech(session, "item_b")
                 _commit(session, "item_b")
-                _created(session, "resp_b")
+                _created(session, "resp_b", item_id="item_b")
                 expected = ("resp_b", "item_b")
             elif kind == 1:
                 _commit(session, "item_a")
                 _speech(session, "item_b")
                 _commit(session, "item_b")
-                _created(session, "resp_stale")
-                _created(session, "resp_b")
+                _created(session, "resp_stale", item_id="item_a")
+                _created(session, "resp_b", item_id="item_b")
                 expected = ("resp_b", "item_b")
             elif kind == 2:
                 _commit(session, "item_a")
                 _speech(session, "item_b")
                 _commit(session, "item_b")
-                _created(session, "resp_b")
+                _created(session, "resp_b", item_id="item_b")
                 session._on_audio_delta(
                     FakeEvent(
                         type="response.output_audio.delta",
@@ -229,7 +264,8 @@ def test_deep_m25_hundred_deterministic_sequence_variations() -> None:
                         delta="AAEC",
                     )
                 )
-                _created(session, "resp_stale")
+                _done(session, "resp_b")
+                _created(session, "resp_stale", item_id="item_a")
                 expected = ("resp_b", "item_b")
             elif kind == 3:
                 _commit(session, "item_a")

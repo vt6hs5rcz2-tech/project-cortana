@@ -38,6 +38,7 @@ from tests.test_realtime_voice import (
     FakeConnection,
     FakeEvent,
     FakeResponse,
+    _correlation_metadata,
     _run_session,
     _wait_until,
 )
@@ -310,7 +311,14 @@ def test_realtime_five_turn_conversation_cleans_up() -> None:
             )
         )
         connection.socket.push(
-            FakeEvent(type="response.created", response=FakeResponse(id=resp_id, status="in_progress"))
+            FakeEvent(
+                type="response.created",
+                response=FakeResponse(
+                    id=resp_id,
+                    status="in_progress",
+                    metadata=_correlation_metadata(item_id, index + 1),
+                ),
+            )
         )
         connection.socket.push(
             FakeEvent(

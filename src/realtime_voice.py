@@ -93,6 +93,8 @@ _MAX_PENDING_REALTIME_PLANS = 8
 _MAX_PLANNED_TRANSCRIPT_ITEMS = 32
 _MAX_RESPONSE_GENERATIONS = 16
 _MAX_TOMBSTONED_RESPONSE_IDS = 16
+_CORTANA_USER_ITEM_META = "cortana_user_item_id"
+_CORTANA_GENERATION_META = "cortana_generation"
 REALTIME_SESSION_FAILED = (
     "Cortana: Realtime voice session failed. "
     "You can use /voice-turn for one spoken turn."
@@ -322,7 +324,7 @@ def build_session_update_payload(
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    "create_response": True,
+                    "create_response": False,
                     "interrupt_response": True,
                 },
             },
@@ -418,13 +420,16 @@ _NO_COMMIT = TurnCommitResult(outcome="none")
 
 @dataclass
 class _ResponseGeneration:
-    """One user-commit generation and its optional auto-response claim."""
+    """One committed user turn and its client-issued response.create."""
 
     generation: int
     user_item_id: str | None = None
     invalidated: bool = False
+    create_issued: bool = False
+    create_failed: bool = False
     claimed_response_id: str | None = None
     produced_output: bool = False
+    lifecycle_complete: bool = False
 
 
 class _TurnAssembler:
@@ -710,22 +715,17 @@ class RealtimeVoiceSession:
         )
         self._cancelled_set: set[str] = set()
         self._responding = False
-        self._auto_response_pending = False
-        self._preempt_upcoming_response = False
-        self._invalid_pending_response_count = 0
         self._response_generation = 0
         self._pending_response_generation: int | None = None
         self._active_response_generation: int | None = None
         self._expected_generation: int | None = None
         self._generations: dict[int, _ResponseGeneration] = {}
         self._generation_order: deque[int] = deque()
-        self._invalidated_unclaimed: deque[int] = deque()
         self._claimed_response_ids: dict[str, int] = {}
         self._tombstoned_response_ids: deque[str] = deque(
             maxlen=_MAX_TOMBSTONED_RESPONSE_IDS
         )
         self._tombstoned_set: set[str] = set()
-        self._provisional_response_id: str | None = None
         self._assembler = _TurnAssembler(conversation_history)
         self._playback_abort = threading.Event()
         self._abort_generation = 0
@@ -1151,10 +1151,6 @@ class RealtimeVoiceSession:
         while len(self._generation_order) > _MAX_RESPONSE_GENERATIONS:
             oldest = self._generation_order.popleft()
             self._generations.pop(oldest, None)
-            if oldest in self._invalidated_unclaimed:
-                self._invalidated_unclaimed = deque(
-                    item for item in self._invalidated_unclaimed if item != oldest
-                )
 
     def _trim_claimed_response_ids(self) -> None:
         while len(self._claimed_response_ids) > _MAX_RESPONSE_GENERATIONS:
@@ -1175,39 +1171,22 @@ class RealtimeVoiceSession:
         self._tombstoned_response_ids.append(response_id)
         self._tombstoned_set.add(response_id)
 
-    def _has_older_invalidated(self, generation: int | None) -> bool:
-        if generation is None:
-            return False
-        return any(item < generation for item in self._invalidated_unclaimed)
+    def _generation_for_user_item(self, item_id: str) -> _ResponseGeneration | None:
+        for generation in reversed(self._generation_order):
+            record = self._generations.get(generation)
+            if record is not None and record.user_item_id == item_id:
+                return record
+        return None
 
-    def _pop_older_invalidated(self, generation: int | None) -> None:
+    def _invalidate_generation(self, generation: int | None) -> None:
         if generation is None:
             return
-        kept: list[int] = []
-        popped = False
-        for item in self._invalidated_unclaimed:
-            if not popped and item < generation:
-                popped = True
-                continue
-            kept.append(item)
-        self._invalidated_unclaimed = deque(kept)
-        self._invalid_pending_response_count = len(self._invalidated_unclaimed)
-
-    def _invalidate_expected_generation(self) -> None:
-        gen = self._expected_generation
-        if gen is None:
-            return
-        record = self._generations.get(gen)
-        if record is not None and record.claimed_response_id is None:
+        record = self._generations.get(generation)
+        if record is not None:
             record.invalidated = True
-            if gen not in self._invalidated_unclaimed:
-                self._invalidated_unclaimed.append(gen)
-                while len(self._invalidated_unclaimed) > _MAX_RESPONSE_GENERATIONS:
-                    self._invalidated_unclaimed.popleft()
-        self._expected_generation = None
-        self._pending_response_generation = None
-        self._auto_response_pending = False
-        self._invalid_pending_response_count = len(self._invalidated_unclaimed)
+        if self._expected_generation == generation:
+            self._expected_generation = None
+            self._pending_response_generation = None
 
     def _mark_generation_produced_output(self, response_id: str) -> None:
         gen = self._claimed_response_ids.get(response_id)
@@ -1215,69 +1194,102 @@ class RealtimeVoiceSession:
             record = self._generations.get(gen)
             if record is not None:
                 record.produced_output = True
-        if self._provisional_response_id == response_id:
-            self._provisional_response_id = None
 
-    def _reject_claimed_response(self, response_id: str) -> None:
-        self._mark_response_cancelled(response_id)
-        self._assembler.unbind_response(response_id)
-        self._discard_playback_for_response(response_id)
-        gen = self._claimed_response_ids.pop(response_id, None)
-        if self._active_response_id == response_id:
-            self._active_response_id = None
-            self._responding = False
-            self._playback_active_response_id = None
-        if self._provisional_response_id == response_id:
-            self._provisional_response_id = None
+    def _mark_lifecycle_complete(self, response_id: str) -> None:
+        gen = self._claimed_response_ids.get(response_id)
         if gen is not None:
             record = self._generations.get(gen)
-            if record is not None and record.claimed_response_id == response_id:
-                record.claimed_response_id = None
-                record.produced_output = False
+            if record is not None:
+                record.lifecycle_complete = True
 
-    def _accept_created_as_live(self, response_id: str) -> None:
-        gen = self._expected_generation
-        record = self._generations.get(gen) if gen is not None else None
-        if record is not None:
-            record.claimed_response_id = response_id
-            if record.user_item_id:
-                self._assembler.set_current_user_item(record.user_item_id)
-        if gen is not None:
-            self._claimed_response_ids[response_id] = gen
-            self._trim_claimed_response_ids()
-        self._auto_response_pending = False
-        self._preempt_upcoming_response = False
+    def _correlation_metadata(self, record: _ResponseGeneration) -> dict[str, str] | None:
+        if not record.user_item_id:
+            return None
+        return {
+            _CORTANA_USER_ITEM_META: record.user_item_id,
+            _CORTANA_GENERATION_META: str(record.generation),
+        }
+
+    def _read_created_metadata(self, response: object) -> tuple[str, int] | None:
+        metadata = getattr(response, "metadata", None)
+        if not isinstance(metadata, dict):
+            return None
+        item_id = metadata.get(_CORTANA_USER_ITEM_META)
+        raw_generation = metadata.get(_CORTANA_GENERATION_META)
+        if not isinstance(item_id, str) or not item_id:
+            return None
+        if not isinstance(raw_generation, str):
+            return None
+        try:
+            generation = int(raw_generation)
+        except ValueError:
+            return None
+        if generation < 1:
+            return None
+        return item_id, generation
+
+    def _issue_response_create(self, record: _ResponseGeneration) -> None:
+        if record.create_issued or record.create_failed:
+            return
+        metadata = self._correlation_metadata(record)
+        if metadata is None:
+            return
+        connection = self._connection
+        if connection is None:
+            # Handler-only unit tests have no live connection.
+            record.create_issued = True
+            return
+        try:
+            connection.response.create(response={"metadata": metadata})
+        except Exception as error:
+            record.create_failed = True
+            record.invalidated = True
+            self._logger.error(
+                "Realtime response.create failed error_type=%s",
+                type(error).__name__,
+            )
+            self.request_stop(error_type="response_failed")
+            return
+        record.create_issued = True
+
+    def _accept_created_as_live(
+        self,
+        response_id: str,
+        record: _ResponseGeneration,
+    ) -> None:
+        record.claimed_response_id = response_id
+        self._claimed_response_ids[response_id] = record.generation
+        self._trim_claimed_response_ids()
         self._pending_response_generation = None
-        self._active_response_generation = gen
+        self._active_response_generation = record.generation
         self._active_response_id = response_id
         self._responding = True
         self._playback_active_response_id = response_id
+        if record.user_item_id:
+            self._assembler.set_current_user_item(record.user_item_id)
         self._assembler.bind_response(response_id)
-        provisional = self._has_older_invalidated(gen)
-        self._provisional_response_id = response_id if provisional else None
         self._set_state(RealtimeSessionState.RESPONDING)
 
     def _on_user_audio_committed(self, event: object) -> None:
         item_id = getattr(event, "item_id", None)
         user_item_id = item_id if isinstance(item_id, str) and item_id else None
-        if user_item_id is not None:
-            self._assembler.set_current_user_item(user_item_id)
-        prior = self._expected_generation
-        prior_record = self._generations.get(prior) if prior is not None else None
-        if prior_record is not None and prior_record.claimed_response_id is not None:
-            # A new user turn after a claimed response: leftover stale
-            # generations must not reclassify this turn's created.
-            self._invalidated_unclaimed.clear()
-            self._invalid_pending_response_count = 0
-        self._provisional_response_id = None
+        if user_item_id is None:
+            return
+        self._assembler.set_current_user_item(user_item_id)
+        existing = self._generation_for_user_item(user_item_id)
+        if (
+            existing is not None
+            and existing.create_issued
+            and not existing.invalidated
+        ):
+            return
         self._response_generation += 1
         generation = self._response_generation
-        self._remember_generation(
-            _ResponseGeneration(generation=generation, user_item_id=user_item_id)
-        )
+        record = _ResponseGeneration(generation=generation, user_item_id=user_item_id)
+        self._remember_generation(record)
         self._expected_generation = generation
         self._pending_response_generation = generation
-        self._auto_response_pending = True
+        self._issue_response_create(record)
 
     def _on_speech_started(self, event: object) -> None:
         item_id = getattr(event, "item_id", None)
@@ -1293,10 +1305,10 @@ class RealtimeVoiceSession:
             self._raise_playback_abort()
             self._abort_playback_stream_now()
             self._discard_playback_for_response(response_id)
+            claimed_gen = self._claimed_response_ids.get(response_id)
+            self._invalidate_generation(claimed_gen)
             self._responding = False
             self._active_response_id = None
-            self._provisional_response_id = None
-            self._preempt_upcoming_response = True
             self._set_state(RealtimeSessionState.LISTENING)
             self._logger.info(
                 "Realtime barge-in local_session_id=%s response_id=%s",
@@ -1304,9 +1316,8 @@ class RealtimeVoiceSession:
                 response_id,
             )
             return
-        if self._auto_response_pending or self._expected_generation is not None:
-            self._invalidate_expected_generation()
-            self._preempt_upcoming_response = True
+        if self._expected_generation is not None:
+            self._invalidate_generation(self._expected_generation)
             self._raise_playback_abort()
         self._set_state(RealtimeSessionState.LISTENING)
 
@@ -1361,75 +1372,54 @@ class RealtimeVoiceSession:
         if response_id in self._claimed_response_ids:
             return
 
-        expected = self._expected_generation
-        record = self._generations.get(expected) if expected is not None else None
-        live_unclaimed = (
-            expected is not None
-            and record is not None
-            and record.claimed_response_id is None
-            and not record.invalidated
-        )
-        provisional = self._provisional_response_id
-        firm_live = (
-            self._active_response_id is not None
-            and provisional is None
-            and (record is None or record.claimed_response_id is not None)
-        )
-
+        parsed = self._read_created_metadata(response)
+        if parsed is None:
+            self._tombstone_response(response_id)
+            self._logger.info(
+                "Realtime rejected unlabeled response.created "
+                "local_session_id=%s response_id=%s",
+                self._local_session_id,
+                response_id,
+            )
+            return
+        item_id, generation = parsed
+        record = self._generations.get(generation)
         if (
-            provisional is not None
-            and provisional != response_id
-            and self._has_older_invalidated(expected)
+            record is None
+            or not record.create_issued
+            or record.create_failed
+            or record.user_item_id != item_id
         ):
-            old_record = self._generations.get(self._active_response_generation or -1)
-            if old_record is None or not old_record.produced_output:
-                self._logger.info(
-                    "Realtime replaced provisional stale response "
-                    "local_session_id=%s stale_response_id=%s "
-                    "live_response_id=%s",
-                    self._local_session_id,
-                    provisional,
-                    response_id,
-                )
-                self._reject_claimed_response(provisional)
-                self._pop_older_invalidated(expected)
-                self._accept_created_as_live(response_id)
-                return
-
-        if live_unclaimed:
-            self._accept_created_as_live(response_id)
-            return
-
-        if self._preempt_upcoming_response and not live_unclaimed:
             self._tombstone_response(response_id)
-            self._preempt_upcoming_response = False
             self._logger.info(
-                "Realtime preempted upcoming response local_session_id=%s "
-                "response_id=%s",
+                "Realtime rejected unknown-generation response.created "
+                "local_session_id=%s response_id=%s generation=%s",
                 self._local_session_id,
                 response_id,
+                generation,
             )
             return
-
-        if firm_live or self._has_older_invalidated(expected):
+        if record.claimed_response_id is not None:
             self._tombstone_response(response_id)
-            self._pop_older_invalidated(expected)
             self._logger.info(
-                "Realtime rejected stale pending response local_session_id=%s "
-                "response_id=%s",
+                "Realtime rejected duplicate-generation response.created "
+                "local_session_id=%s response_id=%s generation=%s",
                 self._local_session_id,
                 response_id,
+                generation,
             )
             return
-
-        # No expected generation: orphan created must not bind to a future user.
-        self._tombstone_response(response_id)
-        self._logger.info(
-            "Realtime rejected orphan response.created local_session_id=%s "
-            "response_id=%s",
-            self._local_session_id,
-            response_id,
-        )
+        if record.invalidated:
+            self._tombstone_response(response_id)
+            self._logger.info(
+                "Realtime rejected invalidated-generation response.created "
+                "local_session_id=%s response_id=%s item_id=%s",
+                self._local_session_id,
+                response_id,
+                item_id,
+            )
+            return
+        self._accept_created_as_live(response_id, record)
 
     def _on_audio_delta(self, event: object) -> None:
         response_id = getattr(event, "response_id", None)
@@ -1518,8 +1508,7 @@ class RealtimeVoiceSession:
             self._observe_completed_turn(user_item_id=outcome.user_item_id)
         elif outcome.outcome == "user_only" and outcome.user_item_id is not None:
             self._plans_by_item.pop(outcome.user_item_id, None)
-        if self._provisional_response_id == response_id:
-            self._provisional_response_id = None
+        self._mark_lifecycle_complete(response_id)
         if self._active_response_id == response_id:
             self._active_response_id = None
             self._responding = False
@@ -1529,11 +1518,9 @@ class RealtimeVoiceSession:
         """Observe one fully finalized realtime turn and refresh next-turn context.
 
         User-side M28 planning already ran on the finalized transcript when the
-        architecture delivered it. This hook never creates a response: M25 keeps
-        ``create_response=True`` as the sole response owner. True per-utterance
-        pre-response injection is not available because the provider typically
-        begins the assistant response from server VAD before the local
-        transcript event arrives.
+        architecture delivered it.         This hook never creates a response. M25 issues one client
+        ``response.create`` at commit time; this observe path only refreshes
+        next-turn guidance after a completed pair.
 
         Plans are retrieved by the committed user item id. Transcript text is
         never used as turn identity.
@@ -1905,20 +1892,15 @@ class RealtimeVoiceSession:
         self._planned_transcript_items.clear()
         self._planned_transcript_order.clear()
         self._interrupted_item_ids.clear()
-        self._auto_response_pending = False
-        self._preempt_upcoming_response = False
-        self._invalid_pending_response_count = 0
         self._response_generation = 0
         self._pending_response_generation = None
         self._active_response_generation = None
         self._expected_generation = None
         self._generations.clear()
         self._generation_order.clear()
-        self._invalidated_unclaimed.clear()
         self._claimed_response_ids.clear()
         self._tombstoned_response_ids.clear()
         self._tombstoned_set.clear()
-        self._provisional_response_id = None
         self._responding = False
         self._active_response_id = None
         self._playback_active_response_id = None

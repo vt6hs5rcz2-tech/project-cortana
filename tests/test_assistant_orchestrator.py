@@ -215,6 +215,33 @@ def test_slash_remember_still_uses_existing_slash_dispatch(
     assert history.turns == []
 
 
+def test_nl_single_proper_noun_is_not_auto_persisted_slash_still_works(
+    tmp_path: Path,
+) -> None:
+    """Short name-only NL remember is ambiguous; /remember still stores it."""
+    store = _memory_store(tmp_path)
+    orchestrator = UnifiedAssistantOrchestrator(
+        memory_store=store,
+        document_vault=_document_vault(tmp_path),
+        document_retriever=LexicalDocumentRetriever(),
+        incident_repository=_incident_repository(tmp_path),
+    )
+    assert orchestrator.try_handle("remember Cortana") is None
+    assert store.list_memories() == []
+    history = ConversationHistory()
+    result = handle_slash_command(
+        "/remember Cortana",
+        settings=_settings(),
+        conversation_history=history,
+        memory_store=store,
+        active_memory_context=ActiveMemoryContext(),
+        document_vault=_document_vault(tmp_path),
+        document_extractor=DefaultTextExtractor(),
+    )
+    assert result.outcome == CommandOutcome.CONTINUE
+    assert [memory.text for memory in store.list_memories()] == ["Cortana"]
+
+
 # --- B. Conversation fallback --------------------------------------------
 
 
@@ -370,9 +397,180 @@ def test_memory_write_collisions_do_not_trigger(tmp_path: Path) -> None:
         "remember the previous thing",
         "remember what we discussed",
         "remember that one",
+        "remember this stuff",
+        "remember that thing I said",
+        "remember it, whatever it was",
+        "remember that last part",
+        "remember the thing from before",
+        "remember this part",
+        "remember what we talked about",
+        "remember all that",
+        "remember that stuff from earlier",
     ):
         assert orchestrator.try_handle(phrase) is None
     assert store.list_memories() == []
+
+
+def test_rev002_remember_this_stuff_must_not_persist(tmp_path: Path) -> None:
+    """Exact outside-review REV-002 reproduction."""
+    store = _memory_store(tmp_path)
+    orchestrator = UnifiedAssistantOrchestrator(
+        memory_store=store,
+        document_vault=_document_vault(tmp_path),
+        document_retriever=LexicalDocumentRetriever(),
+        incident_repository=_incident_repository(tmp_path),
+    )
+    assert orchestrator.try_handle("remember this stuff") is None
+    assert store.list_memories() == []
+
+
+def test_rev002_remember_that_thing_i_said_must_not_persist(tmp_path: Path) -> None:
+    """Exact outside-review REV-002 reproduction."""
+    store = _memory_store(tmp_path)
+    orchestrator = UnifiedAssistantOrchestrator(
+        memory_store=store,
+        document_vault=_document_vault(tmp_path),
+        document_retriever=LexicalDocumentRetriever(),
+        incident_repository=_incident_repository(tmp_path),
+    )
+    assert orchestrator.try_handle("remember that thing I said") is None
+    assert store.list_memories() == []
+
+
+def test_rev002_remember_it_whatever_it_was_must_not_persist(tmp_path: Path) -> None:
+    """Exact outside-review REV-002 reproduction."""
+    store = _memory_store(tmp_path)
+    orchestrator = UnifiedAssistantOrchestrator(
+        memory_store=store,
+        document_vault=_document_vault(tmp_path),
+        document_retriever=LexicalDocumentRetriever(),
+        incident_repository=_incident_repository(tmp_path),
+    )
+    assert orchestrator.try_handle("remember it, whatever it was") is None
+    assert store.list_memories() == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "remember this",
+        "remember this stuff",
+        "remember this thing",
+        "remember that",
+        "remember that thing I said",
+        "remember it",
+        "remember it please",
+        "remember it, whatever it was",
+        "remember what I just said",
+        "remember the previous thing",
+        "remember the above",
+        "remember what we discussed",
+        "remember that one",
+        "remember that last part",
+        "remember the thing from before",
+        "remember what you just told me",
+        "remember whatever that was",
+        "remember this part",
+        "remember the earlier thing",
+        "remember what we talked about",
+        "remember all that",
+        "remember that stuff from earlier",
+        "remember the previous topic",
+        "remember our earlier conversation",
+        "remember that context",
+        "remember the details",
+        "remember the specifics",
+        "remember the issue",
+        "remember the topic",
+        "remember the matter",
+        "remember the point",
+        "remember the subject",
+        "remember the aforementioned matter",
+        "remember you know, the thing",
+        "remember that particular item we discussed",
+        "remember the one from a minute ago",
+        "remember the info from before",
+        "remember the situation",
+    ],
+)
+def test_rev002_rejected_deictic_memory_matrix(
+    tmp_path: Path,
+    message: str,
+) -> None:
+    store = _memory_store(tmp_path)
+    orchestrator = UnifiedAssistantOrchestrator(
+        memory_store=store,
+        document_vault=_document_vault(tmp_path),
+        document_retriever=LexicalDocumentRetriever(),
+        incident_repository=_incident_repository(tmp_path),
+    )
+    assert orchestrator.try_handle(message) is None, message
+    assert store.list_memories() == []
+
+
+@pytest.mark.parametrize(
+    "message,expected_text",
+    [
+        (
+            "remember that my project is called Cortana",
+            "that my project is called Cortana",
+        ),
+        (
+            "remember that the server is in Virginia",
+            "that the server is in Virginia",
+        ),
+        (
+            "remember my preferred editor is Cursor",
+            "my preferred editor is Cursor",
+        ),
+        (
+            "remember the backup window is 2 AM",
+            "the backup window is 2 AM",
+        ),
+        (
+            "remember my dog's name is Max",
+            "my dog's name is Max",
+        ),
+        (
+            "remember that my meeting is Tuesday",
+            "that my meeting is Tuesday",
+        ),
+        (
+            "remember my laptop is a ThinkPad",
+            "my laptop is a ThinkPad",
+        ),
+        (
+            "remember that the database server is db01",
+            "that the database server is db01",
+        ),
+        (
+            "remember my timezone is Eastern",
+            "my timezone is Eastern",
+        ),
+        ("remember port 443", "port 443"),
+        ("remember ticket INC-1234", "ticket INC-1234"),
+        ("remember region us-east-1", "region us-east-1"),
+        ("remember server db01", "server db01"),
+        ("remember Tuesday at 2 PM", "Tuesday at 2 PM"),
+    ],
+)
+def test_rev002_allowed_factual_memory_matrix(
+    tmp_path: Path,
+    message: str,
+    expected_text: str,
+) -> None:
+    store = _memory_store(tmp_path)
+    orchestrator = UnifiedAssistantOrchestrator(
+        memory_store=store,
+        document_vault=_document_vault(tmp_path),
+        document_retriever=LexicalDocumentRetriever(),
+        incident_repository=_incident_repository(tmp_path),
+    )
+    result = orchestrator.try_handle(message)
+    assert result is not None, message
+    assert result.domain == "memory"
+    assert result.action == "write"
+    assert [memory.text for memory in store.list_memories()] == [expected_text]
 
 
 def test_memory_write_respects_store_length_validation(tmp_path: Path) -> None:
@@ -399,7 +597,7 @@ def test_memory_write_respects_store_count_cap(tmp_path: Path) -> None:
         document_retriever=LexicalDocumentRetriever(),
         incident_repository=_incident_repository(tmp_path),
     )
-    result = orchestrator.try_handle("remember another fact")
+    result = orchestrator.try_handle("remember the VPN is 10.0.0.1")
     assert result is not None
     assert result.domain == "memory"
     assert result.action == "write"

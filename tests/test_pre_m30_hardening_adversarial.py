@@ -107,6 +107,17 @@ class FakeEvent:
 class FakeResponse:
     id: object
     status: str = "completed"
+    metadata: dict[str, str] | None = None
+
+
+def _meta(session: RealtimeVoiceSession, item_id: str) -> dict[str, str] | None:
+    record = session._generation_for_user_item(item_id)
+    if record is None or not record.user_item_id:
+        return None
+    return {
+        "cortana_user_item_id": record.user_item_id,
+        "cortana_generation": str(record.generation),
+    }
 
 
 @dataclass
@@ -583,7 +594,11 @@ def test_harden_response_created_does_not_clear_pending_abort() -> None:
     session._on_response_created(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_c", status="in_progress"),
+            response=FakeResponse(
+                id="resp_c",
+                status="in_progress",
+                metadata=_meta(session, "item_b"),
+            ),
         )
     )
     assert session._active_response_id == "resp_c"
@@ -604,7 +619,11 @@ def test_harden_stale_response_created_after_barge_in_commit_is_rejected() -> No
     session._on_response_created(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_new", status="in_progress"),
+            response=FakeResponse(
+                id="resp_new",
+                status="in_progress",
+                metadata=_meta(session, "item_b"),
+            ),
         )
     )
     assert session._active_response_id == "resp_new"
@@ -617,14 +636,24 @@ def test_harden_stale_response_created_after_barge_in_commit_is_rejected() -> No
             delta=pcm,
         )
     )
+    session._on_response_done(
+        FakeEvent(
+            type="response.done",
+            response=FakeResponse(id="resp_new", status="completed"),
+        )
+    )
     session._on_response_created(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_stale", status="in_progress"),
+            response=FakeResponse(
+                id="resp_stale",
+                status="in_progress",
+                metadata=_meta(session, "item_a"),
+            ),
         )
     )
     assert session._is_cancelled("resp_stale")
-    assert session._active_response_id == "resp_new"
+    assert not session._is_cancelled("resp_new")
     queued_before = session._playback_queue.qsize()
     session._on_audio_delta(
         FakeEvent(
@@ -644,7 +673,11 @@ def test_harden_malformed_response_done_clears_responding() -> None:
     session._on_response_created(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_1", status="in_progress"),
+            response=FakeResponse(
+                id="resp_1",
+                status="in_progress",
+                metadata=_meta(session, "item_1"),
+            ),
         )
     )
     assert session._responding is True
@@ -1278,7 +1311,7 @@ def test_harden_m25_m26_create_response_invariants() -> None:
     turn = audio["input"]["turn_detection"]
     assert isinstance(turn, dict)
     assert turn["type"] == "server_vad"
-    assert turn["create_response"] is True
+    assert turn["create_response"] is False
     assert turn["interrupt_response"] is True
     multi = build_multimodal_session_update_payload(
         settings=_settings(),
@@ -1325,7 +1358,8 @@ def test_harden_m26_has_one_response_create_call_site() -> None:
     source = (PROJECT_ROOT / "src/realtime_multimodal.py").read_text(encoding="utf-8")
     assert source.count("connection.response.create()") == 1
     voice_source = (PROJECT_ROOT / "src/realtime_voice.py").read_text(encoding="utf-8")
-    assert "connection.response.create()" not in voice_source
+    assert "connection.response.create(response=" in voice_source
+    assert voice_source.count("connection.response.create(") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1381,13 +1415,10 @@ def _assert_m25_session_local_empty(session: RealtimeVoiceSession) -> None:
     assert session._planned_transcript_items == set()
     assert list(session._planned_transcript_order) == []
     assert session._interrupted_item_ids == set()
-    assert session._auto_response_pending is False
-    assert session._preempt_upcoming_response is False
-    assert session._invalid_pending_response_count == 0
     assert session._expected_generation is None
+    assert session._pending_response_generation is None
     assert session._generations == {}
-    assert len(session._invalidated_unclaimed) == 0
-    assert session._provisional_response_id is None
+    assert list(session._generation_order) == []
     assert session._claimed_response_ids == {}
     assert len(session._tombstoned_response_ids) == 0
     assert session._tombstoned_set == set()
@@ -1552,9 +1583,6 @@ def test_harden_cleanup_clears_m25_session_local_state() -> None:
     session._planned_transcript_items.add("item_x")
     session._planned_transcript_order.append("item_x")
     session._interrupted_item_ids.add("item_x")
-    session._auto_response_pending = True
-    session._preempt_upcoming_response = True
-    session._invalid_pending_response_count = 3
     session._responding = True
     session._active_response_id = "resp_x"
     session._assembler.bind_response("resp_orphan")
@@ -1574,8 +1602,6 @@ def test_harden_hundred_cleanup_calls_clear_bounded_state() -> None:
         session = _voice_session(state=shared)
         session._interrupted_item_ids.add(f"item_{index}")
         session._assembler.bind_response(f"resp_{index}")
-        session._auto_response_pending = True
-        session._invalid_pending_response_count = 1
         session._cleanup()
         _assert_m25_session_local_empty(session)
         plateaus.append(len(session._plans_by_item) + len(session._interrupted_item_ids))
@@ -1697,7 +1723,11 @@ def test_harden_missing_stale_created_does_not_cancel_next_response() -> None:
     session._on_response_created(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_b", status="in_progress"),
+            response=FakeResponse(
+                id="resp_b",
+                status="in_progress",
+                metadata=_meta(session, "item_b"),
+            ),
         )
     )
     assert session._active_response_id == "resp_b"
@@ -1725,7 +1755,11 @@ def test_harden_repeated_barge_in_does_not_permanently_silence() -> None:
     session._on_response_created(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_live", status="in_progress"),
+            response=FakeResponse(
+                id="resp_live",
+                status="in_progress",
+                metadata=_meta(session, "item_final"),
+            ),
         )
     )
     assert session._active_response_id == "resp_live"
@@ -1787,7 +1821,11 @@ def test_harden_realtime_user_goal_kept_when_response_fails() -> None:
     session._on_response_created(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_1", status="in_progress"),
+            response=FakeResponse(
+                id="resp_1",
+                status="in_progress",
+                metadata=_meta(session, "item_1"),
+            ),
         )
     )
     session._on_response_done(

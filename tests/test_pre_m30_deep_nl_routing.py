@@ -59,6 +59,95 @@ def test_deep_f2_remember_that_fact_must_not_persist(tmp_path: Path) -> None:
     assert store.list_memories() == []
 
 
+def test_rev002_remember_this_stuff_must_not_persist(tmp_path: Path) -> None:
+    """Exact outside-review REV-002 reproduction."""
+    orchestrator, store = _orchestrator(tmp_path)
+    assert orchestrator.try_handle("remember this stuff") is None
+    assert store.list_memories() == []
+
+
+def test_rev002_remember_that_thing_i_said_must_not_persist(tmp_path: Path) -> None:
+    """Exact outside-review REV-002 reproduction."""
+    orchestrator, store = _orchestrator(tmp_path)
+    assert orchestrator.try_handle("remember that thing I said") is None
+    assert store.list_memories() == []
+
+
+def test_rev_verify_005_remember_that_last_part_must_not_persist(tmp_path: Path) -> None:
+    orchestrator, store = _orchestrator(tmp_path)
+    assert orchestrator.try_handle("remember that last part") is None
+    assert store.list_memories() == []
+
+
+def test_rev_verify_005_remember_the_thing_from_before_must_not_persist(
+    tmp_path: Path,
+) -> None:
+    orchestrator, store = _orchestrator(tmp_path)
+    assert orchestrator.try_handle("remember the thing from before") is None
+    assert store.list_memories() == []
+
+
+def test_rev_verify_005_remember_this_part_must_not_persist(tmp_path: Path) -> None:
+    orchestrator, store = _orchestrator(tmp_path)
+    assert orchestrator.try_handle("remember this part") is None
+    assert store.list_memories() == []
+
+
+def test_rev_verify_005_remember_what_we_talked_about_must_not_persist(
+    tmp_path: Path,
+) -> None:
+    orchestrator, store = _orchestrator(tmp_path)
+    assert orchestrator.try_handle("remember what we talked about") is None
+    assert store.list_memories() == []
+
+
+def test_rev_verify_005_remember_all_that_must_not_persist(tmp_path: Path) -> None:
+    orchestrator, store = _orchestrator(tmp_path)
+    assert orchestrator.try_handle("remember all that") is None
+    assert store.list_memories() == []
+
+
+def test_rev_verify_005_remember_that_stuff_from_earlier_must_not_persist(
+    tmp_path: Path,
+) -> None:
+    orchestrator, store = _orchestrator(tmp_path)
+    assert orchestrator.try_handle("remember that stuff from earlier") is None
+    assert store.list_memories() == []
+
+
+def test_rev_verify_005_claude_adversarial_discourse_must_not_persist(
+    tmp_path: Path,
+) -> None:
+    orchestrator, store = _orchestrator(tmp_path)
+    for phrase in (
+        "remember the aforementioned matter",
+        "remember you know, the thing",
+        "remember that particular item we discussed",
+        "remember the one from a minute ago",
+        "remember the previous topic",
+        "remember our earlier conversation",
+        "remember that context",
+        "remember the info from before",
+        "remember the details",
+        "remember the specifics",
+        "remember the situation",
+        "remember the issue",
+        "remember the topic",
+        "remember the matter",
+        "remember the point",
+        "remember the subject",
+    ):
+        assert orchestrator.try_handle(phrase) is None, phrase
+    assert store.list_memories() == []
+
+
+def test_rev002_remember_it_whatever_it_was_must_not_persist(tmp_path: Path) -> None:
+    """Exact outside-review REV-002 reproduction."""
+    orchestrator, store = _orchestrator(tmp_path)
+    assert orchestrator.try_handle("remember it, whatever it was") is None
+    assert store.list_memories() == []
+
+
 def test_deep_f2_remember_it_please_must_not_persist(tmp_path: Path) -> None:
     """OUTSIDE-F2: trailing 'please' must not defeat the deictic filter."""
     orchestrator, store = _orchestrator(tmp_path)

@@ -295,11 +295,11 @@ Behavior and limits:
 - Microphone opens only after a successful Realtime API connect and session configuration
 - Audio is raw PCM 16-bit mono 24 kHz in 20 ms frames (960 bytes); no WAV wrapping and no disk archive
 - Uses OpenAI synchronous `client.realtime.connect(..., max_retries=0)` — no automatic reconnect
-- Server VAD with `create_response=true` and `interrupt_response=true`; no local VAD; no per-utterance Enter-to-stop
+- Server VAD with `create_response=false` and `interrupt_response=true`; no local VAD; no per-utterance Enter-to-stop. Cortana issues exactly one client `response.create` per valid committed user turn, with trusted local correlation metadata
 - Assistant audio plays through `sounddevice.RawOutputStream`; barge-in uses `abort()` for immediate local silence
 - Input transcription (`gpt-4o-mini-transcribe` by default) is guidance of input audio content rather than precisely what the realtime model heard
 - Local `ConversationHistory` remains canonical; only finalized transcripts are committed. Interrupted assistant text is not committed
-- Milestone 28 plans each finalized transcript locally and refreshes next-turn session instructions after a completed pair; it does not change `create_response=true` or add a client `response.create` path
+- Milestone 28 plans each finalized transcript locally and refreshes next-turn session instructions after a completed pair. M25 does not wait for that transcript before `response.create`; M28 still cannot inject pre-response guidance into the current M25 utterance
 - Milestone 29 adds advisory spoken-delivery guidance (pacing, acknowledgments, interruption recovery) to those same next-turn instructions. Provider realtime audio remains provider-owned; Cortana does not re-chunk or re-synthesize M25 audio locally
 - Spoken realtime content remains conversational only: no slash-command, M18, calendar/reminder, tool/workflow, or memory-write authority
 - Realtime function/tool calling is disabled (`tools=[]`, `tool_choice=none`)
@@ -392,10 +392,10 @@ Behavior differs by mode, and this difference is intentional, not accidental:
 | --- | --- | --- | --- |
 | Text chat | Full, per-turn | Before each reply is generated, so guidance can shape that reply | Read and written every turn |
 | `/voice-turn` (M24) | Full, per-turn | Before each reply is generated, so guidance can shape that reply | Read and written every turn |
-| `/voice-realtime` (M25) | Bounded local planning on each **finalized** user transcript; next-turn session instruction refresh after a completed pair | True per-utterance pre-response injection is not available: server VAD with `create_response=true` typically starts the assistant response before the local transcript event arrives. M28 does not change that ownership. | Observed on finalized transcripts; next-turn context refreshed after completed pairs |
+| `/voice-realtime` (M25) | Bounded local planning on each **finalized** user transcript; next-turn session instruction refresh after a completed pair | True per-utterance pre-response injection is still unavailable: M25 sends `response.create` immediately after a trusted committed item id, without waiting for the transcript. M28 still plans the finalized transcript and refreshes the next turn. | Observed on finalized transcripts; next-turn context refreshed after completed pairs |
 | `/multimodal-realtime` (M26) | Full bounded planning after the finalized user transcript and **before** the existing manual `response.create()`, with a bounded fallback if that transcript does not arrive in time | After visual-frame bind at `speech_stopped`/`committed`; plans when the transcript is final, or falls back to `response.create` without transcript-derived M28 guidance when the wait expires | Planned and injected immediately before the single existing `response.create()` when the transcript arrives in time |
 
-For `/voice-realtime`, Milestone 28 plans each finalized user transcript locally so `ConversationState` stays current (follow-ups, corrections, depth, topic/goal) even while the provider is already producing the current auto-response. Compact next-turn guidance is then applied through the existing `session.update` instruction field after a completed pair. M28 does **not** change `create_response=true`, VAD, barge-in/`abort()` ownership, or add a parallel `response.create` path.
+For `/voice-realtime`, Milestone 28 plans each finalized user transcript locally so `ConversationState` stays current (follow-ups, corrections, depth, topic/goal) even while the current response is already in flight. Compact next-turn guidance is then applied through the existing `session.update` instruction field after a completed pair. M25 response ownership is a separate transport concern: one client `response.create` per committed user turn, correlated by trusted metadata. M28 does **not** wait for the transcript, change VAD, or change barge-in/`abort()` ownership.
 
 For `/multimodal-realtime`, Milestone 28 computes the same bounded plan after the finalized user transcript and injects compact advisory guidance through `session.update` immediately before the existing manual `response.create()` — still exactly once per turn, still after optional visual-item insertion, still with `create_response=false`. If the transcript does not arrive within the bounded wait, that same `response.create` still runs once without fabricating transcript-derived guidance.
 
@@ -455,7 +455,7 @@ What `/multimodal-realtime` can safely do:
 
 M25 true pre-response guidance:
 
-- **Not architecturally available** while `create_response=true` remains the response owner. The OpenAI Realtime session starts the assistant response from server VAD commit; the local `conversation.item.input_audio_transcription.completed` event typically arrives at the same time as or after `response.created`. Changing `create_response` to `false` would move response ownership and is out of scope for Milestone 28.
+- **Still not available.** M25 now owns `response.create` at commit time so responses can carry trusted correlation metadata, but it does not wait for the finalized transcript. M28 therefore still cannot inject current-utterance guidance into the in-flight M25 response.
 
 Latency:
 
@@ -470,8 +470,8 @@ Latency:
 
 Single-response ownership:
 
-- `/voice-realtime` keeps `create_response=true`; Cortana never calls `response.create` on that path
-- `/multimodal-realtime` keeps `create_response=false` and the existing manual `response.create` as the sole owner
+- `/voice-realtime` uses `create_response=false` and issues exactly one client `response.create` per valid committed user turn, with trusted local correlation metadata
+- `/multimodal-realtime` keeps `create_response=false` and its existing unlabeled manual `response.create` as the sole owner. M26 did not gain M25 metadata correlation and still uses its own visual-ack/FIFO architecture
 - Planning **guides** those paths; it does not own them
 
 Authority boundaries:
@@ -552,8 +552,8 @@ Repetition reduction:
 
 `/voice-realtime` behavior:
 
-- `create_response=true`, server VAD, and `interrupt_response=true` are unchanged
-- Cortana never calls `response.create` and does not create a competing local TTS/audio stream
+- `create_response=false`, server VAD, and `interrupt_response=true` remain the M25 session settings
+- Cortana calls `response.create` once per committed user turn for transport correlation only. It does not create a competing local TTS/audio stream
 - Provider-generated audio remains provider-owned and is not re-chunked or re-synthesized locally
 - Spoken-delivery style is included in session instructions, and per-turn delivery guidance is attached to the existing Milestone 28 next-turn `session.update` after a completed pair
 - Ending a realtime session clears session-specific delivery state, including interrupted-response fingerprints and pending local chunks. Conversation-wide repetition/opening fingerprints remain until `/clear`. A later realtime session on the same conversation object is not filtered by a stale interruption from a previous session
@@ -1288,7 +1288,8 @@ Activation is rejected with a clear local message when either limit would be exc
 
 These are accepted product limits, not unfinished Batch 1–6 defects:
 
-- **M25 `response.created` correlation:** `/voice-realtime` keeps `create_response=true`. The provider often starts the auto-response at or before the local transcript event, so Cortana cannot reliably bind `response.created` to the just-finalized user turn. Changing response ownership is out of scope.
+- **M25 `response.created` correlation:** `/voice-realtime` now binds `response.created` through trusted client-generated metadata (`cortana_user_item_id`, `cortana_generation`). Missing, malformed, or unknown metadata fails closed: the response is tombstoned and is never FIFO-bound. Metadata echo is supported by the installed SDK/schema; live production API echo is not yet measured. If the provider omits metadata, Cortana rejects that response rather than guessing.
+- **M26 response correlation:** `/multimodal-realtime` still uses client-created responses without metadata correlation and retains its own visual-ack/FIFO architecture. It did not gain the M25 explicit-correlation model.
 - **M26 visual-ack correlation:** late or ambiguous visual acks are discarded. They are never written onto a stale turn and never bound to a newer turn.
 - **Orphan visual-ack debt:** `_orphan_visual_ack_debt` is an intentionally uncapped skip counter. Capping it would risk binding a late ack to the wrong later turn.
 - **Workflow side-effect retry:** a persisted claim means the mutating step was already attempted. Reconstruction/retry does not re-execute that operation and does not assert that the prior side effect succeeded. A new execution requires `--new-operation` or a new `operation_id`. Oldest claims are dropped after `MAX_WORKFLOW_COMPLETED_EFFECT_KEYS` (200).

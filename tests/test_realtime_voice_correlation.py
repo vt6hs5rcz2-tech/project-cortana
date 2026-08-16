@@ -34,6 +34,27 @@ class FakeEvent:
 class FakeResponse:
     id: object
     status: str = "completed"
+    metadata: dict[str, str] | None = None
+
+
+_AUTO_METADATA = object()
+
+
+def _metadata_for(
+    session: RealtimeVoiceSession,
+    item_id: str | None,
+) -> dict[str, str] | None:
+    record = None
+    if item_id is not None:
+        record = session._generation_for_user_item(item_id)
+    elif session._expected_generation is not None:
+        record = session._generations.get(session._expected_generation)
+    if record is None or not record.user_item_id:
+        return None
+    return {
+        "cortana_user_item_id": record.user_item_id,
+        "cortana_generation": str(record.generation),
+    }
 
 
 def _settings() -> Settings:
@@ -75,9 +96,22 @@ def _speech(session: RealtimeVoiceSession, item_id: str) -> None:
     )
 
 
-def _created(session: RealtimeVoiceSession, response_id: object) -> None:
+def _created(
+    session: RealtimeVoiceSession,
+    response_id: object,
+    *,
+    item_id: str | None = None,
+    metadata: object = _AUTO_METADATA,
+) -> None:
+    resolved = (
+        _metadata_for(session, item_id) if metadata is _AUTO_METADATA else metadata
+    )
+    meta = resolved if isinstance(resolved, dict) or resolved is None else None
     session._on_response_created(
-        FakeEvent(type="response.created", response=FakeResponse(id=response_id))
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(id=response_id, metadata=meta),
+        )
     )
 
 
@@ -168,8 +202,8 @@ def test_stale_a_before_b_is_cancelled_and_b_remains_eligible() -> None:
     _commit(session, "item_a")
     _speech(session, "item_b")
     _commit(session, "item_b")
-    _created(session, "resp_a")
-    _created(session, "resp_b")
+    _created(session, "resp_a", item_id="item_a")
+    _created(session, "resp_b", item_id="item_b")
     assert session._active_response_id == "resp_b"
     assert session._is_cancelled("resp_a")
     assert not session._is_cancelled("resp_b")
@@ -179,15 +213,20 @@ def test_stale_a_before_b_is_cancelled_and_b_remains_eligible() -> None:
 
 
 def test_stale_a_after_b_is_rejected_once_b_has_output() -> None:
+    """Late stale A is rejected after B completes its lifecycle.
+
+    First audio no longer firms a provisional response (REV-001).
+    """
     session = _voice_session()
     _commit(session, "item_a")
     _speech(session, "item_b")
     _commit(session, "item_b")
-    _created(session, "resp_b")
+    _created(session, "resp_b", item_id="item_b")
     _delta(session, "resp_b")
-    _created(session, "resp_a")
-    assert session._active_response_id == "resp_b"
+    _done(session, "resp_b")
+    _created(session, "resp_a", item_id="item_a")
     assert session._is_cancelled("resp_a")
+    assert not session._is_cancelled("resp_b")
     pairing = _pairing(session)
     assert pairing.get("resp_b") == "item_b"
     assert pairing.get("resp_a") != "item_b"
@@ -198,7 +237,7 @@ def test_missing_stale_a_does_not_cancel_b() -> None:
     _commit(session, "item_a")
     _speech(session, "item_b")
     _commit(session, "item_b")
-    _created(session, "resp_b")
+    _created(session, "resp_b", item_id="item_b")
     assert session._active_response_id == "resp_b"
     assert not session._is_cancelled("resp_b")
     assert _pairing(session).get("resp_b") == "item_b"
@@ -310,22 +349,23 @@ def test_hundred_deterministic_correlation_sequences() -> None:
             _commit(session, "item_a")
             _speech(session, "item_b")
             _commit(session, "item_b")
-            _created(session, "resp_b")
+            _created(session, "resp_b", item_id="item_b")
             expected = ("resp_b", "item_b")
         elif kind == 1:
             _commit(session, "item_a")
             _speech(session, "item_b")
             _commit(session, "item_b")
-            _created(session, "resp_stale")
-            _created(session, "resp_b")
+            _created(session, "resp_stale", item_id="item_a")
+            _created(session, "resp_b", item_id="item_b")
             expected = ("resp_b", "item_b")
         elif kind == 2:
             _commit(session, "item_a")
             _speech(session, "item_b")
             _commit(session, "item_b")
-            _created(session, "resp_b")
+            _created(session, "resp_b", item_id="item_b")
             _delta(session, "resp_b")
-            _created(session, "resp_stale")
+            _done(session, "resp_b")
+            _created(session, "resp_stale", item_id="item_a")
             expected = ("resp_b", "item_b")
         elif kind == 3:
             _commit(session, "item_a")
@@ -414,8 +454,6 @@ def test_hundred_session_cleanup_cycles_clear_generation_state() -> None:
         session._cleanup()
         assert session._expected_generation is None
         assert session._generations == {}
-        assert len(session._invalidated_unclaimed) == 0
-        assert session._provisional_response_id is None
         assert session._claimed_response_ids == {}
         assert len(session._tombstoned_response_ids) == 0
         assert session._active_response_id is None
@@ -453,8 +491,286 @@ def test_provider_ownership_invariants_unchanged() -> None:
     turn = audio["input"]["turn_detection"]  # type: ignore[index]
     assert isinstance(turn, dict)
     assert turn["type"] == "server_vad"
-    assert turn["create_response"] is True
+    assert turn["create_response"] is False
     assert turn["interrupt_response"] is True
     source = (PROJECT_ROOT / "src/realtime_voice.py").read_text(encoding="utf-8")
-    assert "connection.response.create" not in source
-    assert "response.create(" not in source
+    assert "connection.response.create" in source
+
+
+def test_rev001_stale_a_audio_then_genuine_b_owns_item_b() -> None:
+    """Exact outside-review REV-001 reproduction. Do not reinterpret.
+
+    1. _on_user_audio_committed("item_a")
+    2. _on_speech_started("item_b")
+    3. _on_user_audio_committed("item_b")
+    4. _on_response_created("resp_a")  — metadata item_a/gen1, invalidated
+    5. _on_audio_delta("resp_a")
+    6. _on_response_created("resp_b")  — metadata item_b/gen2 owns item_b
+    """
+    session = _voice_session()
+    _commit(session, "item_a")
+    _speech(session, "item_b")
+    _commit(session, "item_b")
+    _created(session, "resp_a", item_id="item_a")
+    _delta(session, "resp_a")
+    _created(session, "resp_b", item_id="item_b")
+    assert session._active_response_id == "resp_b"
+    pairing = _pairing(session)
+    assert pairing.get("resp_b") == "item_b"
+    assert pairing.get("resp_a") != "item_b"
+    assert session._is_cancelled("resp_a")
+    assert not session._is_cancelled("resp_b")
+
+
+def test_rev001_stale_a_tiny_transcript_then_genuine_b() -> None:
+    session = _voice_session()
+    _commit(session, "item_a")
+    _speech(session, "item_b")
+    _commit(session, "item_b")
+    _created(session, "resp_a", item_id="item_a")
+    _assistant(session, "resp_a", "uh")
+    _created(session, "resp_b", item_id="item_b")
+    assert session._active_response_id == "resp_b"
+    pairing = _pairing(session)
+    assert pairing.get("resp_b") == "item_b"
+    assert pairing.get("resp_a") != "item_b"
+    assert session._is_cancelled("resp_a")
+
+
+def test_rev001_stale_a_done_then_genuine_b_keeps_completed_a() -> None:
+    """Former Residual C: metadata still identifies A as invalidated item_a.
+
+    A must not commit as item_b even if it reaches response.done first.
+    """
+    session = _voice_session()
+    _commit(session, "item_a")
+    _speech(session, "item_b")
+    _commit(session, "item_b")
+    _created(session, "resp_a", item_id="item_a")
+    _done(session, "resp_a")
+    _created(session, "resp_b", item_id="item_b")
+    assert session._is_cancelled("resp_a") or "resp_a" in session._tombstoned_set
+    assert session._active_response_id == "resp_b"
+    assert not session._is_cancelled("resp_b")
+    assert _pairing(session).get("resp_a") != "item_b"
+    assert _pairing(session).get("resp_b") == "item_b"
+
+
+def test_rev_verify_002_residual_d_b_audio_then_late_a_keeps_b() -> None:
+    """Exact Residual D (REV-VERIFY-002). Do not insert response.done.
+
+    1. commit item_a
+    2. speech_started item_b
+    3. commit item_b
+    4. response.created resp_b
+    5. audio delta resp_b
+    6. response.created resp_a
+    """
+    session = _voice_session()
+    _commit(session, "item_a")
+    _speech(session, "item_b")
+    _commit(session, "item_b")
+    _created(session, "resp_b", item_id="item_b")
+    _delta(session, "resp_b")
+    abort_before = session._abort_generation
+    _created(session, "resp_a", item_id="item_a")
+    assert session._active_response_id == "resp_b"
+    assert session._is_cancelled("resp_a") or "resp_a" in session._tombstoned_set
+    assert not session._is_cancelled("resp_b")
+    pairing = _pairing(session)
+    assert pairing.get("resp_b") == "item_b"
+    assert pairing.get("resp_a") != "item_b"
+    assert session._abort_generation == abort_before
+
+
+def test_rev001_genuine_b_then_late_stale_a_b_remains() -> None:
+    """REV-VERIFY-003: real Residual D. Genuine B audio, no done, late A.
+
+    Must not call response.done. That is Matrix E, tested separately.
+    """
+    session = _voice_session()
+    _commit(session, "item_a")
+    _speech(session, "item_b")
+    _commit(session, "item_b")
+    _created(session, "resp_b", item_id="item_b")
+    _delta(session, "resp_b")
+    abort_before = session._abort_generation
+    _created(session, "resp_a", item_id="item_a")
+    assert session._active_response_id == "resp_b"
+    assert session._is_cancelled("resp_a") or "resp_a" in session._tombstoned_set
+    assert not session._is_cancelled("resp_b")
+    pairing = _pairing(session)
+    assert pairing.get("resp_b") == "item_b"
+    assert pairing.get("resp_a") != "item_b"
+    assert session._abort_generation == abort_before
+
+
+def test_rev001_genuine_b_done_then_late_stale_a_b_remains() -> None:
+    """Matrix E: B completed its lifecycle, then late stale A arrives."""
+    session = _voice_session()
+    _commit(session, "item_a")
+    _speech(session, "item_b")
+    _commit(session, "item_b")
+    _created(session, "resp_b", item_id="item_b")
+    _delta(session, "resp_b")
+    _done(session, "resp_b")
+    _created(session, "resp_a", item_id="item_a")
+    assert session._is_cancelled("resp_a") or "resp_a" in session._tombstoned_set
+    assert not session._is_cancelled("resp_b")
+    assert _pairing(session).get("resp_a") != "item_b"
+    assert _pairing(session).get("resp_b") == "item_b"
+
+
+def test_rev001_stale_a_only_does_not_deadlock() -> None:
+    history = ConversationHistory()
+    session = _voice_session(history=history)
+    _commit(session, "item_a")
+    _speech(session, "item_b")
+    _commit(session, "item_b")
+    _created(session, "resp_a", item_id="item_a")
+    assert session._is_cancelled("resp_a") or "resp_a" in session._tombstoned_set
+    assert _pairing(session).get("resp_a") != "item_b"
+    _created(session, "resp_b", item_id="item_b")
+    assert session._active_response_id == "resp_b"
+    _transcript(session, "item_b", "second utterance")
+    _assistant(session, "resp_b", "only live response")
+    _done(session, "resp_b")
+    assert session._responding is False
+    assert history.turns[-2].content == "second utterance"
+    assert history.turns[-1].content == "only live response"
+
+
+def test_rev001_repeated_barge_ins_with_partial_stale_output() -> None:
+    session = _voice_session()
+    _commit(session, "item_0")
+    last_item = "item_0"
+    for index in range(3):
+        last_item = f"item_{index + 1}"
+        _speech(session, last_item)
+        _commit(session, last_item)
+    _created(session, "resp_stale", item_id="item_0")
+    _delta(session, "resp_stale")
+    _created(session, "resp_live", item_id=last_item)
+    assert session._active_response_id == "resp_live"
+    assert not session._is_cancelled("resp_live")
+    pairing = _pairing(session)
+    assert pairing.get("resp_live") == last_item
+    assert pairing.get("resp_stale") != last_item
+    assert session._is_cancelled("resp_stale")
+
+
+def test_rev001_history_never_pairs_stale_resp_a_to_item_b() -> None:
+    history = ConversationHistory()
+    session = _voice_session(history=history)
+    _commit(session, "item_a")
+    _speech(session, "item_b")
+    _commit(session, "item_b")
+    _created(session, "resp_a", item_id="item_a")
+    _delta(session, "resp_a")
+    _assistant(session, "resp_a", "stale answer to the abandoned utterance")
+    _created(session, "resp_b", item_id="item_b")
+    assert _pairing(session).get("resp_b") == "item_b"
+    assert _pairing(session).get("resp_a") != "item_b"
+    _transcript(session, "item_b", "second utterance")
+    _assistant(session, "resp_b", "answer to the second utterance")
+    _done(session, "resp_b")
+    contents = [turn.content for turn in history.turns]
+    assert "stale answer to the abandoned utterance" not in contents
+    assert history.turns[-2].content == "second utterance"
+    assert history.turns[-1].content == "answer to the second utterance"
+
+
+def test_rev001_cleanup_clears_provisional_after_stale_output() -> None:
+    session = _voice_session()
+    _commit(session, "item_a")
+    _speech(session, "item_b")
+    _commit(session, "item_b")
+    _created(session, "resp_a", item_id="item_a")
+    _delta(session, "resp_a")
+    assert session._expected_generation is not None
+    session._cleanup()
+    assert session._expected_generation is None
+    assert session._generations == {}
+    assert session._claimed_response_ids == {}
+    assert session._active_response_id is None
+
+
+def test_missing_metadata_is_tombstoned_not_fifo_bound() -> None:
+    session = _voice_session()
+    _commit(session, "item_b")
+    _created(session, "resp_unlabeled", metadata=None)
+    assert session._active_response_id is None
+    assert "resp_unlabeled" in session._tombstoned_set or session._is_cancelled(
+        "resp_unlabeled"
+    )
+    assert _pairing(session) == {}
+
+
+def test_malformed_metadata_is_tombstoned() -> None:
+    session = _voice_session()
+    _commit(session, "item_b")
+    for metadata in (
+        {"cortana_user_item_id": "item_b"},
+        {"cortana_generation": "1"},
+        {"cortana_user_item_id": "item_b", "cortana_generation": "nope"},
+        {"cortana_user_item_id": "item_other", "cortana_generation": "1"},
+        {"cortana_user_item_id": "item_b", "cortana_generation": "99"},
+    ):
+        _created(session, f"resp_{id(metadata)}", metadata=metadata)
+    assert session._active_response_id is None
+    assert _pairing(session) == {}
+
+
+def test_duplicate_metadata_different_response_id_is_tombstoned() -> None:
+    session = _voice_session()
+    _commit(session, "item_a")
+    _created(session, "resp_1", item_id="item_a")
+    _created(session, "resp_2", item_id="item_a")
+    assert session._active_response_id == "resp_1"
+    assert session._is_cancelled("resp_2") or "resp_2" in session._tombstoned_set
+    assert _pairing(session).get("resp_2") != "item_a"
+
+
+def test_response_create_failure_does_not_fifo_bind() -> None:
+    session = _voice_session()
+
+    class _FailingResponse:
+        def create(self, **_kwargs: object) -> None:
+            raise RuntimeError("create failed")
+
+    class _FailingConnection:
+        response = _FailingResponse()
+
+    session._connection = cast(Any, _FailingConnection())
+    _commit(session, "item_a")
+    record = session._generation_for_user_item("item_a")
+    assert record is not None
+    assert record.create_failed is True
+    assert record.invalidated is True
+    _created(session, "resp_late", item_id="item_a")
+    assert session._active_response_id is None
+    assert session._is_cancelled("resp_late") or "resp_late" in session._tombstoned_set
+
+
+def test_one_response_create_per_committed_item() -> None:
+    session = _voice_session()
+    creates: list[object] = []
+
+    class _RecordingResponse:
+        def create(self, **kwargs: object) -> None:
+            creates.append(kwargs.get("response"))
+
+    class _RecordingConnection:
+        response = _RecordingResponse()
+
+    session._connection = cast(Any, _RecordingConnection())
+    _commit(session, "item_a")
+    _commit(session, "item_a")
+    assert len(creates) == 1
+    payload = creates[0]
+    assert isinstance(payload, dict)
+    metadata = payload["metadata"]
+    assert metadata == {
+        "cortana_user_item_id": "item_a",
+        "cortana_generation": "1",
+    }

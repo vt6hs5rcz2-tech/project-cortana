@@ -38,19 +38,131 @@ _MEMORY_FILLER_SUFFIX = re.compile(
     r"(?:\s+(?:please|forever|for\s+me|right\s+now))+$",
     re.IGNORECASE,
 )
-# Match only after filler suffixes are stripped. Must not reject factual
-# clauses that begin with "that", e.g. "that my project is called Cortana".
-_DEICTIC_MEMORY_TEXT = re.compile(
-    r"^(?:"
-    r"this|that|it"
-    r"|this\s+(?:thing|one|fact)"
-    r"|that\s+(?:thing|one|fact)"
-    r"|the\s+above"
-    r"|the\s+previous(?:\s+thing)?"
-    r"|what\s+i\s+just\s+said"
-    r"|what\s+we\s+(?:just\s+)?discussed"
-    r")$",
+_MEMORY_POSSESSIVE = re.compile(r"['’]s\b")
+_MEMORY_TOKEN_SPLIT = re.compile(r"[^\w]+", re.UNICODE)
+_MEMORY_PREDICATE = re.compile(
+    r"\b(?:is|are|was|were|equals|called)\b|=",
     re.IGNORECASE,
+)
+_MEMORY_MY_FACT = re.compile(
+    r"^(?:that\s+)?(?:my|our)\s+\w+",
+    re.IGNORECASE,
+)
+_MEMORY_THE_X_IS_Y = re.compile(
+    r"^(?:that\s+)?the\s+\w+(?:\s+\w+){0,3}\s+(?:is|are|was|were|equals)\s+\S+",
+    re.IGNORECASE,
+)
+# Discourse / anaphoric nouns are not factual values.
+_MEMORY_EMPTY_REFERENCE = frozenset(
+    {
+        "this",
+        "that",
+        "it",
+        "these",
+        "those",
+        "thing",
+        "things",
+        "stuff",
+        "one",
+        "ones",
+        "fact",
+        "facts",
+        "item",
+        "items",
+        "part",
+        "parts",
+        "last",
+        "details",
+        "specifics",
+        "situation",
+        "issue",
+        "topic",
+        "matter",
+        "point",
+        "subject",
+        "context",
+        "info",
+        "information",
+        "conversation",
+        "discussion",
+        "aforementioned",
+        "particular",
+        "earlier",
+        "previous",
+        "before",
+        "ago",
+        "minute",
+        "moment",
+        "above",
+        "whatever",
+        "all",
+    }
+)
+_MEMORY_FUNCTION_WORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "my",
+        "your",
+        "our",
+        "his",
+        "her",
+        "their",
+        "i",
+        "we",
+        "you",
+        "me",
+        "us",
+        "he",
+        "she",
+        "they",
+        "what",
+        "which",
+        "who",
+        "said",
+        "say",
+        "told",
+        "mentioned",
+        "discussed",
+        "discuss",
+        "talked",
+        "talk",
+        "just",
+        "previously",
+        "from",
+        "know",
+        "yeah",
+        "well",
+        "like",
+        "kinda",
+        "sort",
+        "please",
+        "forever",
+        "now",
+        "right",
+        "was",
+        "were",
+        "is",
+        "are",
+        "been",
+        "be",
+        "am",
+        "in",
+        "on",
+        "at",
+        "of",
+        "to",
+        "for",
+        "about",
+        "with",
+        "here",
+        "there",
+        "and",
+        "or",
+        "we",
+        "another",
+    }
 )
 _DOCUMENT_SEARCH_PATTERN = re.compile(
     r"^(?:find\s+documents?\s+about|search\s+(?:my\s+)?documents?\s+for)"
@@ -235,10 +347,54 @@ def _strip_memory_filler_suffixes(text: str) -> str:
         cleaned = next_text
 
 
-def _is_deictic_memory_text(text: str) -> bool:
-    """Return True when the remember payload is too ambiguous to persist."""
+def _memory_content_tokens(text: str) -> tuple[str, ...]:
+    """Normalize a remember payload into lowercase tokens."""
     cleaned = _strip_memory_filler_suffixes(text)
-    return _DEICTIC_MEMORY_TEXT.fullmatch(cleaned) is not None
+    cleaned = _MEMORY_POSSESSIVE.sub("", cleaned.casefold())
+    return tuple(token for token in _MEMORY_TOKEN_SPLIT.split(cleaned) if token)
+
+
+def _token_has_digit(token: str) -> bool:
+    return any(char.isdigit() for char in token)
+
+
+def _is_content_memory_token(token: str) -> bool:
+    """Return True for a token that can carry a factual value."""
+    if _token_has_digit(token):
+        return True
+    if token in _MEMORY_EMPTY_REFERENCE or token in _MEMORY_FUNCTION_WORDS:
+        return False
+    return True
+
+
+def _has_factual_memory_content(text: str) -> bool:
+    """Return True when the payload has deterministic factual structure.
+
+    Positive signals: digits/identifiers, ``X is Y`` / ``X = Y``,
+    ``my/our X ...``, or ``the X is Y``. Ambiguous discourse is rejected.
+    Slash ``/remember`` is not filtered by this function.
+    """
+    tokens = _memory_content_tokens(text)
+    if not tokens:
+        return False
+    if any(_token_has_digit(token) for token in tokens):
+        return True
+    joined = " ".join(tokens)
+    content = [token for token in tokens if _is_content_memory_token(token)]
+    if len(content) >= 2:
+        return True
+    if len(content) >= 1 and _MEMORY_PREDICATE.search(joined):
+        return True
+    if _MEMORY_THE_X_IS_Y.search(joined) and content:
+        return True
+    if _MEMORY_MY_FACT.search(joined) and content:
+        return True
+    return False
+
+
+def _is_deictic_memory_text(text: str) -> bool:
+    """Return True when NL remember text is too ambiguous to persist."""
+    return not _has_factual_memory_content(text)
 
 
 @dataclass(frozen=True)
@@ -302,7 +458,9 @@ class UnifiedAssistantOrchestrator:
             return None
 
         text = match.group("text")
-        if _is_deictic_memory_text(text):
+        if len(text) > MAX_MEMORY_TEXT_LENGTH:
+            pass
+        elif _is_deictic_memory_text(text):
             return None
 
         try:

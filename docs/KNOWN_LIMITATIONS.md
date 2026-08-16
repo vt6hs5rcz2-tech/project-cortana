@@ -3,10 +3,17 @@
 Companion to the “Current accepted limitations” section in `README.md`.
 These are accepted product limits, not unfinished Batch 1–6 defects.
 
-- **M25 `response.created` correlation:** `/voice-realtime` keeps
-  `create_response=true`. The provider often starts the auto-response at or
-  before the local transcript event, so Cortana cannot reliably bind
-  `response.created` to the just-finalized user turn.
+- **M25 `response.created` correlation:** `/voice-realtime` binds
+  `response.created` through trusted client-generated metadata
+  (`cortana_user_item_id`, `cortana_generation`). Missing, malformed, or
+  unknown metadata fails closed: the response is tombstoned and is never
+  FIFO-bound. Metadata echo is supported by the installed SDK/schema; live
+  production API echo is not yet measured. If the provider omits metadata,
+  Cortana rejects that response rather than guessing.
+- **M26 response correlation:** `/multimodal-realtime` still uses
+  client-created responses without metadata correlation and retains its own
+  visual-ack/FIFO architecture. It did not gain the M25 explicit-correlation
+  model.
 - **M26 visual-ack correlation:** late or ambiguous visual acks are
   discarded. They are never written onto a stale turn and never bound to a
   newer turn.

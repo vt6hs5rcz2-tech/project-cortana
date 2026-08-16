@@ -73,6 +73,14 @@ class FakeEvent:
 class FakeResponse:
     id: str
     status: str = "completed"
+    metadata: dict[str, str] | None = None
+
+
+def _correlation_metadata(item_id: str, generation: int) -> dict[str, str]:
+    return {
+        "cortana_user_item_id": item_id,
+        "cortana_generation": str(generation),
+    }
 
 
 class FakeSocket:
@@ -104,6 +112,7 @@ class FakeResource:
         self.appends: list[str] = []
         self.cancels: list[str | None] = []
         self.created_items: list[Any] = []
+        self.response_creates: list[Any] = []
 
     def update(self, *, session: Any, event_id: str | None = None) -> None:
         del event_id
@@ -126,12 +135,16 @@ class FakeResource:
     def create(
         self,
         *,
-        item: Any,
+        item: Any = None,
         event_id: str | None = None,
         previous_item_id: str | None = None,
+        response: Any = None,
     ) -> None:
         del event_id, previous_item_id
-        self.created_items.append(item)
+        if item is not None:
+            self.created_items.append(item)
+            return
+        self.response_creates.append(response if response is not None else {})
 
 
 class FakeConversation:
@@ -370,7 +383,11 @@ def test_realtime_session_happy_path_and_cleanup() -> None:
     connection.socket.push(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_1", status="in_progress"),
+            response=FakeResponse(
+                id="resp_1",
+                status="in_progress",
+                metadata=_correlation_metadata("item_1", 1),
+            ),
         )
     )
     pcm = b"\x01\x00" * 100
@@ -422,7 +439,11 @@ def test_barge_in_aborts_and_rejects_stale_audio() -> None:
     connection.socket.push(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_a", status="in_progress"),
+            response=FakeResponse(
+                id="resp_a",
+                status="in_progress",
+                metadata=_correlation_metadata("item_a", 1),
+            ),
         )
     )
     pcm_a = b"\x02\x00" * 200
@@ -863,7 +884,11 @@ def test_output_queue_overflow_terminates_session() -> None:
     connection.socket.push(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_o", status="in_progress"),
+            response=FakeResponse(
+                id="resp_o",
+                status="in_progress",
+                metadata=_correlation_metadata("item_o", 1),
+            ),
         )
     )
     # One chunk starts blocking write; remaining chunks fill the bounded queue.
@@ -993,7 +1018,11 @@ def _push_completed_turn(
     connection.socket.push(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id=response_id, status="in_progress"),
+            response=FakeResponse(
+                id=response_id,
+                status="in_progress",
+                metadata=_correlation_metadata(item_id, 1),
+            ),
         )
     )
     connection.socket.push(
@@ -1117,7 +1146,11 @@ def test_partial_transcript_fragments_are_not_interpreted() -> None:
     connection.socket.push(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_1", status="in_progress"),
+            response=FakeResponse(
+                id="resp_1",
+                status="in_progress",
+                metadata=_correlation_metadata("item_1", 1),
+            ),
         )
     )
     connection.socket.push(
@@ -1161,14 +1194,15 @@ def test_observe_hook_does_not_duplicate_connection_activity() -> None:
     thread.join(timeout=5)
 
 
-def test_create_response_true_unchanged_for_m25() -> None:
-    """G: M25 realtime voice keeps create_response=True after the F1 fix."""
+def test_create_response_false_for_explicit_m25_correlation() -> None:
+    """M25 uses server_vad with client response.create metadata correlation."""
     payload = build_session_update_payload(settings=_settings(), instructions="x")
     audio = payload["audio"]
     assert isinstance(audio, dict)
     turn = audio["input"]["turn_detection"]  # type: ignore[index]
-    assert turn["create_response"] is True  # type: ignore[index]
+    assert turn["create_response"] is False  # type: ignore[index]
     assert turn["interrupt_response"] is True  # type: ignore[index]
+    assert turn["type"] == "server_vad"  # type: ignore[index]
 
 
 def test_barge_in_unaffected_by_conversational_intelligence_wiring() -> None:
@@ -1188,7 +1222,11 @@ def test_barge_in_unaffected_by_conversational_intelligence_wiring() -> None:
     connection.socket.push(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_a", status="in_progress"),
+            response=FakeResponse(
+                id="resp_a",
+                status="in_progress",
+                metadata=_correlation_metadata("item_a", 1),
+            ),
         )
     )
     pcm = base64.b64encode(b"\x01\x00" * 80).decode("ascii")
@@ -1239,7 +1277,7 @@ def test_dangerous_realtime_transcript_never_authorizes_privileged_action() -> N
 
 
 def test_m25_create_response_and_vad_unchanged_after_plan_refresh() -> None:
-    """H: create_response=True and server_vad remain after next-turn guidance."""
+    """H: create_response=False and server_vad remain after next-turn guidance."""
     connection = FakeConnection()
     history = ConversationHistory()
     state = ConversationState()
@@ -1257,12 +1295,13 @@ def test_m25_create_response_and_vad_unchanged_after_plan_refresh() -> None:
     latest = connection.session.updates[-1]
     audio = latest["audio"]
     turn = audio["input"]["turn_detection"]
-    assert turn["create_response"] is True
+    assert turn["create_response"] is False
     assert turn["interrupt_response"] is True
     assert turn["type"] == "server_vad"
     assert latest["tools"] == []
     assert REALTIME_PLAN_BEGIN in str(latest["instructions"])
     assert connection.response.created_items == []
+    assert connection.response.response_creates
     session.request_stop(error_type="cancelled")
     thread.join(timeout=5)
 
@@ -1297,7 +1336,6 @@ def test_m25_plans_final_transcript_not_partial_and_not_before_transcript() -> N
     )
     assert _wait_until(lambda: state.active_goal is not None, timeout=5)
     assert "backup" in (state.active_goal or "").casefold()
-    # Provider still owns the in-flight/auto response; no client response.create.
     assert connection.response.created_items == []
     session.request_stop(error_type="cancelled")
     thread.join(timeout=5)
@@ -1346,7 +1384,11 @@ def test_m25_barge_in_correction_is_interruption_context_only() -> None:
     connection.socket.push(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_a", status="in_progress"),
+            response=FakeResponse(
+                id="resp_a",
+                status="in_progress",
+                metadata=_correlation_metadata("item_a", 1),
+            ),
         )
     )
     pcm = base64.b64encode(b"\x01\x00" * 80).decode("ascii")
@@ -1387,7 +1429,11 @@ def test_m25_identical_text_plans_associate_by_item_id() -> None:
     connection.socket.push(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_a", status="in_progress"),
+            response=FakeResponse(
+                id="resp_a",
+                status="in_progress",
+                metadata=_correlation_metadata("item_a", 1),
+            ),
         )
     )
     connection.socket.push(
@@ -1396,7 +1442,11 @@ def test_m25_identical_text_plans_associate_by_item_id() -> None:
     connection.socket.push(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_b", status="in_progress"),
+            response=FakeResponse(
+                id="resp_b",
+                status="in_progress",
+                metadata=_correlation_metadata("item_b", 2),
+            ),
         )
     )
     connection.socket.push(
@@ -1447,7 +1497,7 @@ def test_m25_identical_text_plans_associate_by_item_id() -> None:
     )
     latest = connection.session.updates[-1]
     turn = latest["audio"]["input"]["turn_detection"]
-    assert turn["create_response"] is True
+    assert turn["create_response"] is False
     assert turn["interrupt_response"] is True
     assert turn["type"] == "server_vad"
     assert connection.response.created_items == []
@@ -1484,7 +1534,11 @@ def test_m25_completion_order_does_not_steal_identical_text_plan() -> None:
     connection.socket.push(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_a", status="in_progress"),
+            response=FakeResponse(
+                id="resp_a",
+                status="in_progress",
+                metadata=_correlation_metadata("item_a", 1),
+            ),
         )
     )
     connection.socket.push(
@@ -1500,7 +1554,11 @@ def test_m25_completion_order_does_not_steal_identical_text_plan() -> None:
     connection.socket.push(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_b", status="in_progress"),
+            response=FakeResponse(
+                id="resp_b",
+                status="in_progress",
+                metadata=_correlation_metadata("item_b", 2),
+            ),
         )
     )
     connection.socket.push(
@@ -1547,7 +1605,11 @@ def test_m25_interrupted_identical_text_plan_cannot_be_consumed() -> None:
     connection.socket.push(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_a", status="in_progress"),
+            response=FakeResponse(
+                id="resp_a",
+                status="in_progress",
+                metadata=_correlation_metadata("item_a", 1),
+            ),
         )
     )
     connection.socket.push(
@@ -1563,7 +1625,11 @@ def test_m25_interrupted_identical_text_plan_cannot_be_consumed() -> None:
     connection.socket.push(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_b", status="in_progress"),
+            response=FakeResponse(
+                id="resp_b",
+                status="in_progress",
+                metadata=_correlation_metadata("item_b", 2),
+            ),
         )
     )
     connection.socket.push(
@@ -1611,16 +1677,16 @@ def test_m25_no_transcript_equality_plan_identity() -> None:
     source = inspect.getsource(RealtimeVoiceSession)
     assert "_take_plan_for_user_text" not in source
     assert "original_user_text == " not in source
-    assert "connection.response.create()" not in source
+    assert "connection.response.create(" in source
 
 
-def test_m25_create_response_true_unchanged_in_payload_builder() -> None:
+def test_m25_create_response_false_in_payload_builder() -> None:
     payload = build_session_update_payload(
         settings=_settings(),
         instructions="test",
     )
     turn = payload["audio"]["input"]["turn_detection"]  # type: ignore[index]
-    assert turn["create_response"] is True
+    assert turn["create_response"] is False
     assert turn["interrupt_response"] is True
     assert turn["type"] == "server_vad"
 
@@ -1644,7 +1710,7 @@ def test_m25_speech_delivery_is_advisory_and_does_not_change_ownership() -> None
     latest = connection.session.updates[-1]
     audio = latest["audio"]
     turn = audio["input"]["turn_detection"]
-    assert turn["create_response"] is True
+    assert turn["create_response"] is False
     assert turn["interrupt_response"] is True
     assert turn["type"] == "server_vad"
     instructions = str(latest["instructions"])
@@ -1653,7 +1719,7 @@ def test_m25_speech_delivery_is_advisory_and_does_not_change_ownership() -> None
     assert "never authorizes" in instructions.casefold()
     assert connection.response.created_items == []
     source = inspect.getsource(RealtimeVoiceSession)
-    assert "connection.response.create()" not in source
+    assert "connection.response.create(" in source
     assert "VoiceService" not in source
     assert "synthesize(" not in source
     session.request_stop(error_type="cancelled")
@@ -1684,7 +1750,11 @@ def test_m25_session_cleanup_drops_interrupted_fingerprint_for_later_session() -
     connection.socket.push(
         FakeEvent(
             type="response.created",
-            response=FakeResponse(id="resp_a", status="in_progress"),
+            response=FakeResponse(
+                id="resp_a",
+                status="in_progress",
+                metadata=_correlation_metadata("item_a", 1),
+            ),
         )
     )
     pcm = base64.b64encode(b"\x01\x00" * 80).decode("ascii")
