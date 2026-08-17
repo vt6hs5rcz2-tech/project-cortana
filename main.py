@@ -34,8 +34,9 @@ from src.incident_repository import JsonIncidentRepository
 from src.logger import setup_logging
 from src.memory_store import JsonMemoryStore
 from src.openai_client import create_openai_client
+from src.readiness import ReadinessOutcome, evaluate_readiness, format_startup_banner
 from src.retrieval_session import RetrievalSession
-from src.settings import Settings, load_settings
+from src.settings import Settings, load_settings, user_facing_settings_error
 from src.calendar_commands import try_create_calendar_service
 from src.reminder_commands import create_default_reminder_service
 from src.study_commands import create_default_study_service
@@ -51,10 +52,8 @@ from src.tool_repository import JsonToolControlRepository
 from src.workflow_commands import create_default_workflow_services
 
 AI_NOT_CONNECTED_MESSAGE = (
-    "Cortana: Not connected to OpenAI yet. "
-    "Add your API key to the private .env file."
+    "Cortana: OPENAI_API_KEY is missing. Add it to your .env file."
 )
-AI_CONNECTION_CONFIGURED_MESSAGE = "Cortana: AI connection is configured."
 
 
 def initialize_ai(
@@ -64,11 +63,8 @@ def initialize_ai(
     try:
         settings = load_settings()
     except ValueError as error:
-        logger.error("%s", error)
-        print(
-            "Cortana: Not connected to OpenAI yet. "
-            "Add your API key to the private .env file."
-        )
+        logger.error("Configuration error: %s", type(error).__name__)
+        print(user_facing_settings_error(error))
         return None
 
     client = cast(
@@ -90,7 +86,10 @@ def main() -> None:
         return
 
     settings, client = initialized
-    print("Cortana: AI connection is configured.")
+    report = evaluate_readiness(settings=settings)
+    print(format_startup_banner(report))
+    if report.outcome is ReadinessOutcome.BLOCKED_BY_REQUIRED_CONFIGURATION:
+        return
 
     memory_store = JsonMemoryStore(get_default_memory_file_path())
     active_memory_context = ActiveMemoryContext()

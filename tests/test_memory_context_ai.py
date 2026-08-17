@@ -455,7 +455,7 @@ def test_ai_errors_do_not_alter_active_memory_selection(
     )
 
     output = capsys.readouterr().out
-    assert "could not complete that request" in output
+    assert "couldn't complete that request" in output
     assert active.list_active_ids() == ["keep-1"]
     assert active.list_active()[0].text == "Keep me active"
     assert active.boundary_token == DETERMINISTIC_BOUNDARY_TOKEN
@@ -471,7 +471,7 @@ def test_status_reports_active_memory_metrics(tmp_path: Path) -> None:
     active.activate(second)
 
     result = handle_slash_command(
-        "/status",
+        "/status verbose",
         settings=_settings(),
         conversation_history=ConversationHistory(),
         memory_store=store,

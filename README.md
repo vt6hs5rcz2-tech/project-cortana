@@ -2,6 +2,46 @@
 
 AI-powered authorized cybersecurity and defensive operations platform.
 
+## Quickstart
+
+Prerequisites:
+
+- Python 3.13
+- An OpenAI API key
+- Optional: microphone, camera, and Google Calendar OAuth client file
+
+Install and run:
+
+```text
+pip install -r requirements.txt
+copy .env.example .env
+```
+
+Set `OPENAI_API_KEY` in `.env`, then:
+
+```text
+python main.py
+```
+
+First commands:
+
+- `/help` — core commands
+- `/status` — compact session status
+- `/about` — what Cortana is
+
+Basic troubleshooting:
+
+- Missing API key: add `OPENAI_API_KEY` to `.env`
+- Invalid API key: the key was rejected; check the value in `.env`
+- Voice unavailable: Windows plus a usable microphone are required
+- Camera unavailable: Windows plus a usable camera are required for multimodal
+- Camera image unusable: check the physical shutter / ThinkShutter, Lenovo camera privacy, the Windows Camera app, and Settings > Privacy & security > Camera > desktop app access
+- Calendar unavailable: optional Google packages and an OAuth client file are required
+
+Do not put secrets in chat, issues, or command output.
+
+Optional isolated pilot/demo profile: set `CORTANA_DATA_DIR` to a dedicated empty directory. See `docs/PILOT_CHECKLIST.md`, `docs/PILOT_VOICE_SMOKE_TEST.md`, `docs/PILOT_MULTIMODAL_SMOKE_TEST.md`, and `docs/DEMO_PLAN.md`.
+
 ## Overview
 
 Project Cortana is an early software milestone focused on:
@@ -337,7 +377,7 @@ Behavior and limits:
 - No local frame archive, video buffer, or disk-backed camera images
 - Provider disclosure is at most one current normalized PNG (`detail=low`) per user turn; no provider upload during silence
 - Visual frames are bound at `speech_stopped` / `input_audio_buffer.committed` using provider item IDs
-- Session uses server VAD with `create_response=false` and `interrupt_response=true`, then bare `response.create()` after optional visual item insertion. When the finalized transcript arrives in time, Milestone 28 injects pre-response planning first, and Milestone 29 may include spoken-delivery guidance in that same `session.update`. If the transcript does not arrive in time, the same `response.create()` still runs once without transcript-derived M28/M29 guidance.
+- Session uses server VAD with `create_response=false` and `interrupt_response=true`, then bare `response.create()` after optional visual item insertion and the matching visual-item ack (or the visual-ack timeout). When the finalized transcript arrives in time, Milestone 28 injects pre-response planning first, and Milestone 29 may include spoken-delivery guidance in that same `session.update`. If the transcript does not arrive in time, the same `response.create()` still runs once without transcript-derived M28/M29 guidance.
 - In-session visual turns are hard-capped (`_MAX_VISUAL_TURNS = 16`). Unacknowledged visual items expire after `REALTIME_MULTIMODAL_VISUAL_ACK_WAIT_SECONDS` (default 8s). Local frame bytes are released on expiry, eviction, stale, or delete. Late or ambiguous visual acks are discarded and are never bound to a newer turn. Dropping an old visual turn is preferred over retaining unbounded frames or guessing correlation.
 - Visual-ack timeout does not create another assistant response and does not rewrite `ConversationState` from stale visual context.
 - Superseded/completed/cancelled/expired visual conversation items are removed via `conversation.item.delete` from the active Realtime conversation context when a remote id is known. Provider-side deletion is best-effort only.
@@ -1151,8 +1191,11 @@ Centralized defaults:
 
 | Command | Description |
 | --- | --- |
-| `/help` | List available commands |
-| `/status` | Show safe local session information |
+| `/help` | List core commands |
+| `/help more` | Show the full command catalog |
+| `/status` | Show compact session status |
+| `/status verbose` | Show detailed operator status |
+| `/diagnostics` | Show safe support diagnostics |
 | `/clear` | Clear session conversation context, including recalled active memories; persistent memories stay stored |
 | `/remember <text>` | Save one explicit persistent memory |
 | `/memories` | List saved persistent memories |
@@ -1236,7 +1279,7 @@ Centralized defaults:
 | `/incident-analysis-run <analysis-id>` | Confirm and run AI analysis for one prepared request |
 | `/incident-analysis-show <analysis-id>` | Show one in-memory incident analysis result |
 | `/incident-analysis-save-note <analysis-id>` | Save one analysis verbatim as an incident note |
-| `/about` | Describe Project Cortana and this milestone |
+| `/about` | Describe Cortana |
 | `/exit` | End the session cleanly |
 
 Notes:
@@ -1288,7 +1331,7 @@ Activation is rejected with a clear local message when either limit would be exc
 
 These are accepted product limits, not unfinished Batch 1–6 defects:
 
-- **M25 `response.created` correlation:** `/voice-realtime` now binds `response.created` through trusted client-generated metadata (`cortana_user_item_id`, `cortana_generation`). Missing, malformed, or unknown metadata fails closed: the response is tombstoned and is never FIFO-bound. Metadata echo is supported by the installed SDK/schema; live production API echo is not yet measured. If the provider omits metadata, Cortana rejects that response rather than guessing.
+- **M25 `response.created` correlation:** `/voice-realtime` now binds `response.created` through trusted client-generated metadata (`cortana_user_item_id`, `cortana_generation`). Missing, malformed, or unknown metadata fails closed: the response is tombstoned and is never FIFO-bound. Metadata echo is supported by the installed SDK/schema. The live M30 metadata gate measured exact production echo (`Realtime metadata gate: PASS`). If the provider omits metadata, Cortana rejects that response rather than guessing.
 - **M26 response correlation:** `/multimodal-realtime` still uses client-created responses without metadata correlation and retains its own visual-ack/FIFO architecture. It did not gain the M25 explicit-correlation model.
 - **M26 visual-ack correlation:** late or ambiguous visual acks are discarded. They are never written onto a stale turn and never bound to a newer turn.
 - **Orphan visual-ack debt:** `_orphan_visual_ack_debt` is an intentionally uncapped skip counter. Capping it would risk binding a late ack to the wrong later turn.

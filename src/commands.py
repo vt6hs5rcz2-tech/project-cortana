@@ -1,6 +1,9 @@
 """Local slash-command framework for Project Cortana."""
 
 import logging
+import platform
+import subprocess
+import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -79,6 +82,8 @@ from src.config import (
     PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED,
     PROCESS_ISOLATED_TOOL_TERMINATION_ENABLED,
     PROCESS_RESOURCE_LIMITS_ENABLED,
+    data_profile_label,
+    product_display_name,
     TOOL_AUDIT_PERSISTENCE_ENABLED,
     TOOL_DRY_RUN_ENFORCEMENT_ENABLED,
     TOOL_HUMAN_APPROVAL_ENABLED,
@@ -95,6 +100,14 @@ from src.config import (
     WORKFLOW_SINGLE_INSTANCE_COORDINATION_ENABLED,
 )
 from src.conversation import ConversationHistory
+from src.readiness import (
+    evaluate_readiness,
+    multimodal_platform_available,
+    process_isolation_available,
+    realtime_voice_available,
+    voice_platform_available,
+)
+from src.realtime_metadata_gate import realtime_metadata_gate_diagnostics_line
 from src.document import (
     DocumentRecord,
     DocumentValidationError,
@@ -147,7 +160,7 @@ from src.calendar_commands import (
     create_default_calendar_service,
     handle_calendar_command,
 )
-from src.calendar_service import CalendarService
+from src.calendar_service import CalendarService, optional_calendar_dependencies_available
 from src.reminder_commands import (
     REMINDER_COMMAND_NAMES,
     ReminderCommandContext,
@@ -227,6 +240,7 @@ logger = logging.getLogger("ProjectCortana")
 
 COMMAND_HELP = "help"
 COMMAND_STATUS = "status"
+COMMAND_DIAGNOSTICS = "diagnostics"
 COMMAND_CLEAR = "clear"
 COMMAND_ABOUT = "about"
 COMMAND_EXIT = "exit"
@@ -256,6 +270,7 @@ SUPPORTED_COMMANDS = frozenset(
     {
         COMMAND_HELP,
         COMMAND_STATUS,
+        COMMAND_DIAGNOSTICS,
         COMMAND_CLEAR,
         COMMAND_ABOUT,
         COMMAND_EXIT,
@@ -292,9 +307,55 @@ SUPPORTED_COMMANDS = frozenset(
     }
 )
 
+CORE_HELP_TEXT = f"""Cortana: Core commands. Type /help more for the full list.
+
+Conversation
+  /clear                - Clear this session's conversation
+  /exit                 - End the session
+
+Memory
+  /remember             - Save one explicit memory
+  /memories             - List saved memories
+  /forget               - Delete one saved memory
+  /recall               - Activate a memory for this session
+  /active-memories      - List active memories
+  /release              - Release one active memory
+
+Documents & Study
+  /add-document         - Add a local document
+  /documents            - List stored documents
+  /search-docs          - Search stored documents
+  /ask-docs             - Ask a question over documents
+  /study-start          - Start a study session
+  /study-status         - Show study session status
+  /vision-describe      - Describe a local image
+  /vision-ask           - Ask about a local image
+  /vision-info          - Inspect a local image
+
+Reminders & Calendar
+  /reminder-add         - Create a reminder
+  /reminders            - List reminders
+  /calendar-connect     - Connect Google Calendar
+  /calendar-events      - List upcoming events
+
+Voice
+  /voice-turn           - One spoken turn
+  /voice-realtime       - Realtime spoken conversation
+  /multimodal-realtime  - Realtime voice with camera
+  /voice-status         - Voice configuration
+
+Status / Support
+  /status               - Compact session status
+  /diagnostics          - Support diagnostics
+  /about                - About Cortana
+  /help more            - Full command catalog"""
+
 HELP_TEXT = """Cortana: Available commands:
-  /help                 - List available commands and brief descriptions
-  /status               - Show safe local session information
+  /help                 - List core commands
+  /help more            - Show the full command catalog
+  /status               - Show compact session status
+  /status verbose       - Show detailed operator status
+  /diagnostics          - Show safe support diagnostics
   /clear                - Clear session conversation context, including recalled memories
   /remember             - Save one explicit persistent memory
   /memories             - List saved persistent memories
@@ -393,39 +454,14 @@ HELP_TEXT = """Cortana: Available commands:
   /voice-realtime       - Start an explicit realtime spoken conversation
   /multimodal-realtime  - Start realtime voice with live camera context
   /voice-status         - Show safe voice interaction configuration
-  /about                - Describe Project Cortana and this software milestone
+  /about                - Describe Cortana
   /exit                 - End the session cleanly"""
 
 ABOUT_TEXT = (
-    "Cortana: Project Cortana is an AI-powered authorized cybersecurity and "
-    "defensive-operations assistant. This build is an early software milestone "
-    "focused on identity, local commands, in-session conversation, explicit "
-    "user-controlled persistent memory, temporary active memory context, a "
-    "local Knowledge Vault, source-grounded document questions, summaries, "
-    "two-document comparison, a session-scoped Study Partner for grounded "
-    "practice over authorized documents, static visual understanding for "
-    "authorized local images, explicit push-to-talk natural voice "
-    "conversation for one spoken turn at a time, explicit realtime "
-    "spoken conversation with barge-in, explicit realtime multimodal "
-    "perception combining voice with bounded live camera context, bounded "
-    "conversational intelligence for continuity, follow-ups, corrections, "
-    "response-depth selection, and consistent style without privileged "
-    "authority, natural speech delivery and conversational timing for spoken "
-    "responses, a local "
-    "human-controlled security event, incident, indicator, evidence, and "
-    "chain-of-custody foundation, a human-supervised defensive tool "
-    "framework with scope controls and approval, optional process-isolated "
-    "execution for a tiny allowlisted tool subset, optional Windows Job "
-    "Object resource governance for isolated tools, optional "
-    "process-isolated file tools for file-sha256, compare-sha256, and "
-    "text-search using the Windows safe-open foundation, trusted "
-    "defensive playbook orchestration over "
-    "allowlisted tools, durable workflow-run history, optional authorized "
-    "incident linkage for completed playbook runs, optional controlled "
-    "security analyst assistance over sanitized single-incident packets, "
-    "and a local timezone-aware reminder scheduling foundation separate "
-    "from persistent memory, plus Google Calendar integration with secure "
-    "credential storage and explicit prepare-confirm writes."
+    f"Cortana: {product_display_name()}\n"
+    "A conversational AI assistant with memory, document/study support, "
+    "reminders/calendar integration, voice, realtime voice, multimodal "
+    "interaction, and controlled defensive tools/workflows."
 )
 
 CLEAR_CONFIRMATION = (
@@ -1316,31 +1352,46 @@ def _dispatch_slash_command(
     return handler(context)
 
 
-def _handle_help(_context: CommandContext) -> CommandResult:
-    """Return the local help text."""
-    return CommandResult(outcome=CommandOutcome.CONTINUE, message=HELP_TEXT)
+def _handle_help(context: CommandContext) -> CommandResult:
+    """Return compact core help, or the full catalog for /help more."""
+    argument = extract_command_argument(context.message).strip().lower()
+    first_token = argument.split(maxsplit=1)[0] if argument else ""
+    if first_token == "more":
+        return CommandResult(outcome=CommandOutcome.CONTINUE, message=HELP_TEXT)
+    return CommandResult(outcome=CommandOutcome.CONTINUE, message=CORE_HELP_TEXT)
 
 
 def _handle_status(context: CommandContext) -> CommandResult:
-    """Return safe local session status."""
+    """Return compact pilot status, or detailed status for /status verbose."""
+    argument = extract_command_argument(context.message).strip().lower()
+    first_token = argument.split(maxsplit=1)[0] if argument else ""
     try:
-        status_text = format_status(
-            context.settings,
-            context.conversation_history,
-            context.memory_store,
-            context.active_memory_context,
-            context.document_vault,
-            context.retrieval_session,
-            context.incident_repository,
-            context.tool_registry,
-            context.tool_repository,
-            context.workflow_registry,
-            context.workflow_run_repository,
-            context.analysis_repository,
-            context.reminder_service,
-            context.calendar_service,
-            context.study_service,
-        )
+        if first_token == "verbose":
+            status_text = format_status(
+                context.settings,
+                context.conversation_history,
+                context.memory_store,
+                context.active_memory_context,
+                context.document_vault,
+                context.retrieval_session,
+                context.incident_repository,
+                context.tool_registry,
+                context.tool_repository,
+                context.workflow_registry,
+                context.workflow_run_repository,
+                context.analysis_repository,
+                context.reminder_service,
+                context.calendar_service,
+                context.study_service,
+            )
+        else:
+            status_text = format_compact_status(
+                context.settings,
+                context.memory_store,
+                context.document_vault,
+                reminder_service=context.reminder_service,
+                calendar_service=context.calendar_service,
+            )
     except MemoryStorageError as error:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
     except DocumentStorageError as error:
@@ -1353,6 +1404,14 @@ def _handle_status(context: CommandContext) -> CommandResult:
         return CommandResult(outcome=CommandOutcome.CONTINUE, message=error.user_message)
 
     return CommandResult(outcome=CommandOutcome.CONTINUE, message=status_text)
+
+
+def _handle_diagnostics(context: CommandContext) -> CommandResult:
+    """Return safe tester/support diagnostics with no secrets or user text."""
+    return CommandResult(
+        outcome=CommandOutcome.CONTINUE,
+        message=format_diagnostics(context.settings),
+    )
 
 
 def _handle_clear(context: CommandContext) -> CommandResult:
@@ -2044,6 +2103,7 @@ def _find_stored_document(
 COMMAND_HANDLERS: dict[str, CommandHandler] = {
     COMMAND_HELP: _handle_help,
     COMMAND_STATUS: _handle_status,
+    COMMAND_DIAGNOSTICS: _handle_diagnostics,
     COMMAND_CLEAR: _handle_clear,
     COMMAND_ABOUT: _handle_about,
     COMMAND_EXIT: _handle_exit,
@@ -2066,6 +2126,108 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     COMMAND_DOCS_COMPARE: _handle_docs_compare,
     COMMAND_SOURCES: _handle_sources,
 }
+
+
+def format_compact_status(
+    settings: Settings,
+    memory_store: MemoryStore,
+    document_vault: DocumentVault,
+    reminder_service: ReminderService | None = None,
+    calendar_service: CalendarService | None = None,
+) -> str:
+    """Build compact pilot status without reserved flags or internal IDs."""
+    report = evaluate_readiness(settings=settings)
+    memory_count = len(memory_store.list_memories())
+    document_count = document_vault.document_count()
+    if reminder_service is None:
+        reminder_count = 0
+    else:
+        reminder_count = reminder_service.count_all()
+
+    if not optional_calendar_dependencies_available():
+        calendar_label = "unavailable"
+    elif calendar_service is None:
+        calendar_label = "not connected"
+    else:
+        connection = calendar_service.status_view().connection_state
+        if connection == "connected":
+            calendar_label = "connected"
+        elif connection == "unavailable":
+            calendar_label = "unavailable"
+        else:
+            calendar_label = "not connected"
+
+    voice_label = "available" if voice_platform_available() else "unavailable"
+    realtime_label = "available" if realtime_voice_available() else "unavailable"
+    multimodal_label = (
+        "available" if multimodal_platform_available() else "unavailable"
+    )
+
+    return (
+        f"{product_display_name()}\n"
+        f"Status: {report.status_label}\n"
+        f"Model: {settings.openai_model}\n"
+        f"Memory count: {memory_count}\n"
+        f"Document count: {document_count}\n"
+        f"Reminder count: {reminder_count}\n"
+        f"Calendar: {calendar_label}\n"
+        f"Voice: {voice_label}\n"
+        f"Realtime voice: {realtime_label}\n"
+        f"Multimodal: {multimodal_label}"
+    )
+
+
+def format_diagnostics(settings: Settings) -> str:
+    """Build safe support diagnostics with no secrets or user content."""
+    report = evaluate_readiness(settings=settings)
+    openai_configured = "yes" if settings.has_api_key() else "no"
+    calendar_label = (
+        "yes" if optional_calendar_dependencies_available() else "no"
+    )
+    voice_label = "yes" if voice_platform_available() else "no"
+    multimodal_label = "yes" if multimodal_platform_available() else "no"
+    isolation_label = "yes" if process_isolation_available() else "no"
+    analysis_label = "enabled" if AI_INCIDENT_ANALYSIS_ENABLED else "disabled"
+    isolation_flag = (
+        "enabled" if PROCESS_ISOLATED_TOOL_EXECUTION_ENABLED else "disabled"
+    )
+    return (
+        f"{product_display_name()}\n"
+        f"Git commit: {_short_git_commit()}\n"
+        f"Python: {platform.python_version()}\n"
+        f"Platform: {sys.platform}\n"
+        f"Readiness: {report.outcome.value}\n"
+        f"Data profile: {data_profile_label()}\n"
+        f"{realtime_metadata_gate_diagnostics_line()}\n"
+        f"OpenAI configured: {openai_configured}\n"
+        f"Calendar capability: {calendar_label}\n"
+        f"Voice support: {voice_label}\n"
+        f"Multimodal support: {multimodal_label}\n"
+        f"Process isolation available: {isolation_label}\n"
+        f"Process isolation flag: {isolation_flag}\n"
+        f"Incident analysis: {analysis_label}"
+    )
+
+
+def _short_git_commit() -> str:
+    """Return a short local git commit, or unknown when it cannot be determined."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError):
+        return "unknown"
+    commit = result.stdout.strip()
+    if result.returncode != 0 or not commit:
+        return "unknown"
+    if not all(character in "0123456789abcdef" for character in commit.lower()):
+        return "unknown"
+    return commit
 
 
 def format_status(

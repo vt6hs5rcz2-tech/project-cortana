@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from io import BytesIO
 from queue import Empty, Queue
 from typing import Any
 
@@ -17,6 +18,7 @@ from PIL import Image
 from src.active_memory import ActiveMemoryContext
 from src.camera_capture import CameraCaptureSession, RealtimeVisualFrame
 from src.config import (
+    MAX_CANCELLED_REALTIME_RESPONSE_IDS,
     MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
     REALTIME_VISUAL_FIXED_LABEL,
     REALTIME_VOICE_FRAME_BYTES,
@@ -29,17 +31,27 @@ from src.realtime_conversation_plan import REALTIME_PLAN_BEGIN
 from src.speech_delivery import SPEECH_DELIVERY_BEGIN
 from src.realtime_multimodal import (
     MULTIMODAL_CAMERA_START_FAILED,
+    MULTIMODAL_CONVERSATION_INSTRUCTIONS,
     MULTIMODAL_STARTED_MESSAGE,
     MULTIMODAL_STOPPED_MESSAGE,
     MULTIMODAL_VISUAL_DELETE_FAILED,
+    MULTIMODAL_VISUAL_UNUSABLE,
     RealtimeMultimodalSession,
+    _MAX_INTERRUPTED_ITEM_IDS,
+    _MAX_VISUAL_TURNS,
+    build_multimodal_instructions,
     build_multimodal_session_update_payload,
     build_visual_conversation_item,
     run_realtime_multimodal_session,
 )
+from src.realtime_voice import PlaybackChunk
 from src.realtime_voice_input import RealtimeAudioFrame
 from src.settings import Settings
 from src.vision_normalize import encode_metadata_free_png
+from tests.test_visual_policy import (
+    LIVE_M26_FORBIDDEN_VISUAL_PHRASES,
+    _assert_no_live_visual_refusal_language,
+)
 
 
 def _settings() -> Settings:
@@ -151,12 +163,13 @@ class FakeResource:
                 self._visual_seq += 1
                 visual_id = f"visual_{self._visual_seq}"
                 fake_item = FakeItem(id=visual_id)
-                self._connection.socket.push(
-                    FakeEvent(type="conversation.item.added", item=fake_item)
-                )
-                self._connection.socket.push(
-                    FakeEvent(type="conversation.item.done", item=fake_item)
-                )
+                if self._connection.auto_ack_visual:
+                    self._connection.socket.push(
+                        FakeEvent(type="conversation.item.added", item=fake_item)
+                    )
+                    self._connection.socket.push(
+                        FakeEvent(type="conversation.item.done", item=fake_item)
+                    )
             return
         # Bare response.create()
         self.response_creates += 1
@@ -185,8 +198,14 @@ class FakeConversation:
 
 
 class FakeConnection:
-    def __init__(self, *, auto_ack_responses: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        auto_ack_responses: bool = True,
+        auto_ack_visual: bool = True,
+    ) -> None:
         self.auto_ack_responses = auto_ack_responses
+        self.auto_ack_visual = auto_ack_visual
         self.socket = FakeSocket()
         self._connection = self.socket
         self.session = FakeResource(self)
@@ -290,6 +309,7 @@ class FakeCapture:
         self.opened = True
         self.release_calls = 0
         self.open_count = 0
+        self._last: Any | None = None
 
     def isOpened(self) -> bool:
         return self.opened
@@ -299,12 +319,14 @@ class FakeCapture:
         return True
 
     def read(self) -> tuple[bool, Any]:
-        if not self.frames:
-            # Keep returning last solid frame for worker pacing.
-            import numpy as np
+        if self.frames:
+            self._last = self.frames.pop(0)
+            return True, self._last
+        if self._last is not None:
+            return True, self._last
+        import numpy as np
 
-            return True, np.zeros((32, 32, 3), dtype="uint8")
-        return True, self.frames.pop(0)
+        return True, np.zeros((32, 32, 3), dtype="uint8")
 
     def release(self) -> None:
         self.release_calls += 1
@@ -359,13 +381,19 @@ def _run_session(
     camera_fail: bool = False,
     conversation_state: ConversationState | None = None,
     transcript_wait_seconds: float | None = None,
+    capture_frames: list[Any] | None = None,
+    capture: Any | None = None,
 ) -> tuple[threading.Thread, RealtimeMultimodalSession, dict[str, str], list[str]]:
     FakePlaybackStream.instances.clear()
     lines = printed if printed is not None else []
     result_box: dict[str, str] = {}
     open_order: list[str] = []
 
-    capture = FakeCapture(frames=[_bgr()])
+    capture_device = (
+        capture
+        if capture is not None
+        else FakeCapture(frames=list(capture_frames) if capture_frames else [_bgr()])
+    )
     if camera_fail:
         from src.camera_capture import CAMERA_UNAVAILABLE, CameraCaptureError
 
@@ -380,7 +408,7 @@ def _run_session(
     else:
         def camera_factory() -> CameraCaptureSession:
             session = CameraCaptureSession(
-                capture_factory=lambda: capture,
+                capture_factory=lambda: capture_device,
                 sample_interval_seconds=0.05,
                 sleep_fn=lambda _s: time.sleep(0.01),
             )
@@ -485,6 +513,166 @@ def test_visual_item_shape_uses_fixed_label_and_low_detail() -> None:
     assert content[1]["type"] == "input_image"
     assert content[1]["detail"] == "low"
     assert str(content[1]["image_url"]).startswith("data:image/png;base64,")
+
+
+def test_controlled_image_survives_m26_encoding_path() -> None:
+    """Obvious local PNG stays valid PNG/data-URI through the M26 insert shape."""
+    image = Image.new("RGB", (64, 48), "navy")
+    for x in range(20, 44):
+        for y in range(12, 36):
+            image.putpixel((x, y), (255, 0, 0))
+    png, width, height = encode_metadata_free_png(image)
+    frame = RealtimeVisualFrame(
+        image_bytes=png,
+        mime_type="image/png",
+        width=width,
+        height=height,
+        sequence=7,
+        captured_at_monotonic=1.0,
+    )
+    item = build_visual_conversation_item(frame)
+    content = item["content"]
+    assert isinstance(content, list)
+    image_part = content[1]
+    assert isinstance(image_part, dict)
+    data_uri = str(image_part["image_url"])
+    assert data_uri.startswith("data:image/png;base64,")
+    encoded = data_uri.split(",", 1)[1]
+    decoded = base64.b64decode(encoded)
+    assert decoded == png
+    assert decoded[:8] == b"\x89PNG\r\n\x1a\n"
+    opened = Image.open(BytesIO(decoded))
+    assert opened.size == (64, 48)
+    assert opened.mode == "RGB"
+    extrema = opened.getextrema()
+    assert extrema[0][0] < extrema[0][1] or extrema[2][0] < extrema[2][1]
+
+
+def test_response_create_waits_for_visual_ack() -> None:
+    connection = FakeConnection(auto_ack_visual=False)
+    history = ConversationHistory()
+    thread, session, _result_box, _printed = _run_session(connection, history)
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_1",
+            transcript="What object is visible?",
+        )
+    )
+    assert _wait_until(
+        lambda: any(
+            isinstance(item, dict)
+            and any(
+                isinstance(part, dict) and part.get("type") == "input_image"
+                for part in item.get("content", [])
+            )
+            for item in connection.conversation.item.created_items
+        ),
+        timeout=5,
+    )
+    time.sleep(0.15)
+    assert connection.response.response_creates == 0
+    connection.socket.push(
+        FakeEvent(type="conversation.item.created", item=FakeItem(id="visual_live"))
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    turn = session._visual_turns["user_1"]
+    assert turn.remote_visual_item_id == "visual_live"
+    assert turn.response_create_sent is True
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_visual_ack_timeout_still_issues_one_response_create() -> None:
+    connection = FakeConnection(auto_ack_visual=False)
+    history = ConversationHistory()
+    thread, session, _result_box, _printed = _run_session(
+        connection,
+        history,
+        transcript_wait_seconds=MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    )
+    session._visual_ack_wait_seconds = 0.2
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert connection.response.response_creates == 1
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_visual_ack_timeout_late_ack_then_follow_up_turn() -> None:
+    """Worker-loop withhold: timeout, late ack, then a valid second visual turn."""
+    connection = FakeConnection(auto_ack_visual=False)
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection,
+        history,
+        conversation_state=state,
+        transcript_wait_seconds=MIN_REALTIME_MULTIMODAL_TRANSCRIPT_WAIT_SECONDS,
+    )
+    session._visual_ack_wait_seconds = 0.2
+    assert _wait_until(lambda: session.microphone_opened)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_1")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_1",
+            transcript="What object is visible?",
+        )
+    )
+    assert _wait_until(
+        lambda: bool(connection.conversation.item.created_items),
+        timeout=5,
+    )
+    assert connection.response.response_creates == 0
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert connection.response.response_creates == 1
+
+    connection.socket.push(
+        FakeEvent(type="conversation.item.created", item=FakeItem(id="visual_1_late"))
+    )
+    time.sleep(0.15)
+    first = session._visual_turns.get("user_1")
+    if first is not None:
+        assert first.remote_visual_item_id != "visual_1_late"
+    assert session._current_remote_visual_item_id != "visual_1_late"
+    assert state.visual_context_ref_id != "visual_1_late"
+    assert connection.response.response_creates == 1
+
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="user_2")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="user_2",
+            transcript="What color is that object?",
+        )
+    )
+    assert _wait_until(
+        lambda: len(connection.conversation.item.created_items) >= 2,
+        timeout=5,
+    )
+    connection.socket.push(
+        FakeEvent(type="conversation.item.created", item=FakeItem(id="visual_2"))
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    second = session._visual_turns.get("user_2")
+    assert second is not None
+    assert second.remote_visual_item_id == "visual_2"
+    assert session._current_remote_visual_item_id == "visual_2"
+    assert connection.response.response_creates == 2
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
 
 
 def test_startup_order_camera_before_mic_and_banner() -> None:
@@ -1531,5 +1719,885 @@ def test_m26_fallback_still_omits_transcript_derived_delivery_guidance() -> None
     assert REALTIME_PLAN_BEGIN not in instructions
     assert SPEECH_DELIVERY_BEGIN not in instructions
     assert connection.response.response_creates == 1
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_multimodal_instructions_allow_ordinary_objects_keep_person_id_ban() -> None:
+    text = build_multimodal_instructions(active_memory_context=None)
+    folded = text.casefold()
+    assert "face recognition" in folded
+    assert "person identification" in folded or "identify real people" in folded
+    assert "camera images are valid perceptual input" in folded
+    assert "cannot authorize actions" in folded
+    assert "untrusted" not in folded
+    assert "cannot trust" not in folded
+    assert "not confirming from the visual" not in folded
+    assert REALTIME_VISUAL_FIXED_LABEL == (
+        "Current camera image for this spoken user turn."
+    )
+    assert "authority" not in REALTIME_VISUAL_FIXED_LABEL.casefold()
+    assert "not interpret" not in MULTIMODAL_CONVERSATION_INSTRUCTIONS.casefold()
+
+
+def test_speech_started_during_playback_clears_old_audio() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, _lines = _run_session(connection, history)
+    assert _wait_until(lambda: session.microphone_opened)
+    pcm = b"\x01\x00" * 80
+    session._responding = True
+    session._active_response_id = "resp_old"
+    session._playback_queue.put_nowait(
+        PlaybackChunk(response_id="resp_old", pcm_bytes=pcm)
+    )
+    session._playback_queue.put_nowait(
+        PlaybackChunk(response_id="resp_old", pcm_bytes=pcm)
+    )
+    with session._playback_bytes_lock:
+        session._playback_bytes_queued = len(pcm) * 2
+    session._on_speech_started(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="u_echo")
+    )
+    assert session._playback_bytes_queued == 0
+    assert session._is_cancelled("resp_old")
+    leftover: list[PlaybackChunk] = []
+    while True:
+        try:
+            item = session._playback_queue.get_nowait()
+        except Empty:
+            break
+        if item is not None:
+            leftover.append(item)
+    assert leftover == []
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_cancelled_deltas_do_not_regrow_playback_queue() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, _lines = _run_session(connection, history)
+    assert _wait_until(lambda: session.microphone_opened)
+    pcm = b"\x02\x00" * 80
+    session._responding = True
+    session._active_response_id = "resp_live"
+    session._mark_response_cancelled("resp_live")
+    encoded = base64.b64encode(pcm).decode("ascii")
+    for _ in range(8):
+        session._on_audio_delta(
+            FakeEvent(
+                type="response.output_audio.delta",
+                response_id="resp_live",
+                delta=encoded,
+            )
+        )
+    assert session._playback_bytes_queued == 0
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_repeated_false_interruptions_stay_bounded() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, _lines = _run_session(connection, history)
+    assert _wait_until(lambda: session.microphone_opened)
+    pcm = b"\x03\x00" * 40
+    encoded = base64.b64encode(pcm).decode("ascii")
+    for index in range(40):
+        response_id = f"resp_loop_{index}"
+        session._responding = True
+        session._active_response_id = response_id
+        session._playback_queue.put_nowait(
+            PlaybackChunk(response_id=response_id, pcm_bytes=pcm)
+        )
+        with session._playback_bytes_lock:
+            session._playback_bytes_queued = len(pcm)
+        session._on_speech_started(
+            FakeEvent(
+                type="input_audio_buffer.speech_started",
+                item_id=f"u_loop_{index}",
+            )
+        )
+        session._on_audio_delta(
+            FakeEvent(
+                type="response.output_audio.delta",
+                response_id=response_id,
+                delta=encoded,
+            )
+        )
+    assert session._playback_bytes_queued == 0
+    assert len(session._cancelled_set) <= MAX_CANCELLED_REALTIME_RESPONSE_IDS
+    assert len(session._interrupted_item_ids) <= _MAX_INTERRUPTED_ITEM_IDS
+    assert len(session._visual_turns) <= _MAX_VISUAL_TURNS
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_accidental_fragment_during_playback_does_not_create_response() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    lines: list[str] = []
+    thread, session, _result_box, printed = _run_session(
+        connection, history, printed=lines
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    creates_before = connection.response.response_creates
+    session._responding = True
+    session._active_response_id = "resp_live"
+    session._assistant_audio_started_at = session._monotonic()
+    session._on_speech_started(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="u_noise")
+    )
+    session._on_user_turn_boundary(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="u_noise")
+    )
+    session._on_user_transcript(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="u_noise",
+            transcript="Acaba.",
+        )
+    )
+    time.sleep(0.3)
+    assert connection.response.response_creates == creates_before
+    assert not any("Acaba" in line for line in printed)
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_short_barge_in_stop_is_not_suppressed() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    lines: list[str] = []
+    thread, session, _result_box, printed = _run_session(
+        connection, history, printed=lines
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    creates_before = connection.response.response_creates
+    session._responding = True
+    session._active_response_id = "resp_live"
+    session._assistant_audio_started_at = session._monotonic()
+    pcm = b"\x01\x00" * 80
+    session._playback_queue.put_nowait(
+        PlaybackChunk(response_id="resp_live", pcm_bytes=pcm)
+    )
+    with session._playback_bytes_lock:
+        session._playback_bytes_queued = len(pcm)
+    session._on_speech_started(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="u_stop")
+    )
+    session._on_user_turn_boundary(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="u_stop")
+    )
+    session._on_user_transcript(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="u_stop",
+            transcript="Stop.",
+        )
+    )
+    assert _wait_until(
+        lambda: any("Heard) Stop" in line for line in printed),
+        timeout=5,
+    )
+    time.sleep(0.3)
+    assert connection.response.response_creates == creates_before
+    assert session._playback_bytes_queued == 0
+    assert session._responding is False
+    assert session._is_cancelled("resp_live")
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_privacy_placeholder_does_not_create_visual_item() -> None:
+    from tests.test_visual_frame_quality import _bgr_from_image, _privacy_placeholder
+
+    connection = FakeConnection()
+    history = ConversationHistory()
+    placeholder = _bgr_from_image(_privacy_placeholder())
+    thread, session, _result_box, lines = _run_session(
+        connection,
+        history,
+        capture_frames=[placeholder, placeholder, placeholder],
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    camera = session._camera
+    assert camera is not None
+    assert _wait_until(lambda: camera.get_usable_fresh_frame() is None, timeout=5)
+    _drive_visual_turn(connection, "user_ph", "What object is visible?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    image_items = [
+        item
+        for item in connection.conversation.item.created_items
+        if isinstance(item, dict)
+        and any(
+            isinstance(part, dict) and part.get("type") == "input_image"
+            for part in (item.get("content") or [])
+            if isinstance(part, dict)
+        )
+    ]
+    assert image_items == []
+    assert any(MULTIMODAL_VISUAL_UNUSABLE in line for line in lines)
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_current_visual_required_does_not_reuse_stale_visual_ref() -> None:
+    from tests.test_visual_frame_quality import _bgr_from_image, _privacy_placeholder
+
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    capture = FakeCapture(frames=[_bgr(), _bgr(), _bgr(), _bgr()])
+    thread, session, _result_box, lines = _run_session(
+        connection,
+        history,
+        conversation_state=state,
+        capture=capture,
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_hold", "What object am I holding?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert len(_created_visual_images(connection)) == 1
+    prior_ref = state.visual_context_ref_id
+    assert prior_ref is not None
+
+    placeholder = _bgr_from_image(_privacy_placeholder())
+    capture.frames = [placeholder, placeholder, placeholder, placeholder]
+    capture._last = placeholder
+    camera = session._camera
+    assert camera is not None
+    assert _wait_until(lambda: camera.get_usable_fresh_frame() is None, timeout=5)
+
+    _drive_visual_turn(connection, "u_now", "What object am I holding up?")
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    assert len(_created_visual_images(connection)) == 1
+    assert any(MULTIMODAL_VISUAL_UNUSABLE in line for line in lines)
+    plan = session._plans_by_item.get("u_now")
+    assert plan is not None
+    assert plan.visual_referent_resolved is False
+    assert plan.resolved_follow_up is not None
+    follow_up = plan.resolved_follow_up.casefold()
+    assert "no usable camera image" in follow_up
+    assert "current camera image is relevant" not in follow_up
+    assert state.visual_context_ref_id == prior_ref
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_prior_reference_after_unusable_frame_keeps_previous_visual() -> None:
+    from tests.test_visual_frame_quality import _bgr_from_image, _privacy_placeholder
+
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    capture = FakeCapture(frames=[_bgr(), _bgr(), _bgr(), _bgr()])
+    thread, session, _result_box, _lines = _run_session(
+        connection,
+        history,
+        conversation_state=state,
+        capture=capture,
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_hold", "What object am I holding?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    prior_ref = state.visual_context_ref_id
+    assert prior_ref is not None
+
+    placeholder = _bgr_from_image(_privacy_placeholder())
+    capture.frames = [placeholder, placeholder, placeholder, placeholder]
+    capture._last = placeholder
+    camera = session._camera
+    assert camera is not None
+    assert _wait_until(lambda: camera.get_usable_fresh_frame() is None, timeout=5)
+
+    _drive_visual_turn(connection, "u_was", "What color was it?")
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    assert len(_created_visual_images(connection)) == 1
+    plan = session._plans_by_item.get("u_was")
+    assert plan is not None
+    assert plan.visual_referent_resolved is True
+    assert plan.visual_context_ref_id == prior_ref
+    assert plan.resolved_follow_up is not None
+    assert "previous camera image is relevant" in plan.resolved_follow_up.casefold()
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def _created_visual_images(connection: FakeConnection) -> list[Any]:
+    images: list[Any] = []
+    for item in connection.conversation.item.created_items:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        if any(
+            isinstance(part, dict) and part.get("type") == "input_image"
+            for part in content
+        ):
+            images.append(item)
+    return images
+
+
+def _drive_visual_turn(
+    connection: FakeConnection,
+    item_id: str,
+    transcript: str,
+) -> None:
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id=item_id)
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id=item_id,
+            transcript=transcript,
+        )
+    )
+
+
+def test_explicit_stop_variants_do_not_create_response() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, printed = _run_session(connection, history)
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u1", "What object am I holding up?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert _wait_until(lambda: session._active_response_id is not None, timeout=5)
+    first_creates = connection.response.response_creates
+    pcm = b"\x01\x00" * 80
+    session._playback_queue.put_nowait(
+        PlaybackChunk(response_id=session._active_response_id or "resp_1", pcm_bytes=pcm)
+    )
+    with session._playback_bytes_lock:
+        session._playback_bytes_queued = len(pcm)
+
+    for index, phrase in enumerate(("Stop talking.", "Never mind.")):
+        item_id = f"u_stop_{index}"
+        session._on_speech_started(
+            FakeEvent(type="input_audio_buffer.speech_started", item_id=item_id)
+        )
+        session._on_user_turn_boundary(
+            FakeEvent(type="input_audio_buffer.speech_stopped", item_id=item_id)
+        )
+        session._on_user_transcript(
+            FakeEvent(
+                type="conversation.item.input_audio_transcription.completed",
+                item_id=item_id,
+                transcript=phrase,
+            )
+        )
+        time.sleep(0.15)
+        assert connection.response.response_creates == first_creates, phrase
+        assert session._playback_bytes_queued == 0
+        assert session._responding is False
+        assert any("Heard)" in line and phrase.rstrip(".") in line for line in printed)
+
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_non_command_stop_phrases_still_create() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, _printed = _run_session(connection, history)
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_dont", "Don't stop.")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    _drive_visual_turn(connection, "u_sign", "What is a stop sign?")
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_after_stop_next_visual_turn_still_creates_once() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, _printed = _run_session(connection, history)
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u1", "What object am I holding up?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert _wait_until(lambda: session._active_response_id is not None, timeout=5)
+    session._on_speech_started(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="u_stop")
+    )
+    session._on_user_turn_boundary(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="u_stop")
+    )
+    session._on_user_transcript(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="u_stop",
+            transcript="Stop.",
+        )
+    )
+    time.sleep(0.2)
+    assert connection.response.response_creates == 1
+    assert session._playback_bytes_queued == 0
+    _drive_visual_turn(connection, "u_next", "What object am I holding up?")
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    assert connection.response.response_creates == 2
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_stale_audio_does_not_resume_after_stop() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, _printed = _run_session(connection, history)
+    assert _wait_until(lambda: session.microphone_opened)
+    session._responding = True
+    session._active_response_id = "resp_live"
+    pcm = b"\x04\x00" * 40
+    session._playback_queue.put_nowait(
+        PlaybackChunk(response_id="resp_live", pcm_bytes=pcm)
+    )
+    with session._playback_bytes_lock:
+        session._playback_bytes_queued = len(pcm)
+    session._on_speech_started(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="u_stop")
+    )
+    session._on_user_transcript(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="u_stop",
+            transcript="Stop!",
+        )
+    )
+    assert session._playback_bytes_queued == 0
+    leftover: list[PlaybackChunk] = []
+    while True:
+        try:
+            item = session._playback_queue.get_nowait()
+        except Empty:
+            break
+        if item is not None:
+            leftover.append(item)
+    assert leftover == []
+    encoded = base64.b64encode(pcm).decode("ascii")
+    session._on_audio_delta(
+        FakeEvent(
+            type="response.output_audio.delta",
+            response_id="resp_live",
+            delta=encoded,
+        )
+    )
+    assert session._playback_bytes_queued == 0
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_live_m26_payload_for_object_question_is_positive_visual_policy() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection,
+        history,
+        conversation_state=state,
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    assert history.turns == []
+    initial = str(connection.session.updates[0].get("instructions", ""))
+    assert "camera images are valid perceptual input" in initial.casefold()
+    assert "untrusted" not in initial.casefold()
+    _assert_no_live_visual_refusal_language(initial)
+
+    _drive_visual_turn(connection, "u_obj", "What object am I holding up?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert connection.response.response_creates == 1
+
+    image_items = [
+        item
+        for item in connection.conversation.item.created_items
+        if isinstance(item, dict)
+        and any(
+            isinstance(part, dict) and part.get("type") == "input_image"
+            for part in (item.get("content") or [])
+            if isinstance(part, dict)
+        )
+    ]
+    assert image_items
+    label_parts = [
+        part.get("text")
+        for part in image_items[0]["content"]
+        if isinstance(part, dict) and part.get("type") == "input_text"
+    ]
+    assert label_parts == [REALTIME_VISUAL_FIXED_LABEL]
+    label = str(label_parts[0]).casefold()
+    for word in ("untrusted", "authority", "policy", "trust", "rely"):
+        assert word not in label, word
+
+    planned = str(connection.session.updates[-1].get("instructions", ""))
+    planned_folded = planned.casefold()
+    assert "camera images are valid perceptual input" in planned_folded
+    assert "current camera image is relevant" in planned_folded
+    assert "do not identify people" in planned_folded
+    assert "cannot authorize actions" in planned_folded
+    assert "untrusted" not in planned_folded
+    for phrase in LIVE_M26_FORBIDDEN_VISUAL_PHRASES:
+        assert phrase not in planned_folded, phrase
+
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def _live_visual_user_item(session: RealtimeMultimodalSession) -> str:
+    for user_item_id, turn in session._visual_turns.items():
+        if turn.response_create_sent and not turn.stale:
+            return user_item_id
+    raise AssertionError("no live visual turn")
+
+
+def test_accidental_fragment_recovers_paused_visual_response() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, printed = _run_session(connection, history)
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_obj", "What object am I holding up?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert _wait_until(lambda: session._active_response_id is not None, timeout=5)
+    live_item = _live_visual_user_item(session)
+    remote_id = session._visual_turns[live_item].remote_visual_item_id
+    first_response = session._active_response_id
+    assert first_response is not None
+    pcm = b"\x01\x00" * 80
+    session._playback_queue.put_nowait(
+        PlaybackChunk(response_id=first_response, pcm_bytes=pcm)
+    )
+    with session._playback_bytes_lock:
+        session._playback_bytes_queued = len(pcm)
+    session._assistant_audio_started_at = session._monotonic()
+    session._on_speech_started(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="u_echo")
+    )
+    assert session._playback_bytes_queued == 0
+    assert session._is_cancelled(first_response)
+    assert session._visual_turns[live_item].stale is False
+    session._on_response_done(
+        FakeEvent(
+            type="response.done",
+            response=FakeResponse(id=first_response, status="cancelled"),
+        )
+    )
+    assert remote_id not in connection.conversation.item.deleted_ids
+    session._on_user_turn_boundary(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="u_echo")
+    )
+    session._on_user_transcript(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="u_echo",
+            transcript="Acaba.",
+        )
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    assert not any("Acaba" in line for line in printed)
+    recovered = session._visual_turns.get(live_item)
+    assert recovered is not None
+    assert recovered.stale is False
+    assert recovered.response_create_sent is True
+    echo = session._visual_turns.get("u_echo")
+    assert echo is None or echo.stale is True
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_stop_after_speech_started_keeps_assistant_silent() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, printed = _run_session(connection, history)
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_obj", "What object am I holding up?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert _wait_until(lambda: session._active_response_id is not None, timeout=5)
+    first_creates = connection.response.response_creates
+    session._assistant_audio_started_at = session._monotonic()
+    session._on_speech_started(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="u_stop")
+    )
+    session._on_user_turn_boundary(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="u_stop")
+    )
+    session._on_user_transcript(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="u_stop",
+            transcript="Stop.",
+        )
+    )
+    time.sleep(0.3)
+    assert connection.response.response_creates == first_creates
+    assert session._responding is False
+    assert session._pending_barge is None
+    assert any("Heard) Stop" in line for line in printed)
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_genuine_barge_in_replaces_paused_visual_response() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, _printed = _run_session(connection, history)
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_obj", "What object am I holding up?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert _wait_until(lambda: session._active_response_id is not None, timeout=5)
+    live_item = _live_visual_user_item(session)
+    first_response = session._active_response_id
+    assert first_response is not None
+    pcm = b"\x02\x00" * 40
+    session._playback_queue.put_nowait(
+        PlaybackChunk(response_id=first_response, pcm_bytes=pcm)
+    )
+    with session._playback_bytes_lock:
+        session._playback_bytes_queued = len(pcm)
+    session._assistant_audio_started_at = session._monotonic()
+    session._on_speech_started(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="u_ram")
+    )
+    session._on_user_turn_boundary(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="u_ram")
+    )
+    session._on_user_transcript(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="u_ram",
+            transcript="Tell me about RAM.",
+        )
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    old = session._visual_turns.get(live_item)
+    assert old is None or old.stale is True
+    encoded = base64.b64encode(pcm).decode("ascii")
+    session._on_audio_delta(
+        FakeEvent(
+            type="response.output_audio.delta",
+            response_id=first_response,
+            delta=encoded,
+        )
+    )
+    assert session._playback_bytes_queued == 0
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_false_speech_started_without_transcript_recovers() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, transcript_wait_seconds=0.25
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_obj", "What object am I holding up?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert _wait_until(lambda: session._active_response_id is not None, timeout=5)
+    live_item = _live_visual_user_item(session)
+    session._assistant_audio_started_at = session._monotonic()
+    session._on_speech_started(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="u_ghost")
+    )
+    assert session._pending_barge is not None
+    session._pending_barge.deadline_monotonic = session._monotonic() - 0.01
+    session._expire_pending_barge_waits()
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    recovered = session._visual_turns.get(live_item)
+    assert recovered is not None
+    assert recovered.stale is False
+    assert session._pending_barge is None
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_recovered_visual_response_stays_on_same_turn() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, _printed = _run_session(connection, history)
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_obj", "What object am I holding up?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert _wait_until(lambda: session._active_response_id is not None, timeout=5)
+    live_item = _live_visual_user_item(session)
+    remote_before = session._visual_turns[live_item].remote_visual_item_id
+    session._assistant_audio_started_at = session._monotonic()
+    session._on_speech_started(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="u_echo")
+    )
+    session._on_user_turn_boundary(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="u_echo")
+    )
+    session._on_user_transcript(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="u_echo",
+            transcript="um",
+        )
+    )
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    recovered = session._visual_turns[live_item]
+    assert recovered.remote_visual_item_id == remote_before
+    assert recovered.stale is False
+    image_creates = [
+        item
+        for item in connection.conversation.item.created_items
+        if isinstance(item, dict)
+        and any(
+            isinstance(part, dict) and part.get("type") == "input_image"
+            for part in (item.get("content") or [])
+            if isinstance(part, dict)
+        )
+    ]
+    assert len(image_creates) == 1
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_visual_question_inserts_image() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_hold", "What object am I holding?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert len(_created_visual_images(connection)) == 1
+    plan = session._plans_by_item.get("u_hold")
+    assert plan is not None
+    assert plan.visual_relevant is True
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_color_follow_up_keeps_visual_context() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_hold", "What object am I holding?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    _drive_visual_turn(connection, "u_color", "What color is it?")
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    assert len(_created_visual_images(connection)) == 2
+    plan = session._plans_by_item.get("u_color")
+    assert plan is not None
+    assert plan.visual_relevant is True
+    assert "repeating the full previous object description" in plan.avoid_phrases
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_non_visual_questions_do_not_create_image() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_mon", "What day comes after Monday?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    _drive_visual_turn(connection, "u_math", "What is 2 + 2?")
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    _drive_visual_turn(connection, "u_py", "Tell me about Python.")
+    assert _wait_until(lambda: connection.response.response_creates == 3, timeout=5)
+    assert _created_visual_images(connection) == []
+    monday = session._plans_by_item.get("u_mon")
+    assert monday is not None
+    assert monday.visual_relevant is False
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_visual_then_nonvisual_does_not_inherit_image_insert() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_hold", "What am I holding?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert len(_created_visual_images(connection)) == 1
+    prior_ref = state.visual_context_ref_id
+    _drive_visual_turn(connection, "u_mon", "What day comes after Monday?")
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    assert len(_created_visual_images(connection)) == 1
+    monday = session._plans_by_item.get("u_mon")
+    assert monday is not None
+    assert monday.visual_relevant is False
+    assert state.visual_context_ref_id == prior_ref
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_scene_change_this_one_inserts_new_image() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, _printed = _run_session(connection, history)
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_hold", "What am I holding?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    _drive_visual_turn(connection, "u_now", "What am I showing you now?")
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    _drive_visual_turn(connection, "u_this", "What color is this one?")
+    assert _wait_until(lambda: connection.response.response_creates == 3, timeout=5)
+    assert len(_created_visual_images(connection)) == 3
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_truncated_its_during_playback_does_not_create_response() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    lines: list[str] = []
+    thread, session, _result_box, printed = _run_session(
+        connection, history, printed=lines
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    creates_before = connection.response.response_creates
+    session._responding = True
+    session._active_response_id = "resp_live"
+    session._assistant_audio_started_at = session._monotonic()
+    session._on_speech_started(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="u_its")
+    )
+    session._on_user_turn_boundary(
+        FakeEvent(type="input_audio_buffer.speech_stopped", item_id="u_its")
+    )
+    session._on_user_transcript(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="u_its",
+            transcript="It's...",
+        )
+    )
+    time.sleep(0.3)
+    assert connection.response.response_creates == creates_before
+    assert not any("It's" in line for line in printed)
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_legitimate_its_turns_are_not_suppressed() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    thread, session, _result_box, _printed = _run_session(
+        connection, history, conversation_state=state
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_broken", "It's broken.")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    _drive_visual_turn(connection, "u_tue", "It's Tuesday.")
+    assert _wait_until(lambda: connection.response.response_creates == 2, timeout=5)
+    assert _created_visual_images(connection) == []
     session.request_stop(error_type="cancelled")
     thread.join(timeout=5)

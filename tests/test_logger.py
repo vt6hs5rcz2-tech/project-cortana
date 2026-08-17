@@ -24,4 +24,19 @@ def test_setup_logging_configures_root_handlers() -> None:
 
     assert root_logger.level == logging.INFO
     assert len(root_logger.handlers) == 2
+    stream_handlers = [
+        handler
+        for handler in root_logger.handlers
+        if handler.__class__.__name__ == "StreamHandler"
+        and handler.__class__.__module__ == "logging"
+    ]
+    file_handlers = [
+        handler
+        for handler in root_logger.handlers
+        if handler.__class__.__name__ == "FileHandler"
+    ]
+    assert file_handlers
+    assert file_handlers[0].level == logging.INFO
+    assert stream_handlers
+    assert stream_handlers[0].level == logging.WARNING
     

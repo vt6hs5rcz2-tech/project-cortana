@@ -52,6 +52,7 @@ from src.speech_delivery import (
 )
 from src.identity import CORTANA_SYSTEM_INSTRUCTIONS
 from src.memory_context import format_active_memory_context
+from src.realtime_stop_command import is_explicit_stop_command
 from src.realtime_voice_input import (
     REALTIME_INPUT_OVERFLOW,
     REALTIME_MICROPHONE_FAILED,
@@ -93,6 +94,7 @@ _MAX_PENDING_REALTIME_PLANS = 8
 _MAX_PLANNED_TRANSCRIPT_ITEMS = 32
 _MAX_RESPONSE_GENERATIONS = 16
 _MAX_TOMBSTONED_RESPONSE_IDS = 16
+_MAX_STOP_CONSUMED_ITEM_IDS = 16
 _CORTANA_USER_ITEM_META = "cortana_user_item_id"
 _CORTANA_GENERATION_META = "cortana_generation"
 REALTIME_SESSION_FAILED = (
@@ -670,6 +672,8 @@ class RealtimeVoiceSession:
         self._planned_transcript_items: set[str] = set()
         self._planned_transcript_order: deque[str] = deque()
         self._interrupted_item_ids: set[str] = set()
+        self._stop_consumed_item_ids: set[str] = set()
+        self._stop_consumed_order: deque[str] = deque()
         self._state_writes_closed = threading.Event()
         self._logger = logger_ or logger
         self._connect_factory = connect_factory
@@ -1231,6 +1235,12 @@ class RealtimeVoiceSession:
     def _issue_response_create(self, record: _ResponseGeneration) -> None:
         if record.create_issued or record.create_failed:
             return
+        if (
+            record.user_item_id is not None
+            and record.user_item_id in self._stop_consumed_item_ids
+        ):
+            record.invalidated = True
+            return
         metadata = self._correlation_metadata(record)
         if metadata is None:
             return
@@ -1274,6 +1284,8 @@ class RealtimeVoiceSession:
         item_id = getattr(event, "item_id", None)
         user_item_id = item_id if isinstance(item_id, str) and item_id else None
         if user_item_id is None:
+            return
+        if user_item_id in self._stop_consumed_item_ids:
             return
         self._assembler.set_current_user_item(user_item_id)
         existing = self._generation_for_user_item(user_item_id)
@@ -1325,6 +1337,70 @@ class RealtimeVoiceSession:
         self._abort_generation += 1
         self._playback_abort.set()
 
+    def _remember_stop_consumed(self, item_id: str) -> None:
+        if item_id in self._stop_consumed_item_ids:
+            return
+        if (
+            len(self._stop_consumed_order) >= _MAX_STOP_CONSUMED_ITEM_IDS
+            and self._stop_consumed_order
+        ):
+            oldest = self._stop_consumed_order.popleft()
+            self._stop_consumed_item_ids.discard(oldest)
+        self._stop_consumed_order.append(item_id)
+        self._stop_consumed_item_ids.add(item_id)
+
+    def _clear_queued_playback(self) -> None:
+        while True:
+            try:
+                self._playback_queue.get_nowait()
+            except Empty:
+                break
+        with self._playback_bytes_lock:
+            self._playback_bytes_queued = 0
+
+    def _consume_explicit_stop_command(self, item_id: str) -> None:
+        """Abort speech and consume Stop as control intent, with no reply."""
+        self._logger.info(
+            "Realtime stop command consumed user_item_id=%s",
+            item_id,
+        )
+        self._remember_stop_consumed(item_id)
+        record = self._generation_for_user_item(item_id)
+        if record is not None:
+            self._invalidate_generation(record.generation)
+            claimed = record.claimed_response_id
+            if claimed:
+                self._mark_response_cancelled(claimed)
+        live_response_id = self._active_response_id
+        if live_response_id is not None:
+            self._mark_response_cancelled(live_response_id)
+            self._responding = False
+            self._active_response_id = None
+            self._active_response_generation = None
+        self._raise_playback_abort()
+        self._abort_playback_stream_now()
+        self._clear_queued_playback()
+        self._set_state(RealtimeSessionState.LISTENING)
+        connection = self._connection
+        cancel_id = None
+        if record is not None:
+            cancel_id = record.claimed_response_id
+        if cancel_id is None:
+            cancel_id = live_response_id
+        if connection is not None and (
+            cancel_id is not None or (record is not None and record.create_issued)
+        ):
+            try:
+                if cancel_id:
+                    connection.response.cancel(response_id=cancel_id)
+                else:
+                    connection.response.cancel()
+            except Exception as error:
+                self._logger.error(
+                    "Realtime stop cancel failed error_type=%s",
+                    type(error).__name__,
+                )
+
     def _on_user_transcript(self, event: object) -> None:
         item_id = getattr(event, "item_id", None)
         transcript = getattr(event, "transcript", None)
@@ -1342,6 +1418,12 @@ class RealtimeVoiceSession:
                     self._assembler.bind_response(record.claimed_response_id)
         cleaned = transcript.strip()
         already_planned = item_id in self._planned_transcript_items
+        if is_explicit_stop_command(cleaned):
+            if cleaned and not already_planned:
+                self._print(f"Cortana: (Heard) {cleaned}")
+                self._remember_planned_transcript_item(item_id)
+            self._consume_explicit_stop_command(item_id)
+            return
         if cleaned and not already_planned:
             self._print(f"Cortana: (Heard) {cleaned}")
             plan = self._plan_finalized_user_transcript(item_id, cleaned)
@@ -1892,6 +1974,8 @@ class RealtimeVoiceSession:
         self._planned_transcript_items.clear()
         self._planned_transcript_order.clear()
         self._interrupted_item_ids.clear()
+        self._stop_consumed_item_ids.clear()
+        self._stop_consumed_order.clear()
         self._response_generation = 0
         self._pending_response_generation = None
         self._active_response_generation = None

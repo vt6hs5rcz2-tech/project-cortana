@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, cast
 
 from src.active_memory import ActiveMemoryContext
@@ -9,13 +10,16 @@ from src.camera_capture import RealtimeVisualFrame
 from src.conversation import ConversationHistory
 from src.conversation_state import ConversationState
 from src.realtime_multimodal import (
+    MultimodalOutboundAction,
+    MultimodalOutboundKind,
     RealtimeMultimodalSession,
+    _MAX_DELETED_REMOTE_VISUAL_IDS,
     _MAX_PENDING_VISUAL_ACKS,
     _MAX_VISUAL_TURNS,
     _VisualTurnState,
 )
 from src.settings import Settings
-from tests.test_realtime_multimodal import FakeEvent, FakeItem
+from tests.test_realtime_multimodal import FakeConnection, FakeEvent, FakeItem
 
 
 def _settings() -> Settings:
@@ -30,7 +34,24 @@ def _settings() -> Settings:
     )
 
 
-def _session(*, state: ConversationState | None = None) -> RealtimeMultimodalSession:
+class _FakeClock:
+    """Deterministic monotonic clock for visual-ack timeout tests."""
+
+    def __init__(self, now: float = 1_000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _session(
+    *,
+    state: ConversationState | None = None,
+    clock: _FakeClock | None = None,
+) -> RealtimeMultimodalSession:
     return RealtimeMultimodalSession(
         settings=_settings(),
         client=cast(Any, object()),
@@ -38,6 +59,7 @@ def _session(*, state: ConversationState | None = None) -> RealtimeMultimodalSes
         active_memory_context=ActiveMemoryContext(),
         conversation_state=state,
         print_fn=lambda _line: None,
+        monotonic_fn=clock if clock is not None else time.monotonic,
         transcript_wait_seconds=0.25,
         visual_ack_wait_seconds=0.25,
     )
@@ -249,3 +271,149 @@ def test_duplicate_late_remote_id_does_not_rebind() -> None:
         FakeEvent(type="conversation.item.added", item=FakeItem(id="visual_keep"))
     )
     assert session._visual_turns["user_b"].remote_visual_item_id != "visual_keep"
+
+
+def _prepare_visual_turn(
+    session: RealtimeMultimodalSession,
+    connection: FakeConnection,
+    user_item_id: str,
+    frame: RealtimeVisualFrame,
+) -> _VisualTurnState:
+    turn = _VisualTurnState(
+        user_item_id=user_item_id,
+        visual_frame=frame,
+        bound_at_monotonic=session._monotonic(),
+        visual_insert_authorized=True,
+    )
+    session._visual_turns[user_item_id] = turn
+    session._prepare_turn_response(
+        connection,
+        MultimodalOutboundAction(
+            kind=MultimodalOutboundKind.PREPARE_TURN_RESPONSE,
+            user_item_id=user_item_id,
+            visual_frame=frame,
+        ),
+    )
+    return turn
+
+
+def test_visual_ack_timeout_issues_one_create_releases_and_stays_bounded() -> None:
+    """Controlled withhold: timeout must not deadlock and must create once."""
+    clock = _FakeClock()
+    state = ConversationState()
+    connection = FakeConnection(auto_ack_visual=False, auto_ack_responses=False)
+    session = _session(state=state, clock=clock)
+    session._connection = connection
+
+    turn = _prepare_visual_turn(session, connection, "user_a", _frame(1))
+    assert connection.conversation.item.created_items
+    assert connection.response.response_creates == 0
+    assert turn.awaiting_remote_id is True
+    assert turn.ack_deadline_monotonic == clock.now + 0.25
+    assert list(session._pending_visual_acks) == ["user_a"]
+    assert turn.visual_frame is not None
+
+    clock.advance(0.25)
+    session._expire_visual_ack_waits()
+    assert connection.response.response_creates == 0
+    session._drain_outbound(connection)
+
+    assert connection.response.response_creates == 1
+    assert turn.awaiting_remote_id is False
+    assert turn.ack_deadline_monotonic is None
+    assert turn.response_create_sent is True
+    assert turn.stale is False
+    assert turn.remote_visual_item_id is None
+    assert session._current_remote_visual_item_id is None
+    assert state.visual_context_ref_id is None
+    session._expire_visual_ack_waits()
+    session._drain_outbound(connection)
+    assert connection.response.response_creates == 1
+    assert len(session._visual_turns) <= _MAX_VISUAL_TURNS
+    assert len(session._pending_visual_acks) <= _MAX_PENDING_VISUAL_ACKS
+    assert _retained_frame_bytes(session) <= _MAX_VISUAL_TURNS * 8192
+
+
+def test_late_ack_after_timeout_does_not_bind_or_create_again() -> None:
+    """Late ack for a timed-out turn must not become current visual context."""
+    clock = _FakeClock()
+    state = ConversationState()
+    connection = FakeConnection(auto_ack_visual=False, auto_ack_responses=False)
+    session = _session(state=state, clock=clock)
+    session._connection = connection
+
+    turn = _prepare_visual_turn(session, connection, "user_a", _frame(1))
+    clock.advance(0.25)
+    session._expire_visual_ack_waits()
+    session._drain_outbound(connection)
+    assert connection.response.response_creates == 1
+
+    session._on_conversation_item_ack(
+        FakeEvent(type="conversation.item.added", item=FakeItem(id="visual_a_late"))
+    )
+    live = session._visual_turns.get("user_a")
+    if live is not None:
+        assert live.remote_visual_item_id != "visual_a_late"
+    assert session._current_remote_visual_item_id != "visual_a_late"
+    assert state.visual_context_ref_id != "visual_a_late"
+    assert "visual_a_late" not in session._live_remote_visual_ids
+    assert connection.response.response_creates == 1
+    assert "visual_a_late" in connection.conversation.item.deleted_ids
+    assert "visual_a_late" in session._deleted_remote_visual_ids
+    assert turn.visual_frame is None or live is None
+    assert len(session._pending_visual_acks) <= _MAX_PENDING_VISUAL_ACKS
+    assert len(session._deleted_remote_visual_ids) <= _MAX_DELETED_REMOTE_VISUAL_IDS
+    assert session._orphan_visual_ack_debt >= 0
+
+
+def test_late_ack_after_timeout_does_not_bind_newer_follow_up_turn() -> None:
+    """Critical correlation: timed-out ack debt must not poison the next turn."""
+    clock = _FakeClock()
+    state = ConversationState()
+    connection = FakeConnection(auto_ack_visual=False, auto_ack_responses=False)
+    session = _session(state=state, clock=clock)
+    session._connection = connection
+
+    _prepare_visual_turn(session, connection, "user_a", _frame(1, payload_bytes=4096))
+    clock.advance(0.25)
+    session._expire_visual_ack_waits()
+    session._drain_outbound(connection)
+    assert connection.response.response_creates == 1
+
+    follow = _prepare_visual_turn(
+        session, connection, "user_b", _frame(2, payload_bytes=2048)
+    )
+    assert follow.awaiting_remote_id is True
+    assert follow.remote_visual_item_id is None
+    assert list(session._pending_visual_acks)[-1] == "user_b"
+
+    session._on_conversation_item_ack(
+        FakeEvent(type="conversation.item.added", item=FakeItem(id="visual_a_late"))
+    )
+    assert follow.remote_visual_item_id != "visual_a_late"
+    assert session._current_remote_visual_item_id != "visual_a_late"
+    assert state.visual_context_ref_id != "visual_a_late"
+    assert connection.response.response_creates == 1
+    assert "visual_a_late" in connection.conversation.item.deleted_ids
+
+    session._on_conversation_item_ack(
+        FakeEvent(type="conversation.item.added", item=FakeItem(id="visual_b"))
+    )
+    session._drain_outbound(connection)
+    assert follow.remote_visual_item_id == "visual_b"
+    assert session._current_remote_visual_item_id == "visual_b"
+    assert state.visual_context_ref_id == "visual_b"
+    assert connection.response.response_creates == 2
+    first = session._visual_turns.get("user_a")
+    if first is not None:
+        assert first.remote_visual_item_id != "visual_b"
+    assert len(session._visual_turns) <= _MAX_VISUAL_TURNS
+    assert len(session._pending_visual_acks) <= _MAX_PENDING_VISUAL_ACKS
+    assert _retained_frame_bytes(session) <= _MAX_VISUAL_TURNS * 8192
+    session._cleanup()
+    assert session._visual_turns == {}
+    assert session._pending_visual_acks.__class__() == session._pending_visual_acks
+    assert len(session._pending_visual_acks) == 0
+    assert session._orphan_visual_ack_debt == 0
+    assert _retained_frame_bytes(session) == 0
+    assert len(session._deleted_remote_visual_ids) == 0

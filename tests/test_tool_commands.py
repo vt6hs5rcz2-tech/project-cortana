@@ -275,7 +275,7 @@ def test_all_tool_commands_are_registered() -> None:
 
 
 def test_help_lists_tool_commands(tmp_path: Path) -> None:
-    result, _, _ = _run("/help", tmp_path)
+    result, _, _ = _run("/help more", tmp_path)
     assert "/tools" in (result.message or "")
     assert "/tool-run" in (result.message or "")
     assert "/tool-audit" in (result.message or "")

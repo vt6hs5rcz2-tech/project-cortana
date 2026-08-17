@@ -9,7 +9,7 @@ import pytest
 import main as main_module
 from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient
-from src.commands import HELP_TEXT
+from src.commands import CORE_HELP_TEXT
 from src.conversation import ConversationHistory, MESSAGE_TOO_LONG, SHUTDOWN_MESSAGE, STARTUP_GREETING
 from src.conversation_loop import handle_message, process_conversation_turn, run_conversation_loop
 from src.conversation_intelligence import ConversationIntelligence
@@ -138,7 +138,9 @@ def test_handle_message_prints_ai_response(
     output = capsys.readouterr().out
 
     assert captured_message == "Analyze this log"
+    assert "Cortana: Thinking..." in output
     assert "Cortana: Analysis complete." in output
+    assert output.count("Cortana: Thinking...") == 1
     assert logger.info_messages == ["Response completed."]
 
 
@@ -274,7 +276,8 @@ def test_handle_message_logs_only_safe_error_type(
 
     output = capsys.readouterr().out
 
-    assert "Cortana: I could not complete that request." in output
+    assert "Cortana: Thinking..." in output
+    assert "Cortana: I couldn't complete that request." in output
     assert "Sensitive simulated error details" not in output
     assert logger.error_messages == [
         "The OpenAI request failed with error type: RuntimeError"
@@ -956,5 +959,5 @@ def test_run_conversation_loop_slash_commands_bypass_message_size_cap(
     )
 
     output = capsys.readouterr().out
-    assert HELP_TEXT in output
+    assert CORE_HELP_TEXT in output
     assert ai_calls == 0

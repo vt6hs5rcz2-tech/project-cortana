@@ -11,9 +11,13 @@ import logging
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+if TYPE_CHECKING:
+    from src.visual_frame_quality import VisualFrameQuality
 
 from PIL import Image
 
@@ -139,6 +143,7 @@ class CaptureDevice(Protocol):
 
 CaptureFactory = Callable[[], CaptureDevice]
 OnCameraFatal = Callable[[str], None]
+_MAX_RECENT_QUALITY_FRAMES = 4
 
 
 def realtime_multimodal_features_enabled() -> bool:
@@ -266,6 +271,9 @@ class CameraCaptureSession:
 
         self._lock = threading.Lock()
         self._latest: RealtimeVisualFrame | None = None
+        self._recent_frames: deque[RealtimeVisualFrame] = deque(
+            maxlen=_MAX_RECENT_QUALITY_FRAMES
+        )
         self._sequence = 0
         self._consecutive_failures = 0
         self._capture: CaptureDevice | None = None
@@ -360,6 +368,67 @@ class CameraCaptureSession:
                 return self.get_fresh_frame(max_age_seconds=max_age_seconds)
             self._sleep(0.05)
 
+    def get_usable_fresh_frame(
+        self,
+        *,
+        max_age_seconds: float = MAX_REALTIME_VISUAL_FRAME_AGE_SECONDS,
+        now: float | None = None,
+    ) -> RealtimeVisualFrame | None:
+        """Return a fresh frame only when local quality checks pass."""
+        current = self._monotonic() if now is None else now
+        frame = self.get_fresh_frame(max_age_seconds=max_age_seconds, now=current)
+        if frame is None:
+            return None
+        from src.visual_frame_quality import assess_visual_frame_quality
+
+        quality = assess_visual_frame_quality(
+            frame,
+            now=current,
+            max_age_seconds=max_age_seconds,
+            prior_frames=self._prior_frames(frame),
+        )
+        if quality.usable:
+            self._log_frame_quality(frame, quality, now=current)
+            return frame
+        self._log_frame_quality(frame, quality, now=current)
+        return None
+
+    def wait_for_usable_fresh_frame(
+        self,
+        *,
+        wait_seconds: float = REALTIME_VISUAL_FRESH_WAIT_SECONDS,
+        max_age_seconds: float = MAX_REALTIME_VISUAL_FRAME_AGE_SECONDS,
+    ) -> RealtimeVisualFrame | None:
+        """Wait briefly for a fresh usable frame; never send washout."""
+        deadline = self._monotonic() + max(0.0, wait_seconds)
+        last_logged_sequence: int | None = None
+        while True:
+            current = self._monotonic()
+            frame = self.get_fresh_frame(
+                max_age_seconds=max_age_seconds,
+                now=current,
+            )
+            if frame is not None:
+                from src.visual_frame_quality import assess_visual_frame_quality
+
+                quality = assess_visual_frame_quality(
+                    frame,
+                    now=current,
+                    max_age_seconds=max_age_seconds,
+                    prior_frames=self._prior_frames(frame),
+                )
+                if quality.usable:
+                    self._log_frame_quality(frame, quality, now=current)
+                    return frame
+                if frame.sequence != last_logged_sequence:
+                    self._log_frame_quality(frame, quality, now=current)
+                    last_logged_sequence = frame.sequence
+            if current >= deadline or self._stop.is_set():
+                return self.get_usable_fresh_frame(
+                    max_age_seconds=max_age_seconds
+                )
+            self._sleep(0.05)
+
     def stop(self) -> None:
         """Stop the worker, clear the latest frame, and release the camera.
 
@@ -379,6 +448,7 @@ class CameraCaptureSession:
         release_ok = self._release_capture()
         with self._lock:
             self._latest = None
+            self._recent_frames.clear()
         self._sequence = 0
         self._consecutive_failures = 0
         self._opened = False
@@ -467,6 +537,46 @@ class CameraCaptureSession:
     def _replace_latest(self, frame: RealtimeVisualFrame) -> None:
         with self._lock:
             self._latest = frame
+            self._recent_frames.append(frame)
+
+    def _prior_frames(self, current: RealtimeVisualFrame) -> tuple[RealtimeVisualFrame, ...]:
+        with self._lock:
+            return tuple(
+                frame
+                for frame in self._recent_frames
+                if frame.sequence != current.sequence
+            )
+
+    def _log_frame_quality(
+        self,
+        frame: RealtimeVisualFrame,
+        quality: VisualFrameQuality,
+        *,
+        now: float,
+    ) -> None:
+        age_ms = int(max(0.0, (now - frame.captured_at_monotonic) * 1000))
+        temporal_mae = quality.temporal_mae
+        logger.info(
+            "Camera frame quality usable=%s reason=%s width=%s height=%s "
+            "encoded_bytes=%s sequence=%s mean=%.1f var=%.1f chroma=%.2f "
+            "unique_colors=%s uniform=%.3f center=%.3f mae=%s prior=%s "
+            "age_ms=%s",
+            quality.usable,
+            quality.reason,
+            frame.width,
+            frame.height,
+            len(frame.image_bytes),
+            frame.sequence,
+            quality.mean_luminance,
+            quality.luminance_variance,
+            quality.chroma_std,
+            quality.unique_colors,
+            quality.uniform_tile_fraction,
+            quality.center_energy_ratio,
+            "n/a" if temporal_mae is None else f"{temporal_mae:.3f}",
+            quality.prior_frame_count,
+            age_ms,
+        )
 
     def _release_capture(self) -> bool:
         """Release the capture device. Return False when release fails."""

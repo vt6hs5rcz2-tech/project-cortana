@@ -38,6 +38,7 @@ from src.voice_service import (
     VoiceAudioClient,
     VoiceService,
     VoiceServiceError,
+    canonicalize_wav_bytes,
 )
 
 logger = logging.getLogger("ProjectCortana")
@@ -178,7 +179,7 @@ def _play_wav_synchronously(wav_bytes: bytes) -> None:
         )
         raise VoiceServiceError(VOICE_PLAYBACK_FAILED) from error
     try:
-        winsound.PlaySound(wav_bytes, winsound.SND_MEMORY)
+        winsound.PlaySound(canonicalize_wav_bytes(wav_bytes), winsound.SND_MEMORY)
     except Exception as error:
         logger.error(
             "Voice playback failed error_type=%s",

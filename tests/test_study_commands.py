@@ -221,7 +221,7 @@ def test_study_command_flow_and_answer_key_hidden(tmp_path: Path) -> None:
     assert "SECRET_EXPLANATION_XYZ" not in status.message
 
     global_status = _run(
-        "/status",
+        "/status verbose",
         tmp_path=tmp_path,
         history=history,
         memory=memory,

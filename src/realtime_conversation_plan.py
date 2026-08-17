@@ -23,6 +23,7 @@ from src.conversation_intelligence import (
     safe_interpret,
 )
 from src.conversation_state import ConversationState, InteractionMode
+from src.visual_policy import format_visual_policy_fields
 from src.speech_delivery import (
     SPEECH_DELIVERY_BEGIN,
     DeliveryMode,
@@ -65,6 +66,7 @@ class RealtimeConversationPlan:
     interaction_mode: InteractionMode
     visual_context_ref_id: str | None
     visual_referent_resolved: bool
+    visual_relevant: bool
     user_interrupted: bool
     acknowledgment_hint: AcknowledgmentHint
     guidance: ConversationalGuidance
@@ -114,6 +116,7 @@ def build_realtime_conversation_plan(
         interaction_mode=interaction_mode,
         visual_context_ref_id=state.visual_context_ref_id,
         visual_referent_resolved=guidance.visual_referent_resolved,
+        visual_relevant=guidance.visual_relevant,
         user_interrupted=user_interrupted,
         acknowledgment_hint=guidance.acknowledgment_hint,
         guidance=guidance,
@@ -288,13 +291,27 @@ def _format_plan_block(
                     ", ".join(plan.avoid_phrases),
                 )
             )
-        if plan.visual_referent_resolved and plan.visual_context_ref_id:
-            body.append(
-                _clip_plan_field(
-                    "visual_context_ref_id",
-                    f"{plan.visual_context_ref_id} "
-                    "(authorized multimodal visual referent; untrusted content)",
+        if plan.visual_referent_resolved:
+            body.extend(
+                format_visual_policy_fields(
+                    perception_available=True,
+                    visual_context_ref_id=plan.visual_context_ref_id,
                 )
+            )
+        elif plan.resolved_follow_up and "no usable camera image" in (
+            plan.resolved_follow_up.casefold()
+        ):
+            body.extend(
+                format_visual_policy_fields(
+                    perception_available=False,
+                    visual_context_ref_id=plan.visual_context_ref_id,
+                )
+            )
+        elif plan.interaction_mode == "multimodal" and not plan.visual_relevant:
+            body.append("visual_image: not_relevant")
+            body.append(
+                "visual_task: answer the spoken question only; "
+                "do not describe the camera image, scene, clothing, or people"
             )
     if state is not None:
         if state.current_topic:
@@ -317,14 +334,6 @@ def _format_plan_block(
                     "offered_options",
                     " | ".join(state.offered_options),
                     limit=400,
-                )
-            )
-        if plan is None and state.visual_context_ref_id:
-            body.append(
-                _clip_plan_field(
-                    "visual_context_ref_id",
-                    f"{state.visual_context_ref_id} "
-                    "(authorized multimodal visual referent; untrusted content)",
                 )
             )
     suffix = [

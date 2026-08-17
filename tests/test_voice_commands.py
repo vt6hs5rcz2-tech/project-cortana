@@ -16,7 +16,9 @@ from src.settings import Settings
 from src.speech_delivery import SpeechDeliveryState
 from src.voice_commands import (
     VOICE_EMPTY_TRANSCRIPT,
+    VOICE_PLAYBACK_FAILED,
     VoiceCommandContext,
+    _play_wav_synchronously,
     create_default_voice_services,
     handle_voice_command,
 )
@@ -479,3 +481,87 @@ def test_voice_turn_blank_transcript_skips_chat_history_and_tts(
     service.synthesize.assert_not_called()
     service.transcribe.assert_called_once()
     assert "(Heard)" not in capsys.readouterr().out
+
+
+def test_voice_turn_playback_failure_keeps_text(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    history = ConversationHistory()
+    capture = MagicMock(spec=MicrophoneCaptureAdapter)
+    capture.capture.return_value = _audio()
+    service = MagicMock(spec=VoiceService)
+    service.transcribe.return_value = "What is two plus two?"
+    service.synthesize.return_value = b"RIFFWAVEdata"
+
+    def fake_process(**kwargs: Any) -> str:
+        history_obj = kwargs["conversation_history"]
+        history_obj.add_user_message(kwargs["user_message"])
+        history_obj.add_assistant_message("4")
+        return "4"
+
+    monkeypatch.setattr(
+        "src.conversation_loop.process_conversation_turn",
+        fake_process,
+    )
+    monkeypatch.setattr(
+        "src.voice_commands._play_wav_synchronously",
+        lambda _data: (_ for _ in ()).throw(VoiceServiceError(VOICE_PLAYBACK_FAILED)),
+    )
+    monkeypatch.setattr("src.voice_commands.sys.platform", "win32")
+
+    result = handle_voice_command(
+        "voice-turn",
+        _context(capture=capture, voice_service=service, history=history),
+    )
+    output = capsys.readouterr().out
+    assert result is not None
+    assert result.message == VOICE_PLAYBACK_FAILED
+    assert "(Heard) What is two plus two?" in output
+    assert "Cortana: 4" in output
+    assert history.turns[-1].content == "4"
+    service.transcribe.assert_called_once()
+    service.synthesize.assert_called_once()
+
+
+def test_play_wav_canonicalizes_streamed_header_before_winsound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    valid = pcm_to_wav_bytes(b"\x00\x00" * 24)
+    streamed = bytearray(valid)
+    streamed[4:8] = (0xFFFFFFFF).to_bytes(4, "little")
+    streamed[40:44] = (0xFFFFFFFF).to_bytes(4, "little")
+    played: list[bytes] = []
+
+    class FakeWinsound:
+        SND_MEMORY = 4
+
+        @staticmethod
+        def PlaySound(sound: bytes, flags: int) -> None:
+            played.append(sound)
+            assert flags == 4
+
+    monkeypatch.setattr("src.voice_commands.sys.platform", "win32")
+    monkeypatch.setitem(__import__("sys").modules, "winsound", FakeWinsound)
+
+    _play_wav_synchronously(bytes(streamed))
+    assert len(played) == 1
+    assert int.from_bytes(played[0][4:8], "little") == len(played[0]) - 8
+    assert int.from_bytes(played[0][40:44], "little") == 48
+
+
+def test_play_wav_maps_backend_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeWinsound:
+        SND_MEMORY = 4
+
+        @staticmethod
+        def PlaySound(sound: bytes, flags: int) -> None:
+            raise RuntimeError("Failed to play sound")
+
+    monkeypatch.setattr("src.voice_commands.sys.platform", "win32")
+    monkeypatch.setitem(__import__("sys").modules, "winsound", FakeWinsound)
+
+    with pytest.raises(VoiceServiceError, match="could not play the spoken response"):
+        _play_wav_synchronously(pcm_to_wav_bytes(b"\x00\x00" * 8))

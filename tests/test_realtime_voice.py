@@ -28,6 +28,7 @@ from src.realtime_voice import (
     REALTIME_CLEANUP_INCOMPLETE,
     REALTIME_INPUT_OVERFLOW,
     REALTIME_OUTPUT_OVERFLOW,
+    REALTIME_PLAYBACK_FAILED,
     REALTIME_POLICY_FAILURE,
     REALTIME_SDK_INCOMPATIBLE,
     REALTIME_SESSION_TIMEOUT,
@@ -219,6 +220,21 @@ class FakePlaybackStream:
 
     def close(self) -> None:
         self.closed = True
+
+
+class RestartFailPlaybackStream(FakePlaybackStream):
+    """Same-stream start() after abort fails; fresh-stream fallback must recover.
+
+    Mirrors Windows MME/PortAudioError -9999 when start() is attempted on a
+    stream that was aborted during a blocking write.
+    """
+
+    def start(self) -> None:
+        self.start_calls += 1
+        if self.start_calls > 1:
+            raise RuntimeError(
+                "Error starting stream: Unanticipated host error"
+            )
 
 
 class FakeMicrophone(RealtimeMicrophoneStream):
@@ -503,6 +519,90 @@ def test_barge_in_aborts_and_rejects_stale_audio() -> None:
     session.request_stop(error_type="cancelled")
     thread.join(timeout=5)
     assert thread.is_alive() is False
+
+
+def test_playback_restart_failure_falls_back_to_fresh_stream() -> None:
+    """Failed start() after abort must close the old stream and play on a new one."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, result_box, _printed = _run_session(
+        connection,
+        history,
+        playback_stream_factory=RestartFailPlaybackStream,
+    )
+
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="item_a")
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="item_a")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(
+                id="resp_a",
+                status="in_progress",
+                metadata=_correlation_metadata("item_a", 1),
+            ),
+        )
+    )
+    pcm_a = b"\x02\x00" * 200
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio.delta",
+            response_id="resp_a",
+            delta=base64.b64encode(pcm_a).decode("ascii"),
+        )
+    )
+    assert _wait_until(
+        lambda: bool(FakePlaybackStream.instances)
+        and len(FakePlaybackStream.instances[0].writes) >= 1
+    )
+    first = FakePlaybackStream.instances[0]
+    writes_before_abort = len(first.writes)
+
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="item_b")
+    )
+    assert _wait_until(lambda: first.abort_calls >= 1)
+    assert _wait_until(lambda: first.closed is True)
+    assert _wait_until(lambda: len(FakePlaybackStream.instances) >= 2)
+    assert first.writes == first.writes[:writes_before_abort]
+    assert "message" not in result_box
+
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="item_b")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(
+                id="resp_b",
+                status="in_progress",
+                metadata=_correlation_metadata("item_b", 2),
+            ),
+        )
+    )
+    pcm_b = b"\x04\x00" * 200
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio.delta",
+            response_id="resp_b",
+            delta=base64.b64encode(pcm_b).decode("ascii"),
+        )
+    )
+    recovered = FakePlaybackStream.instances[1]
+    assert _wait_until(lambda: pcm_b in recovered.writes)
+    assert pcm_b not in first.writes
+    assert _wait_until(lambda: session._playback_bytes_queued == 0)
+    assert "message" not in result_box
+    assert result_box.get("message") != REALTIME_PLAYBACK_FAILED
+
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+    assert thread.is_alive() is False
+    assert result_box.get("message") == REALTIME_STOPPED_MESSAGE
 
 
 def test_tool_call_event_is_policy_failure() -> None:
@@ -922,6 +1022,141 @@ def test_output_queue_overflow_terminates_session() -> None:
     assert StallPlayback.instances[0].closed is True
     assert all(turn.role != "assistant" for turn in history.turns)
     assert session.state.value == "failed"
+
+
+def _push_correlated_response(connection: FakeConnection, *, item_id: str, response_id: str) -> None:
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id=item_id)
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(
+                id=response_id,
+                status="in_progress",
+                metadata=_correlation_metadata(item_id, 1),
+            ),
+        )
+    )
+
+
+def test_short_assistant_audio_burst_does_not_overflow() -> None:
+    """A normal short answer can arrive faster than 1x playback."""
+    connection = FakeConnection()
+    history = ConversationHistory()
+    FakePlaybackStream.instances.clear()
+    thread, session, result_box, _printed = _run_session(connection, history)
+    _push_correlated_response(connection, item_id="item_short", response_id="resp_short")
+    frame = b"\x01\x00" * (REALTIME_VOICE_FRAME_BYTES // 2)
+    encoded = base64.b64encode(frame).decode("ascii")
+    burst_frames = 200  # 4.0s at 20ms/frame; previously overflowed the 2s cap
+    for _ in range(burst_frames):
+        connection.socket.push(
+            FakeEvent(
+                type="response.output_audio.delta",
+                response_id="resp_short",
+                delta=encoded,
+            )
+        )
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio_transcript.done",
+            response_id="resp_short",
+            transcript="The moon is Earth's only natural satellite.",
+        )
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.done",
+            response=FakeResponse(id="resp_short", status="completed"),
+        )
+    )
+    assert _wait_until(
+        lambda: FakePlaybackStream.instances
+        and sum(len(item) for item in FakePlaybackStream.instances[0].writes)
+        == burst_frames * REALTIME_VOICE_FRAME_BYTES,
+        timeout=5.0,
+    )
+    assert _wait_until(lambda: session._playback_bytes_queued == 0, timeout=2.0)
+    assert result_box.get("message") != REALTIME_OUTPUT_OVERFLOW
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+    assert result_box["message"] == REALTIME_STOPPED_MESSAGE
+
+
+def test_playback_byte_accounting_decreases_when_consumed() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    FakePlaybackStream.instances.clear()
+    thread, session, result_box, _printed = _run_session(connection, history)
+    _push_correlated_response(connection, item_id="item_acc", response_id="resp_acc")
+    frame = b"\x02\x00" * (REALTIME_VOICE_FRAME_BYTES // 2)
+    encoded = base64.b64encode(frame).decode("ascii")
+    for _ in range(8):
+        connection.socket.push(
+            FakeEvent(
+                type="response.output_audio.delta",
+                response_id="resp_acc",
+                delta=encoded,
+            )
+        )
+    assert _wait_until(
+        lambda: FakePlaybackStream.instances
+        and len(FakePlaybackStream.instances[0].writes) == 8,
+        timeout=3.0,
+    )
+    assert session._playback_bytes_queued == 0
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+    assert "message" in result_box
+
+
+def test_stale_response_audio_does_not_grow_playback_queue() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    FakePlaybackStream.instances.clear()
+    thread, session, result_box, _printed = _run_session(connection, history)
+    _push_correlated_response(connection, item_id="item_live", response_id="resp_live")
+    stale = base64.b64encode(b"\x03\x00" * 2_000).decode("ascii")
+    for _ in range(20):
+        connection.socket.push(
+            FakeEvent(
+                type="response.output_audio.delta",
+                response_id="resp_stale",
+                delta=stale,
+            )
+        )
+    time.sleep(0.2)
+    writes = (
+        FakePlaybackStream.instances[0].writes if FakePlaybackStream.instances else []
+    )
+    assert writes == []
+    assert session._playback_bytes_queued == 0
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+    assert result_box.get("message") != REALTIME_OUTPUT_OVERFLOW
+
+
+def test_cleanup_clears_playback_queue_and_accounting() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, result_box, _printed = _run_session(connection, history)
+    _push_correlated_response(connection, item_id="item_cu", response_id="resp_cu")
+    encoded = base64.b64encode(
+        b"\x04\x00" * (REALTIME_VOICE_FRAME_BYTES // 2)
+    ).decode("ascii")
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio.delta",
+            response_id="resp_cu",
+            delta=encoded,
+        )
+    )
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+    assert session._playback_bytes_queued == 0
+    assert session._playback_queue.empty()
+    assert result_box["message"] == REALTIME_STOPPED_MESSAGE
 
 
 def test_quiet_recv_does_not_starve_microphone_appends() -> None:
@@ -1800,3 +2035,141 @@ def test_m25_session_cleanup_drops_interrupted_fingerprint_for_later_session() -
     spoken = prepare_spoken_delivery(similar, plan, delivery)
     assert "There are three options" in spoken.spoken_text
     assert "weekly" in spoken.spoken_text.casefold()
+
+
+def test_voice_stop_invalidates_commit_create_and_stays_silent() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, printed = _run_session(connection, history)
+
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="item_a")
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="item_a")
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(
+                id="resp_a",
+                status="in_progress",
+                metadata=_correlation_metadata("item_a", 1),
+            ),
+        )
+    )
+    pcm_a = b"\x02\x00" * 200
+    connection.socket.push(
+        FakeEvent(
+            type="response.output_audio.delta",
+            response_id="resp_a",
+            delta=base64.b64encode(pcm_a).decode("ascii"),
+        )
+    )
+    assert _wait_until(
+        lambda: bool(FakePlaybackStream.instances)
+        and len(FakePlaybackStream.instances[0].writes) >= 1
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="item_stop")
+    )
+    assert _wait_until(lambda: FakePlaybackStream.instances[0].abort_calls >= 1)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="item_stop")
+    )
+    assert _wait_until(lambda: len(connection.response.response_creates) == 2)
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_stop",
+            transcript="Stop.",
+        )
+    )
+    assert _wait_until(
+        lambda: any("Heard) Stop" in line for line in printed),
+        timeout=5,
+    )
+    assert session._playback_bytes_queued == 0
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(
+                id="resp_stop",
+                status="in_progress",
+                metadata=_correlation_metadata("item_stop", 2),
+            ),
+        )
+    )
+    time.sleep(0.15)
+    assert session._active_response_id != "resp_stop"
+    assert session._responding is False
+    abort_after_stop = FakePlaybackStream.instances[0].abort_calls
+
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.speech_started", item_id="item_next")
+    )
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="item_next")
+    )
+    assert _wait_until(lambda: len(connection.response.response_creates) == 3)
+    connection.socket.push(
+        FakeEvent(
+            type="response.created",
+            response=FakeResponse(
+                id="resp_next",
+                status="in_progress",
+                metadata=_correlation_metadata("item_next", 3),
+            ),
+        )
+    )
+    assert _wait_until(lambda: session._active_response_id == "resp_next", timeout=5)
+    assert session._responding is True
+    assert FakePlaybackStream.instances[0].abort_calls == abort_after_stop
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_voice_stop_before_commit_skips_create() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, _printed = _run_session(connection, history)
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_stop",
+            transcript="Stop talking.",
+        )
+    )
+    assert _wait_until(lambda: "item_stop" in session._stop_consumed_item_ids)
+    creates_before = len(connection.response.response_creates)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="item_stop")
+    )
+    time.sleep(0.2)
+    assert len(connection.response.response_creates) == creates_before
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_voice_dont_stop_is_not_a_control_command() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, printed = _run_session(connection, history)
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id="item_keep")
+    )
+    assert _wait_until(lambda: len(connection.response.response_creates) == 1)
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id="item_keep",
+            transcript="Don't stop.",
+        )
+    )
+    assert _wait_until(
+        lambda: any("Don't stop" in line or "don't stop" in line.casefold() for line in printed),
+        timeout=5,
+    )
+    assert "item_keep" not in session._stop_consumed_item_ids
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)

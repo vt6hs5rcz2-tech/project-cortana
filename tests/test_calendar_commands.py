@@ -182,8 +182,10 @@ def test_status_shows_bounded_calendar_state(
     service = _wired_service(tmp_path, provider, monkeypatch)
     _run("/calendar-connect", tmp_path=tmp_path, calendar_service=service)
     status = _run("/status", tmp_path=tmp_path, calendar_service=service)
-    assert "Calendar connection: connected" in status
-    assert "Calendar provider: google" in status
+    assert "Calendar: connected" in status
+    verbose = _run("/status verbose", tmp_path=tmp_path, calendar_service=service)
+    assert "Calendar connection: connected" in verbose
+    assert "Calendar provider: google" in verbose
     assert "refresh" not in status.lower()
     assert "token" not in status.lower()
 

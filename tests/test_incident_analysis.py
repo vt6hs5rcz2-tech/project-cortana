@@ -355,7 +355,7 @@ def test_help_and_about_include_milestone_12() -> None:
     assert "/incident-analysis-run" in HELP_TEXT
     assert "/incident-analysis-show" in HELP_TEXT
     assert "/incident-analysis-save-note" in HELP_TEXT
-    assert "controlled security analyst assistance" in ABOUT_TEXT.lower()
+    assert "controlled defensive tools/workflows" in ABOUT_TEXT.lower()
 
 
 def test_commands_disabled_by_default(tmp_path: Path) -> None:

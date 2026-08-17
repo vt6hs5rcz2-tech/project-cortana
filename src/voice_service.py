@@ -8,6 +8,7 @@ slash routing, or operational services.
 from __future__ import annotations
 
 import logging
+import struct
 from io import BytesIO
 from typing import Protocol, runtime_checkable
 
@@ -115,6 +116,39 @@ class VoiceAudioClient(Protocol):
     audio: VoiceAudioResources
 
 
+_UNSIZED_WAV_CHUNK = 0xFFFFFFFF
+
+
+def canonicalize_wav_bytes(wav_bytes: bytes) -> bytes:
+    """Rewrite streamed/unknown RIFF and data sizes for local playback.
+
+    Some TTS responses return a valid PCM WAV body with ``0xFFFFFFFF`` RIFF
+    and data-chunk sizes. Windows ``PlaySound(SND_MEMORY)`` rejects that
+    header even though the audio bytes are present.
+    """
+    if len(wav_bytes) < 44:
+        return wav_bytes
+    if wav_bytes[0:4] != b"RIFF" or wav_bytes[8:12] != b"WAVE":
+        return wav_bytes
+
+    out = bytearray(wav_bytes)
+    struct.pack_into("<I", out, 4, len(out) - 8)
+    position = 12
+    while position + 8 <= len(out):
+        chunk_id = bytes(out[position : position + 4])
+        declared = struct.unpack_from("<I", out, position + 4)[0]
+        start = position + 8
+        if chunk_id == b"data":
+            actual = len(out) - start
+            if declared != actual:
+                struct.pack_into("<I", out, position + 4, actual)
+            break
+        if declared == _UNSIZED_WAV_CHUNK:
+            break
+        position = start + declared + (declared % 2)
+    return bytes(out)
+
+
 class VoiceService:
     """Transcribe canonical audio and synthesize WAV speech."""
 
@@ -202,7 +236,7 @@ class VoiceService:
         content = getattr(response, "content", None)
         if not isinstance(content, bytes) or not content:
             raise VoiceServiceValidationError(VOICE_TTS_FAILED)
-        return content
+        return canonicalize_wav_bytes(content)
 
     def _assert_enabled(self) -> None:
         if not VOICE_INTERACTION_ENABLED:

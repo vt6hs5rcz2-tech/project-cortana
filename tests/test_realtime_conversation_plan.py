@@ -247,6 +247,131 @@ def test_what_is_that_with_and_without_visual_ref() -> None:
     assert unresolved.clarification_needed is True
 
 
+def test_object_holding_plan_allows_ordinary_description_not_person_id() -> None:
+    with_ref = ConversationState()
+    with_ref.set_visual_context_ref("visual_item_object")
+    resolved = _plan(
+        "What object am I holding up?",
+        with_ref,
+        mode="multimodal",
+        visual_authorized=True,
+    )
+    assert resolved.visual_referent_resolved is True
+    assert resolved.authorizes_privileged_action is False
+    assert resolved.resolved_follow_up is not None
+    follow_up = resolved.resolved_follow_up.casefold()
+    assert "ordinary" in follow_up
+    assert "do not identify people" in follow_up
+    rendered = format_realtime_plan_instructions(
+        "base instructions",
+        resolved,
+        with_ref,
+    )
+    assert "visual_image: relevant" in rendered
+    assert "visual_perception: available" in rendered
+    assert "person_identification: prohibited" in rendered
+    assert "visual_authority" not in rendered
+    assert "untrusted visual" not in rendered.casefold()
+    assert "not confirming from the visual" not in rendered.casefold()
+
+    missing = _plan(
+        "What object am I holding up?",
+        ConversationState(),
+        mode="multimodal",
+        visual_authorized=False,
+    )
+    assert missing.visual_referent_resolved is False
+    assert missing.clarification_needed is True
+
+
+def test_monday_question_plan_marks_visual_not_relevant() -> None:
+    state = ConversationState()
+    state.set_visual_context_ref("visual_item_prior")
+    plan = _plan(
+        "What day comes after Monday?",
+        state,
+        mode="multimodal",
+        visual_authorized=True,
+    )
+    assert plan.visual_relevant is False
+    assert plan.visual_referent_resolved is False
+    rendered = format_realtime_plan_instructions("base instructions", plan, state)
+    assert "visual_image: not_relevant" in rendered
+    assert "visual_image: relevant" not in rendered
+    assert "do not describe the camera image" in rendered
+
+
+def test_color_follow_up_plan_stays_visual_without_full_redescription() -> None:
+    state = ConversationState()
+    state.set_visual_context_ref("visual_item_remote")
+    plan = _plan(
+        "What color is it?",
+        state,
+        mode="multimodal",
+        visual_authorized=True,
+    )
+    assert plan.visual_relevant is True
+    assert plan.visual_referent_resolved is True
+    assert "repeating the full previous object description" in plan.avoid_phrases
+    rendered = format_realtime_plan_instructions("base instructions", plan, state)
+    assert "visual_image: relevant" in rendered
+
+
+def test_scene_change_this_one_color_stays_visual() -> None:
+    state = ConversationState()
+    state.set_visual_context_ref("visual_item_thermometer")
+    showing = _plan(
+        "What am I showing you now?",
+        state,
+        mode="multimodal",
+        visual_authorized=True,
+    )
+    assert showing.visual_relevant is True
+    color = _plan(
+        "What color is this one?",
+        state,
+        mode="multimodal",
+        visual_authorized=True,
+    )
+    assert color.visual_relevant is True
+    assert color.visual_referent_resolved is True
+
+
+def test_current_required_plan_does_not_treat_stale_ref_as_current() -> None:
+    state = ConversationState()
+    state.set_visual_context_ref("visual_item_remote")
+    plan = _plan(
+        "What object am I holding up?",
+        state,
+        mode="multimodal",
+        visual_authorized=False,
+    )
+    assert plan.visual_referent_resolved is False
+    assert plan.resolved_follow_up is not None
+    follow_up = plan.resolved_follow_up.casefold()
+    assert "no usable camera image" in follow_up
+    assert "visual_item_remote" not in follow_up
+    rendered = format_realtime_plan_instructions("base instructions", plan, state)
+    assert "visual_image: unavailable" in rendered
+    assert "visual_item_remote" not in rendered
+    assert "visual_image: relevant" not in rendered
+
+
+def test_prior_reference_plan_may_use_previous_visual_context() -> None:
+    state = ConversationState()
+    state.set_visual_context_ref("visual_item_remote")
+    plan = _plan(
+        "What color was it?",
+        state,
+        mode="multimodal",
+        visual_authorized=True,
+    )
+    assert plan.visual_referent_resolved is True
+    assert plan.visual_context_ref_id == "visual_item_remote"
+    assert plan.resolved_follow_up is not None
+    assert "previous camera image is relevant" in plan.resolved_follow_up.casefold()
+
+
 # --- K / L. isolation and failure ---
 
 

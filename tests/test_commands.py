@@ -20,6 +20,7 @@ from src.commands import (
     FORGET_ALL_SUCCESS,
     FORGET_MISSING_ID,
     FORGET_NOT_FOUND_TEMPLATE,
+    CORE_HELP_TEXT,
     HELP_TEXT,
     MEMORIES_EMPTY,
     REMEMBER_CAPACITY,
@@ -156,24 +157,24 @@ def test_handle_slash_command_help_lists_commands(tmp_path: Path) -> None:
     )
 
     assert result.outcome == CommandOutcome.CONTINUE
-    assert result.message == HELP_TEXT
+    assert result.message == CORE_HELP_TEXT
     assert "/help" in result.message
     assert "/status" in result.message
     assert "/clear" in result.message
     assert "/remember" in result.message
     assert "/memories" in result.message
     assert "/forget" in result.message
-    assert "/forget-all" in result.message
     assert "/recall" in result.message
     assert "/active-memories" in result.message
     assert "/release" in result.message
-    assert "/release-all" in result.message
     assert "/about" in result.message
     assert "/exit" in result.message
+    assert "/playbooks" not in result.message
+    assert "/incident-analysis-prepare" not in result.message
 
 
 def test_handle_slash_command_about_describes_milestone(tmp_path: Path) -> None:
-    """The /about command should explain the current software milestone."""
+    """The /about command should describe the pilot identity."""
     history = ConversationHistory()
     result = handle_slash_command(
         "/about",
@@ -187,14 +188,15 @@ def test_handle_slash_command_about_describes_milestone(tmp_path: Path) -> None:
 
     assert result.outcome == CommandOutcome.CONTINUE
     assert result.message == ABOUT_TEXT
-    assert "early software milestone" in result.message
-    assert "persistent memory" in result.message.lower()
+    assert "1.0.0-pilot" in result.message
+    assert "early software milestone" not in result.message
+    assert "AI assistant" in result.message
 
 
 def test_handle_slash_command_status_reports_session_information(
     tmp_path: Path,
 ) -> None:
-    """The /status command should report safe local session details."""
+    """The /status command should report compact pilot session details."""
     history = ConversationHistory(max_completed_turns=5)
     history.add_user_message("Hello")
     history.add_assistant_message("Hi there.")
@@ -213,25 +215,15 @@ def test_handle_slash_command_status_reports_session_information(
 
     assert result.outcome == CommandOutcome.CONTINUE
     assert result.message is not None
-    assert "Status: online" in result.message
+    assert "1.0.0-pilot" in result.message
+    assert "Status:" in result.message
     assert "Model: test-model" in result.message
-    assert "Retained completed turns: 1" in result.message
-    assert "Maximum retained turns: 5" in result.message
-    persistence_label = "enabled" if HISTORY_PERSISTENCE_ENABLED else "disabled"
-    memory_label = "enabled" if EXPLICIT_PERSISTENT_MEMORY_ENABLED else "disabled"
-    assert f"History persistence: {persistence_label}" in result.message
-    assert f"Explicit persistent memory: {memory_label}" in result.message
-    assert "Saved memories: 1" in result.message
-    assert f"Maximum stored memories: {MAX_STORED_MEMORIES}" in result.message
-    assert "Active memories: 0" in result.message
-    assert f"Maximum active memories: {MAX_ACTIVE_MEMORIES}" in result.message
-    assert "Active memory characters: 0" in result.message
-    assert (
-        f"Maximum active memory characters: {MAX_ACTIVE_MEMORY_CHARS}"
-        in result.message
-    )
-    active_persistence = "enabled" if ACTIVE_MEMORY_PERSISTENCE_ENABLED else "disabled"
-    assert f"Active memory persistence: {active_persistence}" in result.message
+    assert "Memory count: 1" in result.message
+    assert "Document count: 0" in result.message
+    assert "Reminder count: 0" in result.message
+    assert "reserved (not implemented)" not in result.message
+    assert "History persistence:" not in result.message
+    assert "Status memory" not in result.message
 
 
 def test_format_status_reports_centralized_persistence_capability(
@@ -274,6 +266,8 @@ def test_format_status_does_not_expose_sensitive_configuration(
     assert "api key" not in status_text
     assert "memories.json" not in status_text
     assert str(store.file_path).lower() not in status_text
+    assert "realtime metadata gate" not in status_text
+    assert "data profile:" not in status_text
 
 
 def test_handle_slash_command_clear_removes_active_history(tmp_path: Path) -> None:
@@ -359,7 +353,7 @@ def test_handle_slash_command_matches_with_surrounding_whitespace(
         memory_store=_memory_store(tmp_path),
     )
 
-    assert result.message == HELP_TEXT
+    assert result.message == CORE_HELP_TEXT
 
 
 def test_remember_saves_memory_and_returns_id(tmp_path: Path) -> None:
@@ -524,7 +518,7 @@ def test_help_ignores_oversized_extra_arguments(tmp_path: Path) -> None:
         document_extractor=_document_extractor(),
         memory_store=_memory_store(tmp_path),
     )
-    assert result.message == HELP_TEXT
+    assert result.message == CORE_HELP_TEXT
 
 
 def test_remember_maps_validation_errors_by_type_not_message_text(
@@ -1077,7 +1071,7 @@ def test_uninjected_help_does_not_leak_ephemeral_temp_dirs(tmp_path: Path) -> No
         memory_store=_memory_store(tmp_path),
     )
     after = _cortana_temp_dir_names()
-    assert result.message == HELP_TEXT
+    assert result.message == CORE_HELP_TEXT
     assert after - before == set()
 
 

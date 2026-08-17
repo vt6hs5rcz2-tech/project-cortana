@@ -106,7 +106,7 @@ def _audio() -> NormalizedAudioInput:
 
 def test_first_startup_greeting_is_cortana_prefixed_and_actionable() -> None:
     assert STARTUP_GREETING.startswith("Cortana:")
-    assert "cybersecurity" in STARTUP_GREETING.casefold()
+    assert "ready" in STARTUP_GREETING.casefold()
     # First-time users need a discoverable next step besides exit.
     assert "/help" in STARTUP_GREETING or "slash" in STARTUP_GREETING.casefold()
     assert SHUTDOWN_MESSAGE.startswith("Cortana:")
@@ -135,10 +135,9 @@ def test_first_help_lists_core_first_run_commands() -> None:
 
 def test_first_run_connection_messages_are_cortana_prefixed() -> None:
     source = inspect.getsource(main_module.initialize_ai)
-    assert "Cortana:" in source
+    assert "user_facing_settings_error" in source
     main_source = inspect.getsource(main_module.main)
-    # The configured-connection print is the first thing a user sees after .env works.
-    assert 'print("Cortana:' in main_source or "Cortana:" in main_source.split("configured")[0]
+    assert "format_startup_banner" in main_source
 
 
 def test_missing_and_blank_api_key_are_clear(

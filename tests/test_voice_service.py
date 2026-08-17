@@ -14,6 +14,7 @@ from src.voice_service import (
     VoiceService,
     VoiceServiceError,
     VoiceServiceValidationError,
+    canonicalize_wav_bytes,
 )
 
 
@@ -121,12 +122,53 @@ def test_transcribe_maps_provider_errors() -> None:
         service.transcribe(_audio())
 
 
+def _streamed_wav(pcm: bytes = b"\x00\x00" * 24) -> bytes:
+    valid = pcm_to_wav_bytes(pcm)
+    header = bytearray(valid[:44])
+    header[4:8] = (0xFFFFFFFF).to_bytes(4, "little")
+    header[40:44] = (0xFFFFFFFF).to_bytes(4, "little")
+    return bytes(header) + valid[44:]
+
+
+def test_canonicalize_wav_repairs_streamed_sizes() -> None:
+    pcm = b"\x01\x00" * 48
+    streamed = _streamed_wav(pcm)
+    assert int.from_bytes(streamed[4:8], "little") == 0xFFFFFFFF
+    assert int.from_bytes(streamed[40:44], "little") == 0xFFFFFFFF
+    repaired = canonicalize_wav_bytes(streamed)
+    assert repaired[:4] == b"RIFF"
+    assert repaired[8:12] == b"WAVE"
+    assert int.from_bytes(repaired[4:8], "little") == len(repaired) - 8
+    assert int.from_bytes(repaired[40:44], "little") == len(pcm)
+    assert repaired[44:] == pcm
+
+
+def test_canonicalize_wav_leaves_valid_and_short_buffers() -> None:
+    valid = pcm_to_wav_bytes(b"\x00\x00" * 16)
+    assert canonicalize_wav_bytes(valid) == valid
+    short = b"RIFF....WAVEfmt "
+    assert canonicalize_wav_bytes(short) == short
+    assert canonicalize_wav_bytes(b"not-a-wav-file-at-all!!!!") == (
+        b"not-a-wav-file-at-all!!!!"
+    )
+
+
 def test_synthesize_returns_wav_bytes() -> None:
     audio_api = _FakeAudio()
     service = VoiceService(settings=_settings(), client=_FakeClient(audio_api))
     content = service.synthesize("Hello from Cortana.")
     assert content == audio_api.speech_bytes
     assert audio_api.last_speech_input == "Hello from Cortana."
+
+
+def test_synthesize_repairs_streamed_provider_wav() -> None:
+    audio_api = _FakeAudio()
+    audio_api.speech_bytes = _streamed_wav(b"\x02\x00" * 32)
+    service = VoiceService(settings=_settings(), client=_FakeClient(audio_api))
+    content = service.synthesize("Hello from Cortana.")
+    assert int.from_bytes(content[4:8], "little") == len(content) - 8
+    assert int.from_bytes(content[40:44], "little") == 64
+    assert content[44:] == b"\x02\x00" * 32
 
 
 def test_synthesize_rejects_oversized_without_truncation() -> None:

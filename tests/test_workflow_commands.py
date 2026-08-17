@@ -364,8 +364,8 @@ def test_partial_workflow_injection_uses_all_or_nothing_consistent_services(
 def test_help_about_status_include_workflow(tmp_path: Path) -> None:
     assert "/playbooks" in HELP_TEXT
     assert "/playbook-run" in HELP_TEXT
-    assert "playbook" in ABOUT_TEXT.lower()
-    assert "incident linkage" in ABOUT_TEXT.lower() or "durable workflow" in ABOUT_TEXT.lower()
+    assert "workflow" in ABOUT_TEXT.lower()
+    assert "controlled defensive" in ABOUT_TEXT.lower()
 
     services = _services(tmp_path)
     _result, repo, runs, _services_out = _run(

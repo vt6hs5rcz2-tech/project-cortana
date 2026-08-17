@@ -48,6 +48,17 @@ from src.workflow_registry import WorkflowRegistry
 from src.workflow_repository import WorkflowRunRepository
 
 BLANK_INPUT_MESSAGE = "Cortana: Please enter a message."
+THINKING_MESSAGE = "Cortana: Thinking..."
+AI_AUTH_FAILURE = (
+    "Cortana: The API key was rejected. Check OPENAI_API_KEY in your .env file."
+)
+AI_NETWORK_FAILURE = (
+    "Cortana: I couldn't reach the AI service. Check your connection and try again."
+)
+AI_TEMPORARY_FAILURE = (
+    "Cortana: The AI service is temporarily unavailable. Try again shortly."
+)
+AI_GENERIC_FAILURE = "Cortana: I couldn't complete that request."
 
 
 def default_voice_stop_signal() -> bool:
@@ -74,6 +85,30 @@ def read_session_input(input_reader: Callable[[], str]) -> str | None:
         return None
 
 
+def classify_ai_failure(error: BaseException) -> str:
+    """Map a model failure to a bounded user-facing message.
+
+    Classification uses exception type and status_code only. Provider
+    message text is never shown.
+    """
+    status = getattr(error, "status_code", None)
+    name = type(error).__name__.lower()
+
+    if status in {401, 403} or "auth" in name or "permission" in name:
+        return AI_AUTH_FAILURE
+    if status == 429 or "ratelimit" in name:
+        return AI_TEMPORARY_FAILURE
+    if isinstance(status, int) and status >= 500:
+        return AI_TEMPORARY_FAILURE
+    if "internalserver" in name:
+        return AI_TEMPORARY_FAILURE
+    if isinstance(error, (ConnectionError, TimeoutError)):
+        return AI_NETWORK_FAILURE
+    if "apiconnection" in name or "timeout" in name or "connection" in name:
+        return AI_NETWORK_FAILURE
+    return AI_GENERIC_FAILURE
+
+
 def process_conversation_turn(
     *,
     client: OpenAIClient,
@@ -85,6 +120,7 @@ def process_conversation_turn(
     conversation_state: ConversationState | None = None,
     conversation_intelligence: ConversationIntelligence | None = None,
     interaction_mode: InteractionMode = "text",
+    classified_failure: list[str] | None = None,
 ) -> str | None:
     """Generate one ordinary conversational answer without printing it.
 
@@ -144,6 +180,8 @@ def process_conversation_turn(
             "The OpenAI request failed with error type: %s",
             type(error).__name__,
         )
+        if classified_failure is not None:
+            classified_failure.append(classify_ai_failure(error))
         return None
 
     if conversation_history is not None:
@@ -174,6 +212,11 @@ def handle_message(
     conversation_intelligence: ConversationIntelligence | None = None,
 ) -> None:
     """Generate and display one Cortana response."""
+    if len(user_message.strip()) > MAX_CONVERSATION_MESSAGE_CHARS:
+        print(MESSAGE_TOO_LONG)
+        return
+    print(THINKING_MESSAGE)
+    failures: list[str] = []
     answer = process_conversation_turn(
         client=client,
         settings=settings,
@@ -183,9 +226,10 @@ def handle_message(
         active_memory_context=active_memory_context,
         conversation_state=conversation_state,
         conversation_intelligence=conversation_intelligence,
+        classified_failure=failures,
     )
     if answer is None:
-        print("Cortana: I could not complete that request.")
+        print(failures[0] if failures else AI_GENERIC_FAILURE)
         return
     if answer == MESSAGE_TOO_LONG:
         print(MESSAGE_TOO_LONG)

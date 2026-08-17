@@ -5,6 +5,7 @@ from src.config import (
     ALLOWED_DOCUMENT_EXTENSIONS,
     APP_NAME,
     APP_DATA_DIR_NAME,
+    product_display_name,
     CHUNK_OVERLAP,
     DATA_DIR,
     DOCS_DIR,
@@ -106,6 +107,8 @@ from src.config import (
     REALTIME_VOICE_FRAME_BYTES,
     REALTIME_VOICE_FRAME_MS,
     REALTIME_VOICE_INPUT_QUEUE_FRAMES,
+    MAX_PENDING_REALTIME_AUDIO_SECONDS,
+    REALTIME_VOICE_OUTPUT_QUEUE_BYTES,
     REALTIME_VOICE_OUTPUT_QUEUE_FRAMES,
     MAX_REALTIME_VOICE_SESSION_MINUTES,
     DEFAULT_REALTIME_MODEL,
@@ -172,7 +175,8 @@ def test_expected_directories_are_under_project_root() -> None:
 
 def test_application_metadata() -> None:
     assert APP_NAME == "Project Cortana"
-    assert VERSION == "0.1.0"
+    assert VERSION == "1.0.0-pilot"
+    assert product_display_name() == f"Cortana {VERSION}"
 
 
 def test_history_persistence_capability_is_disabled() -> None:
@@ -230,6 +234,7 @@ def test_study_partner_limits_and_capabilities_are_centralized(
     assert STUDY_REPOSITORY_FILENAME == "study_state.json"
     assert MAX_STUDY_DOCUMENTS == 5
     assert MAX_STORED_STUDY_SESSIONS == 50
+    monkeypatch.delenv("CORTANA_DATA_DIR", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Example\AppData\Local")
     path = get_default_study_repository_file_path()
     assert path.name == STUDY_REPOSITORY_FILENAME
@@ -273,7 +278,14 @@ def test_realtime_voice_limits_and_capabilities_are_centralized() -> None:
     assert REALTIME_VOICE_FRAME_MS == 20
     assert REALTIME_VOICE_FRAME_BYTES == 960
     assert REALTIME_VOICE_INPUT_QUEUE_FRAMES == 50
-    assert REALTIME_VOICE_OUTPUT_QUEUE_FRAMES == 100
+    assert MAX_PENDING_REALTIME_AUDIO_SECONDS == 20
+    assert REALTIME_VOICE_OUTPUT_QUEUE_FRAMES == 1_000
+    assert REALTIME_VOICE_OUTPUT_QUEUE_BYTES == 960_000
+    assert REALTIME_VOICE_OUTPUT_QUEUE_BYTES == (
+        MAX_PENDING_REALTIME_AUDIO_SECONDS
+        * REALTIME_VOICE_SAMPLE_RATE_HZ
+        * 2
+    )
     assert MAX_REALTIME_VOICE_SESSION_MINUTES == 20
     assert DEFAULT_REALTIME_MODEL == "gpt-realtime-mini"
 
@@ -385,6 +397,7 @@ def test_default_memory_path_is_outside_project_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Default memory storage should use a user-local application data path."""
+    monkeypatch.delenv("CORTANA_DATA_DIR", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Example\AppData\Local")
 
     path = get_default_memory_file_path()
@@ -400,6 +413,7 @@ def test_default_document_vault_path_is_outside_project_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Default Knowledge Vault storage should use a user-local application data path."""
+    monkeypatch.delenv("CORTANA_DATA_DIR", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Example\AppData\Local")
 
     path = get_default_document_vault_file_path()
@@ -415,6 +429,7 @@ def test_default_incident_repository_path_is_outside_project_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Default incident repository storage should use a user-local application data path."""
+    monkeypatch.delenv("CORTANA_DATA_DIR", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Example\AppData\Local")
 
     path = get_default_incident_repository_file_path()
@@ -430,6 +445,7 @@ def test_default_evidence_store_path_is_outside_project_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Default evidence store directory should use a user-local application data path."""
+    monkeypatch.delenv("CORTANA_DATA_DIR", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Example\AppData\Local")
 
     path = get_default_evidence_store_dir_path()
@@ -459,6 +475,7 @@ def test_default_tool_control_repository_path_is_outside_project_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Default tool-control repository storage should use a user-local path."""
+    monkeypatch.delenv("CORTANA_DATA_DIR", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Example\AppData\Local")
 
     path = get_default_tool_control_repository_file_path()
@@ -496,6 +513,7 @@ def test_default_workflow_repository_path_is_outside_project_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Default workflow repository storage should use a user-local path."""
+    monkeypatch.delenv("CORTANA_DATA_DIR", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\Example\AppData\Local")
 
     path = get_default_workflow_repository_file_path()

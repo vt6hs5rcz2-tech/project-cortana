@@ -8,9 +8,9 @@ EXIT_COMMANDS = frozenset({"exit", "quit", "goodbye"})
 DEFAULT_MAX_COMPLETED_TURNS = 20
 
 STARTUP_GREETING = (
-    "Cortana: Hello. I am Cortana, your cybersecurity assistant. "
-    "Type /help to see available commands. "
-    "Type your message, or say exit, quit, or goodbye to end the session."
+    "Cortana: Ready. I can help with conversation, memory, documents, study, "
+    "reminders, voice, and controlled operational tasks. "
+    "Type /help for the basics."
 )
 
 SHUTDOWN_MESSAGE = "Cortana: Goodbye. Stay secure."

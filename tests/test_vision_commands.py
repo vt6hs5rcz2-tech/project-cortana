@@ -182,7 +182,7 @@ def test_help_and_status_include_vision(tmp_path: Path) -> None:
     assert "/vision-ask" in help_result.message
     assert "/vision-info" in help_result.message
 
-    status_result, _, _ = _run("/status", tmp_path=tmp_path)
+    status_result, _, _ = _run("/status verbose", tmp_path=tmp_path)
     assert status_result.message is not None
     assert "Visual analysis: enabled" in status_result.message
 

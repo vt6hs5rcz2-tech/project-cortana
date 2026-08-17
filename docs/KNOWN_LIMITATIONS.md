@@ -7,8 +7,9 @@ These are accepted product limits, not unfinished Batch 1–6 defects.
   `response.created` through trusted client-generated metadata
   (`cortana_user_item_id`, `cortana_generation`). Missing, malformed, or
   unknown metadata fails closed: the response is tombstoned and is never
-  FIFO-bound. Metadata echo is supported by the installed SDK/schema; live
-  production API echo is not yet measured. If the provider omits metadata,
+  FIFO-bound. Metadata echo is supported by the installed SDK/schema. The
+  live M30 metadata gate measured exact production echo
+  (`Realtime metadata gate: PASS`). If the provider omits metadata,
   Cortana rejects that response rather than guessing.
 - **M26 response correlation:** `/multimodal-realtime` still uses
   client-created responses without metadata correlation and retains its own

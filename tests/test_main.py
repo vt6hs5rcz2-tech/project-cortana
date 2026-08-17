@@ -59,13 +59,10 @@ def test_initialize_ai_handles_missing_api_key(
     output = capsys.readouterr().out
 
     assert result is None
-    assert "Cortana: Not connected to OpenAI yet" in output
-    assert "Add your API key to the private .env file." in output
+    assert "Cortana: OPENAI_API_KEY is missing. Add it to your .env file." in output
     assert not output.startswith("Cortana: Cortana:")
     assert "Traceback" not in output
-    assert logger.error_messages == [
-        "OPENAI_API_KEY is missing. Add it to the private .env file."
-    ]
+    assert logger.error_messages == ["Configuration error: ValueError"]
 
 
 def test_initialize_ai_returns_settings_and_client(
@@ -110,15 +107,9 @@ def test_initialize_ai_returns_settings_and_client(
 def test_startup_user_messages_use_cortana_prefix() -> None:
     """Boot and config status lines use the standard Cortana: prefix."""
     assert main_module.AI_NOT_CONNECTED_MESSAGE.startswith("Cortana:")
-    assert main_module.AI_CONNECTION_CONFIGURED_MESSAGE.startswith("Cortana:")
     assert not main_module.AI_NOT_CONNECTED_MESSAGE.startswith("Cortana: Cortana:")
-    assert not main_module.AI_CONNECTION_CONFIGURED_MESSAGE.startswith(
-        "Cortana: Cortana:"
-    )
-    assert "Add your API key to the private .env file." in (
-        main_module.AI_NOT_CONNECTED_MESSAGE
-    )
+    assert "OPENAI_API_KEY is missing" in main_module.AI_NOT_CONNECTED_MESSAGE
     init_source = inspect.getsource(main_module.initialize_ai)
     main_source = inspect.getsource(main_module.main)
-    assert "Cortana:" in init_source
-    assert 'print("Cortana:' in main_source
+    assert "user_facing_settings_error" in init_source
+    assert "format_startup_banner" in main_source

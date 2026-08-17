@@ -27,7 +27,7 @@ def _settings() -> Settings:
 
 def test_full_startup_greeting_and_help_are_understandable(tmp_path: Path) -> None:
     assert STARTUP_GREETING.startswith("Cortana:")
-    assert "cybersecurity" in STARTUP_GREETING.casefold()
+    assert "ready" in STARTUP_GREETING.casefold()
     assert "/help" in HELP_TEXT or "help" in HELP_TEXT.casefold()
     assert "Cortana" in ABOUT_TEXT
     status = format_status(
