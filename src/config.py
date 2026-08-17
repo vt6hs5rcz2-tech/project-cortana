@@ -231,6 +231,12 @@ ALLOWED_REALTIME_VOICES = frozenset(
 )
 DEFAULT_REALTIME_MODEL = "gpt-realtime-mini"
 DEFAULT_REALTIME_VOICE = "coral"
+# Idle timeout is time since last accepted meaningful user interaction.
+# Rejected noise/self-echo does not reset it. Optional env override is clamped.
+REALTIME_IDLE_TIMEOUT_SECONDS = 10.0
+MIN_REALTIME_IDLE_TIMEOUT_SECONDS = 5.0
+MAX_REALTIME_IDLE_TIMEOUT_SECONDS = 300.0
+REALTIME_IDLE_TIMEOUT_ENV = "CORTANA_REALTIME_IDLE_TIMEOUT_SECONDS"
 
 # Realtime Multimodal Perception (Milestone 26)
 # Explicit /multimodal-realtime: realtime voice + bounded live camera snapshots.
@@ -654,6 +660,35 @@ def get_default_calendar_repository_file_path() -> Path:
 def get_default_study_repository_file_path() -> Path:
     """Return the default user-local path for the Study Partner JSON file."""
     return get_app_data_dir() / STUDY_REPOSITORY_FILENAME
+
+
+def bounded_realtime_idle_timeout_seconds(value: object) -> float:
+    """Normalize the realtime idle timeout to configured bounds.
+
+    Non-numeric and non-finite values fall back to the default. Finite values
+    outside the min/max range are clamped. This timeout is time since the last
+    accepted meaningful user interaction, not microphone sound or VAD.
+    """
+    default = REALTIME_IDLE_TIMEOUT_SECONDS
+    try:
+        seconds = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    if seconds != seconds or seconds in {float("inf"), float("-inf")}:
+        return default
+    if seconds < MIN_REALTIME_IDLE_TIMEOUT_SECONDS:
+        return MIN_REALTIME_IDLE_TIMEOUT_SECONDS
+    if seconds > MAX_REALTIME_IDLE_TIMEOUT_SECONDS:
+        return MAX_REALTIME_IDLE_TIMEOUT_SECONDS
+    return seconds
+
+
+def get_realtime_idle_timeout_seconds() -> float:
+    """Return the idle timeout, honoring an optional bounded env override."""
+    raw = os.environ.get(REALTIME_IDLE_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return REALTIME_IDLE_TIMEOUT_SECONDS
+    return bounded_realtime_idle_timeout_seconds(raw)
 
 
 def bounded_realtime_multimodal_transcript_wait_seconds(value: object) -> float:

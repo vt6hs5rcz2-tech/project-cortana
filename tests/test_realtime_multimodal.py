@@ -29,6 +29,7 @@ from src.conversation_intelligence import ConversationIntelligence
 from src.conversation_state import ConversationState
 from src.realtime_conversation_plan import REALTIME_PLAN_BEGIN
 from src.speech_delivery import SPEECH_DELIVERY_BEGIN
+from src.realtime_idle import REALTIME_IDLE_TIMEOUT_MESSAGE
 from src.realtime_multimodal import (
     MULTIMODAL_CAMERA_START_FAILED,
     MULTIMODAL_CONVERSATION_INSTRUCTIONS,
@@ -383,6 +384,8 @@ def _run_session(
     transcript_wait_seconds: float | None = None,
     capture_frames: list[Any] | None = None,
     capture: Any | None = None,
+    monotonic_fn: Callable[[], float] | None = None,
+    sleep_fn: Callable[[float], None] | None = None,
 ) -> tuple[threading.Thread, RealtimeMultimodalSession, dict[str, str], list[str]]:
     FakePlaybackStream.instances.clear()
     lines = printed if printed is not None else []
@@ -441,6 +444,8 @@ def _run_session(
         print_fn=lines.append,
         conversation_state=conversation_state,
         transcript_wait_seconds=transcript_wait_seconds,
+        monotonic_fn=monotonic_fn or time.monotonic,
+        sleep_fn=sleep_fn or time.sleep,
     )
 
     # Patch open order tracking.
@@ -2601,3 +2606,140 @@ def test_legitimate_its_turns_are_not_suppressed() -> None:
     assert _created_visual_images(connection) == []
     session.request_stop(error_type="cancelled")
     thread.join(timeout=5)
+
+
+class _FakeClock:
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.t = start
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+def _yield_sleep(_seconds: float) -> None:
+    time.sleep(0.001)
+
+
+def test_multimodal_rejected_noise_does_not_upload_or_reset_idle() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    clock = _FakeClock()
+    thread, session, result_box, printed = _run_session(
+        connection,
+        history,
+        monotonic_fn=clock,
+        sleep_fn=_yield_sleep,
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    creates_before = connection.response.response_creates
+    clock.advance(9.0)
+    for item_id, transcript in (
+        ("u_empty", ""),
+        ("u_space", "   "),
+        ("u_punct", "..."),
+        ("u_its", "It's..."),
+    ):
+        session._on_user_transcript(
+            FakeEvent(
+                type="conversation.item.input_audio_transcription.completed",
+                item_id=item_id,
+                transcript=transcript,
+            )
+        )
+    time.sleep(0.2)
+    assert connection.response.response_creates == creates_before
+    assert _created_visual_images(connection) == []
+    assert not any("Heard" in line for line in printed)
+    clock.advance(1.1)
+    thread.join(timeout=5)
+    assert result_box["message"] == REALTIME_IDLE_TIMEOUT_MESSAGE
+
+
+def test_multimodal_visual_question_resets_idle_and_inserts_image() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    clock = _FakeClock()
+    thread, session, result_box, _printed = _run_session(
+        connection,
+        history,
+        monotonic_fn=clock,
+        sleep_fn=_yield_sleep,
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_hold", "What am I holding?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    assert len(_created_visual_images(connection)) == 1
+    clock.advance(9.0)
+    time.sleep(0.05)
+    assert session._stop.is_set() is False
+    clock.advance(1.1)
+    thread.join(timeout=5)
+    assert result_box["message"] == REALTIME_IDLE_TIMEOUT_MESSAGE
+
+
+def test_multimodal_idle_timeout_stops_camera_and_clears_visual_state() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    state = ConversationState()
+    clock = _FakeClock()
+    thread, session, result_box, _printed = _run_session(
+        connection,
+        history,
+        conversation_state=state,
+        monotonic_fn=clock,
+        sleep_fn=_yield_sleep,
+    )
+    assert _wait_until(lambda: session.microphone_opened)
+    _drive_visual_turn(connection, "u_hold", "What am I holding?")
+    assert _wait_until(lambda: connection.response.response_creates == 1, timeout=5)
+    cleanup_calls = {"n": 0}
+    original_cleanup = session._cleanup
+
+    def tracked_cleanup() -> None:
+        cleanup_calls["n"] += 1
+        original_cleanup()
+
+    session._cleanup = tracked_cleanup  # type: ignore[method-assign]
+    clock.advance(10.1)
+    thread.join(timeout=5)
+    assert result_box["message"] == REALTIME_IDLE_TIMEOUT_MESSAGE
+    assert cleanup_calls["n"] == 1
+    assert connection.closed is True
+    assert session._camera is None
+    assert session._visual_turns == {}
+    assert state.visual_context_ref_id is None
+    assert session.state.value == "closed"
+
+
+def test_multimodal_restart_after_idle_timeout() -> None:
+    clock = _FakeClock()
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, _session, result_box, _printed = _run_session(
+        connection,
+        history,
+        monotonic_fn=clock,
+        sleep_fn=_yield_sleep,
+    )
+    assert _wait_until(lambda: _session.microphone_opened)
+    clock.advance(10.1)
+    thread.join(timeout=5)
+    assert result_box["message"] == REALTIME_IDLE_TIMEOUT_MESSAGE
+
+    connection2 = FakeConnection()
+    thread2, session2, result_box2, _printed2 = _run_session(
+        connection2,
+        history,
+        monotonic_fn=clock,
+        sleep_fn=_yield_sleep,
+    )
+    assert _wait_until(lambda: session2.microphone_opened)
+    _drive_visual_turn(connection2, "u_hold", "What am I holding?")
+    assert _wait_until(lambda: connection2.response.response_creates == 1, timeout=5)
+    assert len(_created_visual_images(connection2)) == 1
+    session2.request_stop(error_type="cancelled")
+    thread2.join(timeout=5)
+    assert result_box2["message"] == MULTIMODAL_STOPPED_MESSAGE

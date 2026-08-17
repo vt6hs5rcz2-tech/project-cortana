@@ -111,6 +111,11 @@ from src.config import (
     REALTIME_VOICE_OUTPUT_QUEUE_BYTES,
     REALTIME_VOICE_OUTPUT_QUEUE_FRAMES,
     MAX_REALTIME_VOICE_SESSION_MINUTES,
+    REALTIME_IDLE_TIMEOUT_SECONDS,
+    MIN_REALTIME_IDLE_TIMEOUT_SECONDS,
+    MAX_REALTIME_IDLE_TIMEOUT_SECONDS,
+    bounded_realtime_idle_timeout_seconds,
+    get_realtime_idle_timeout_seconds,
     DEFAULT_REALTIME_MODEL,
     MAX_REALTIME_VISUAL_WIDTH,
     MAX_REALTIME_VISUAL_HEIGHT,
@@ -287,7 +292,34 @@ def test_realtime_voice_limits_and_capabilities_are_centralized() -> None:
         * 2
     )
     assert MAX_REALTIME_VOICE_SESSION_MINUTES == 20
+    assert REALTIME_IDLE_TIMEOUT_SECONDS == 10.0
+    assert MIN_REALTIME_IDLE_TIMEOUT_SECONDS == 5.0
+    assert MAX_REALTIME_IDLE_TIMEOUT_SECONDS == 300.0
     assert DEFAULT_REALTIME_MODEL == "gpt-realtime-mini"
+
+
+def test_realtime_idle_timeout_seconds_are_normalized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert bounded_realtime_idle_timeout_seconds(10.0) == 10.0
+    assert (
+        bounded_realtime_idle_timeout_seconds(4.0)
+        == MIN_REALTIME_IDLE_TIMEOUT_SECONDS
+    )
+    assert (
+        bounded_realtime_idle_timeout_seconds(400.0)
+        == MAX_REALTIME_IDLE_TIMEOUT_SECONDS
+    )
+    assert (
+        bounded_realtime_idle_timeout_seconds("nope")
+        == REALTIME_IDLE_TIMEOUT_SECONDS
+    )
+    monkeypatch.delenv("CORTANA_REALTIME_IDLE_TIMEOUT_SECONDS", raising=False)
+    assert get_realtime_idle_timeout_seconds() == 10.0
+    monkeypatch.setenv("CORTANA_REALTIME_IDLE_TIMEOUT_SECONDS", "25")
+    assert get_realtime_idle_timeout_seconds() == 25.0
+    monkeypatch.setenv("CORTANA_REALTIME_IDLE_TIMEOUT_SECONDS", "1")
+    assert get_realtime_idle_timeout_seconds() == MIN_REALTIME_IDLE_TIMEOUT_SECONDS
 
 
 def test_realtime_multimodal_limits_and_capabilities_are_centralized() -> None:

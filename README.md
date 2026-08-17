@@ -325,7 +325,7 @@ Milestone 25 adds an explicitly activated realtime spoken conversation session w
 
 Commands:
 
-- `/voice-realtime` — start one bounded realtime session; ordinary CLI input is paused until Ctrl+C or session end
+- `/voice-realtime` — start one bounded realtime session; ordinary CLI input is paused until Ctrl+C, 10-second idle timeout, or session end
 - `/voice-status` — also reports realtime gate/model/voice configuration (never opens the microphone)
 - `/voice-turn` remains the simple push-to-talk fallback
 
@@ -1228,8 +1228,8 @@ Centralized defaults:
 | `/vision-ask <path> \| <question>` | Ask a question about one authorized local image |
 | `/vision-info <path>` | Validate/normalize one authorized local image without calling the AI |
 | `/voice-turn` | Capture one spoken utterance and hear Cortana's ordinary conversational reply |
-| `/voice-realtime` | Start an explicit realtime spoken conversation with barge-in; Ctrl+C returns to text mode |
-| `/multimodal-realtime` | Start realtime voice with bounded live camera context; Ctrl+C returns to text mode |
+| `/voice-realtime` | Start an explicit realtime spoken conversation with barge-in; Ctrl+C or 10s idle returns to text mode |
+| `/multimodal-realtime` | Start realtime voice with bounded live camera context; Ctrl+C or 10s idle returns to text mode |
 | `/voice-status` | Show safe voice/realtime/multimodal configuration without opening the microphone or camera |
 | `/event-new <severity> \| <title> \| <description>` | Record one local security event |
 | `/events` | List saved security events |
@@ -1298,8 +1298,8 @@ Notes:
 - Vision commands do not write into ordinary conversation history, do not inject active memory, and do not persist image bytes.
 - `/vision-info` never calls the AI service.
 - `/voice-turn` is sequential push-to-talk: capture → STT → ordinary chat → TTS → synchronous playback. It does not open the microphone at startup and does not listen in the background.
-- `/voice-realtime` opens one bounded Realtime API session with server VAD and barge-in. Ordinary CLI input is paused until Ctrl+C or session end. It does not auto-start, auto-reconnect, or grant spoken operational authority.
-- `/multimodal-realtime` opens one bounded Realtime API session with microphone + default camera. Local capture is ~2 FPS into a capacity-1 latest-frame buffer; at most one current image may be sent per user turn. It does not auto-start, archive frames, perform face recognition/lip-reading, or grant voice+vision operational authority.
+- `/voice-realtime` opens one bounded Realtime API session with server VAD and barge-in. Ordinary CLI input is paused until Ctrl+C, idle timeout, or session end. It auto-stops after 10 seconds without a meaningful accepted user turn. Obvious empty, punctuation-only, accidental, and conservative self-echo audio is filtered and does not keep the session alive. This is not full acoustic echo cancellation; loud or clear background speech may still be treated as the user. It does not auto-start, auto-reconnect, or grant spoken operational authority.
+- `/multimodal-realtime` opens one bounded Realtime API session with microphone + default camera. Local capture is ~2 FPS into a capacity-1 latest-frame buffer; at most one current image may be sent per user turn. It auto-stops after 10 seconds without a meaningful accepted user turn and uses the same conservative accidental/self-echo filter as `/voice-realtime`. Rejected noise turns do not upload a camera frame. This is not full acoustic echo cancellation or speaker identification. It does not auto-start, archive frames, perform face recognition/lip-reading, or grant voice+vision operational authority.
 - While "Listening..." is shown, pressing Enter ends recording; avoid typing the next command until recording has stopped. Anything typed while "Listening..." is shown is discarded and is not queued for the next command.
 - Spoken transcripts enter ordinary conversation history after a successful chat response, but they do not execute slash commands or Milestone 18 natural-language actions in this milestone.
 - `/voice-status` never opens the microphone and never calls the AI service.
@@ -1339,6 +1339,7 @@ These are accepted product limits, not unfinished Batch 1–6 defects:
 - **Provider-side delete:** Realtime `conversation.item.delete` and calendar/keyring revocation remain best-effort.
 - **Extreme speech:** very long or adversarial spoken input is bounded and fail-open to the existing response path; it is not a complete abuse-resistant speech stack.
 - **Duplicate memories/reminders:** explicit user commands may create another memory or reminder with the same text. Duplicate IDs in a memory file fail closed on load. There is no silent merge of same-text records.
+- **Realtime idle / background audio:** `/voice-realtime` and `/multimodal-realtime` auto-stop after 10 seconds without a meaningful accepted user turn. Obvious empty, punctuation-only, accidental, and conservative self-echo audio is filtered. This is not full acoustic echo cancellation and not speaker identification. Loud or clear background speech, including a TV, may still be interpreted as the user.
 - **DST:** nonexistent and ambiguous local wall times are rejected for reminders and calendar events. Recurring expansions skip DST-invalid local days. This is current behavior, not a limitation to “silently fold.”
 
 ## Running tests

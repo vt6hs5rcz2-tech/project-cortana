@@ -28,6 +28,13 @@ from src.camera_capture import (
     RealtimeVisualFrame,
     realtime_multimodal_features_enabled,
 )
+from src.accidental_realtime_turn import (
+    RecentAssistantSpeechBuffer,
+    RealtimeTurnRejectReason,
+    classify_realtime_user_transcript,
+    is_accidental_playback_turn,
+    is_incomplete_copula_fragment,
+)
 from src.config import (
     MAX_CANCELLED_REALTIME_RESPONSE_IDS,
     MAX_REALTIME_VOICE_SESSION_MINUTES,
@@ -46,6 +53,7 @@ from src.config import (
     REALTIME_VOICE_SAMPLE_WIDTH_BYTES,
     bounded_realtime_multimodal_transcript_wait_seconds,
     bounded_realtime_multimodal_visual_ack_wait_seconds,
+    get_realtime_idle_timeout_seconds,
 )
 from src.conversation import ConversationHistory
 from src.conversation_intelligence import (
@@ -53,10 +61,6 @@ from src.conversation_intelligence import (
     append_style_policy,
     authorize_visual_context,
     is_visual_relevant_utterance,
-)
-from src.accidental_realtime_turn import (
-    is_accidental_playback_turn,
-    is_incomplete_copula_fragment,
 )
 from src.conversation_state import ConversationState
 from src.realtime_stop_command import is_explicit_stop_command
@@ -68,6 +72,10 @@ from src.realtime_conversation_plan import (
     format_realtime_plan_instructions,
     safe_plan_realtime_turn,
     speech_delivery_plan_from_realtime,
+)
+from src.realtime_idle import (
+    REALTIME_IDLE_TIMEOUT_MESSAGE,
+    RealtimeIdleWatch,
 )
 from src.speech_delivery import (
     SpeechDeliveryState,
@@ -405,6 +413,8 @@ class RealtimeMultimodalSession:
         self._interrupted_item_order: deque[str] = deque()
         self._stop_consumed_item_ids: set[str] = set()
         self._stop_consumed_order: deque[str] = deque()
+        self._rejected_item_ids: set[str] = set()
+        self._rejected_item_order: deque[str] = deque()
         self._assistant_audio_started_at: float | None = None
         self._playback_barge_age_by_item: dict[str, float] = {}
         self._playback_barge_order: deque[str] = deque()
@@ -436,6 +446,13 @@ class RealtimeMultimodalSession:
         self._print = print_fn
         self._monotonic = monotonic_fn
         self._sleep = sleep_fn
+        self._idle = RealtimeIdleWatch(
+            timeout_seconds=get_realtime_idle_timeout_seconds(),
+            monotonic_fn=self._monotonic,
+        )
+        self._recent_assistant = RecentAssistantSpeechBuffer()
+        self._assistant_playback_ended_at: float | None = None
+        self._idle_exit = False
 
         self._state = RealtimeSessionState.IDLE
         self._state_lock = threading.Lock()
@@ -517,6 +534,15 @@ class RealtimeMultimodalSession:
 
     def request_stop(self, *, error_type: str = "cancelled") -> None:
         """Signal the session to close (Ctrl+C / timeout / failure)."""
+        if error_type == "idle_timeout":
+            self._stop.set()
+            try:
+                self._outbound.put_nowait(
+                    MultimodalOutboundAction(kind=MultimodalOutboundKind.CLOSE_SESSION)
+                )
+            except Full:
+                pass
+            return
         if error_type != "cancelled":
             self._failure_type = error_type
             mapping = {
@@ -576,6 +602,7 @@ class RealtimeMultimodalSession:
         self._print(MULTIMODAL_STARTED_MESSAGE)
         try:
             while not self._stop.is_set():
+                self._maybe_request_idle_timeout()
                 if (
                     self._started_at
                     and self._monotonic() - self._started_at
@@ -591,11 +618,39 @@ class RealtimeMultimodalSession:
 
         if self._failed.is_set():
             return self._failure_message
+        if self._idle_exit:
+            return REALTIME_IDLE_TIMEOUT_MESSAGE
         return MULTIMODAL_STOPPED_MESSAGE
 
     def _set_state(self, state: RealtimeSessionState) -> None:
         with self._state_lock:
             self._state = state
+
+    def _maybe_request_idle_timeout(self) -> None:
+        if self._stop.is_set():
+            return
+        if not self._idle.consume_timeout():
+            return
+        self._idle_exit = True
+        self._logger.info("Realtime idle timeout")
+        self.request_stop(error_type="idle_timeout")
+
+    def _mark_meaningful_user_activity(self) -> None:
+        self._idle.mark_meaningful_user_activity()
+
+    def _seconds_since_playback_end(self) -> float | None:
+        ended_at = self._assistant_playback_ended_at
+        if ended_at is None:
+            return None
+        return max(0.0, self._monotonic() - ended_at)
+
+    def _note_assistant_playback_ended(self) -> None:
+        if (
+            self._assistant_audio_started_at is not None
+            or self._assistant_playback_ended_at is None
+        ):
+            self._assistant_playback_ended_at = self._monotonic()
+        self._assistant_audio_started_at = None
 
     def _start(self) -> None:
         self._set_state(RealtimeSessionState.CONNECTING)
@@ -635,6 +690,7 @@ class RealtimeMultimodalSession:
         self._microphone.start()
         self._microphone_opened = True
         self._started_at = self._monotonic()
+        self._idle.start()
         self._set_state(RealtimeSessionState.LISTENING)
         self._logger.info(
             "Multimodal session started local_session_id=%s",
@@ -768,6 +824,7 @@ class RealtimeMultimodalSession:
                 )
                 if event is not None:
                     self._handle_event(event)
+                self._maybe_request_idle_timeout()
                 self._expire_transcript_waits()
                 self._expire_pending_barge_waits()
                 self._expire_visual_ack_waits()
@@ -851,6 +908,8 @@ class RealtimeMultimodalSession:
             return
         if user_item_id in self._stop_consumed_item_ids:
             return
+        if user_item_id in self._rejected_item_ids:
+            return
         if self._is_pending_barge_item(user_item_id):
             return
         if self._stop.is_set() or not self._conversation_writes_allowed():
@@ -906,6 +965,8 @@ class RealtimeMultimodalSession:
         if not isinstance(user_item_id, str) or not user_item_id:
             return
         if user_item_id in self._stop_consumed_item_ids:
+            return
+        if user_item_id in self._rejected_item_ids:
             return
         if self._is_pending_barge_item(user_item_id):
             return
@@ -1017,6 +1078,8 @@ class RealtimeMultimodalSession:
             return
         self._assembler.set_current_user_item(item_id)
         if item_id in self._stop_consumed_item_ids:
+            return
+        if item_id in self._rejected_item_ids:
             return
         if item_id in self._visual_turns or item_id in self._completed_visual_item_ids:
             return
@@ -1197,6 +1260,18 @@ class RealtimeMultimodalSession:
         self._stop_consumed_order.append(item_id)
         self._stop_consumed_item_ids.add(item_id)
 
+    def _remember_rejected_item(self, item_id: str) -> None:
+        if item_id in self._rejected_item_ids:
+            return
+        if (
+            len(self._rejected_item_order) >= _MAX_INTERRUPTED_ITEM_IDS
+            and self._rejected_item_order
+        ):
+            oldest = self._rejected_item_order.popleft()
+            self._rejected_item_ids.discard(oldest)
+        self._rejected_item_order.append(item_id)
+        self._rejected_item_ids.add(item_id)
+
     def _clear_queued_playback(self) -> None:
         while True:
             try:
@@ -1214,6 +1289,7 @@ class RealtimeMultimodalSession:
             item_id,
         )
         self._remember_stop_consumed(item_id)
+        self._mark_meaningful_user_activity()
         cleaned = transcript.strip()
         if cleaned:
             self._print(f"Cortana: (Heard) {cleaned}")
@@ -1230,6 +1306,7 @@ class RealtimeMultimodalSession:
         self._responding = False
         self._active_response_id = None
         self._assistant_audio_started_at = None
+        self._note_assistant_playback_ended()
         self._expire_awaiting_visual_turn(item_id, allow_create=False)
         self._set_state(RealtimeSessionState.LISTENING)
         connection = self._connection
@@ -1242,6 +1319,23 @@ class RealtimeMultimodalSession:
                     "Multimodal stop cancel failed error_type=%s",
                     type(error).__name__,
                 )
+
+    def _reject_unmeaningful_turn(
+        self,
+        item_id: str,
+        reason: RealtimeTurnRejectReason,
+    ) -> None:
+        """Drop a rejected transcript without visual upload or idle reset."""
+        self._logger.info("Realtime turn rejected reason=%s", reason.value)
+        if reason is RealtimeTurnRejectReason.SELF_ECHO:
+            self._logger.info("Possible self echo suppressed")
+        self._remember_rejected_item(item_id)
+        turn = self._visual_turns.get(item_id)
+        if turn is not None:
+            self._mark_turn_stale(item_id)
+        self._clear_transcript_wait(item_id)
+        if self._pending_barge is not None:
+            self._recover_paused_response_after_false_barge(item_id)
 
     def _is_accidental_playback_turn(self, item_id: str, transcript: str) -> bool:
         if item_id in self._playback_barge_age_by_item:
@@ -1292,6 +1386,7 @@ class RealtimeMultimodalSession:
                     self._monotonic() - self._assistant_audio_started_at,
                 )
         self._assistant_audio_started_at = None
+        self._assistant_playback_ended_at = self._monotonic()
         self._note_interrupted_delivery(response_id)
         paused_user = self._response_to_user_item.get(response_id)
         self._playback_abort.set()
@@ -1515,28 +1610,41 @@ class RealtimeMultimodalSession:
         if not isinstance(item_id, str) or not isinstance(transcript, str):
             return
         cleaned = transcript.strip()
-        if not cleaned:
+        if is_explicit_stop_command(cleaned if cleaned else transcript):
+            self._consume_explicit_stop_command(
+                item_id, cleaned if cleaned else transcript
+            )
             return
-        if is_explicit_stop_command(cleaned):
-            self._consume_explicit_stop_command(item_id, cleaned)
+        now = self._monotonic()
+        barged = item_id in self._playback_barge_age_by_item or (
+            item_id in self._interrupted_item_ids
+        )
+        seconds_after_start = self._playback_barge_age_by_item.get(item_id)
+        if (
+            seconds_after_start is None
+            and self._assistant_audio_started_at is not None
+        ):
+            seconds_after_start = max(
+                0.0, now - self._assistant_audio_started_at
+            )
+        reason = classify_realtime_user_transcript(
+            transcript,
+            barged_during_playback=barged,
+            seconds_after_playback_start=seconds_after_start,
+            playback_active=self._assistant_audio_started_at is not None,
+            seconds_since_playback_end=self._seconds_since_playback_end(),
+            recent_assistant=self._recent_assistant.recent(now),
+        )
+        if reason is not None:
+            self._reject_unmeaningful_turn(item_id, reason)
             return
+        self._mark_meaningful_user_activity()
         turn = self._visual_turns.get(item_id)
         already_started = turn is not None and (
             turn.transcript_fallback
             or turn.response_create_sent
             or turn.prepare_enqueued
         )
-        if not already_started and self._is_accidental_playback_turn(item_id, cleaned):
-            self._logger.info(
-                "Multimodal accidental turn suppressed user_item_id=%s chars=%s",
-                item_id,
-                len(cleaned),
-            )
-            if turn is not None:
-                self._mark_turn_stale(item_id)
-            if self._pending_barge is not None:
-                self._recover_paused_response_after_false_barge(item_id)
-            return
         if self._is_pending_barge_item(item_id):
             self._commit_pending_barge_in(item_id)
         if turn is not None and not already_started:
@@ -1621,6 +1729,7 @@ class RealtimeMultimodalSession:
             return
         if self._assistant_audio_started_at is None:
             self._assistant_audio_started_at = self._monotonic()
+            self._assistant_playback_ended_at = None
         with self._playback_bytes_lock:
             if (
                 self._playback_bytes_queued + len(pcm)
@@ -1650,6 +1759,7 @@ class RealtimeMultimodalSession:
         cleaned = transcript.strip()
         if cleaned:
             self._print(f"Cortana: {cleaned}")
+            self._recent_assistant.remember(cleaned, now=self._monotonic())
         self._assembler.store_assistant_transcript(response_id, transcript)
 
     def _on_response_done(self, event: object) -> None:
@@ -1692,7 +1802,7 @@ class RealtimeMultimodalSession:
         if self._active_response_id == response_id:
             self._active_response_id = None
             self._responding = False
-            self._assistant_audio_started_at = None
+            self._note_assistant_playback_ended()
             self._set_state(RealtimeSessionState.LISTENING)
 
     def _observe_completed_turn(self, *, user_item_id: str | None) -> None:
@@ -1794,6 +1904,8 @@ class RealtimeMultimodalSession:
         ]
         for item_id in expired:
             self._transcript_deadlines.pop(item_id, None)
+            if item_id in self._rejected_item_ids:
+                continue
             if self._is_pending_barge_item(item_id):
                 self._recover_paused_response_after_false_barge(item_id)
                 continue
@@ -1823,6 +1935,7 @@ class RealtimeMultimodalSession:
         turn = self._visual_turns.get(item_id)
         if (
             item_id in self._stop_consumed_item_ids
+            or item_id in self._rejected_item_ids
             or self._is_pending_barge_item(item_id)
             or turn is None
             or turn.stale
@@ -2370,6 +2483,8 @@ class RealtimeMultimodalSession:
         self._interrupted_item_order.clear()
         self._stop_consumed_item_ids.clear()
         self._stop_consumed_order.clear()
+        self._rejected_item_ids.clear()
+        self._rejected_item_order.clear()
         self._assistant_audio_started_at = None
         self._playback_barge_age_by_item.clear()
         self._playback_barge_order.clear()
@@ -2390,6 +2505,9 @@ class RealtimeMultimodalSession:
         self._cancelled_response_ids.clear()
         self._playback_abort.clear()
         self._assembler.reset()
+        self._idle.clear()
+        self._recent_assistant.clear()
+        self._assistant_playback_ended_at = None
 
         if self._failed.is_set():
             self._set_state(RealtimeSessionState.FAILED)

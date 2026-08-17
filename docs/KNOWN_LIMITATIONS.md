@@ -35,6 +35,12 @@ These are accepted product limits, not unfinished Batch 1–6 defects.
 - **Duplicate memories/reminders:** explicit user commands may create
   another memory or reminder with the same text. Duplicate IDs in a memory
   file fail closed on load. There is no silent merge of same-text records.
+- **Realtime idle / background audio:** `/voice-realtime` and
+  `/multimodal-realtime` auto-stop after 10 seconds without a meaningful
+  accepted user turn. Obvious empty, punctuation-only, accidental, and
+  conservative self-echo audio is filtered. This is not full acoustic echo
+  cancellation and not speaker identification. Loud or clear background
+  speech, including a TV, may still be interpreted as the user.
 
 DST nonexistent and ambiguous local wall times are rejected. That former
 limitation is closed and is not listed above.

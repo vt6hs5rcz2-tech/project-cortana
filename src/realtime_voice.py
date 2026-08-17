@@ -19,6 +19,11 @@ from enum import Enum
 from queue import Empty, Full, Queue
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from src.accidental_realtime_turn import (
+    RecentAssistantSpeechBuffer,
+    RealtimeTurnRejectReason,
+    classify_realtime_user_transcript,
+)
 from src.active_memory import ActiveMemoryContext
 from src.config import (
     MAX_CANCELLED_REALTIME_RESPONSE_IDS,
@@ -32,6 +37,7 @@ from src.config import (
     REALTIME_VOICE_RECV_TIMEOUT_SECONDS,
     REALTIME_VOICE_SAMPLE_RATE_HZ,
     REALTIME_VOICE_SAMPLE_WIDTH_BYTES,
+    get_realtime_idle_timeout_seconds,
 )
 from src.conversation import ConversationHistory
 from src.conversation_intelligence import (
@@ -39,20 +45,24 @@ from src.conversation_intelligence import (
     append_style_policy,
 )
 from src.conversation_state import ConversationState
+from src.identity import CORTANA_SYSTEM_INSTRUCTIONS
+from src.memory_context import format_active_memory_context
 from src.realtime_conversation_plan import (
     RealtimeConversationPlan,
     format_realtime_plan_instructions,
     safe_plan_realtime_turn,
     speech_delivery_plan_from_realtime,
 )
+from src.realtime_idle import (
+    REALTIME_IDLE_TIMEOUT_MESSAGE,
+    RealtimeIdleWatch,
+)
+from src.realtime_stop_command import is_explicit_stop_command
 from src.speech_delivery import (
     SpeechDeliveryState,
     append_speech_delivery_policy,
     fingerprint_spoken_text,
 )
-from src.identity import CORTANA_SYSTEM_INSTRUCTIONS
-from src.memory_context import format_active_memory_context
-from src.realtime_stop_command import is_explicit_stop_command
 from src.realtime_voice_input import (
     REALTIME_INPUT_OVERFLOW,
     REALTIME_MICROPHONE_FAILED,
@@ -674,6 +684,8 @@ class RealtimeVoiceSession:
         self._interrupted_item_ids: set[str] = set()
         self._stop_consumed_item_ids: set[str] = set()
         self._stop_consumed_order: deque[str] = deque()
+        self._rejected_item_ids: set[str] = set()
+        self._rejected_item_order: deque[str] = deque()
         self._state_writes_closed = threading.Event()
         self._logger = logger_ or logger
         self._connect_factory = connect_factory
@@ -682,6 +694,14 @@ class RealtimeVoiceSession:
         self._print = print_fn
         self._monotonic = monotonic_fn
         self._sleep = sleep_fn
+        self._idle = RealtimeIdleWatch(
+            timeout_seconds=get_realtime_idle_timeout_seconds(),
+            monotonic_fn=self._monotonic,
+        )
+        self._recent_assistant = RecentAssistantSpeechBuffer()
+        self._assistant_playback_started_at: float | None = None
+        self._assistant_playback_ended_at: float | None = None
+        self._idle_exit = False
 
         self._state = RealtimeSessionState.IDLE
         self._state_lock = threading.Lock()
@@ -748,6 +768,15 @@ class RealtimeVoiceSession:
 
     def request_stop(self, *, error_type: str = "cancelled") -> None:
         """Signal the session to close (Ctrl+C / timeout / failure)."""
+        if error_type == "idle_timeout":
+            self._stop.set()
+            try:
+                self._outbound.put_nowait(
+                    OutboundAction(kind=OutboundActionKind.CLOSE_SESSION)
+                )
+            except Full:
+                pass
+            return
         if error_type != "cancelled":
             self._failure_type = error_type
             if error_type == "session_timeout":
@@ -804,6 +833,7 @@ class RealtimeVoiceSession:
         self._print(REALTIME_STARTED_MESSAGE)
         try:
             while not self._stop.is_set():
+                self._maybe_request_idle_timeout()
                 if (
                     self._started_at
                     and self._monotonic() - self._started_at
@@ -819,11 +849,43 @@ class RealtimeVoiceSession:
 
         if self._failed.is_set():
             return self._failure_message
+        if self._idle_exit:
+            return REALTIME_IDLE_TIMEOUT_MESSAGE
         return REALTIME_STOPPED_MESSAGE
 
     def _set_state(self, state: RealtimeSessionState) -> None:
         with self._state_lock:
             self._state = state
+
+    def _maybe_request_idle_timeout(self) -> None:
+        if self._stop.is_set():
+            return
+        if not self._idle.consume_timeout():
+            return
+        self._idle_exit = True
+        self._logger.info("Realtime idle timeout")
+        self.request_stop(error_type="idle_timeout")
+
+    def _mark_meaningful_user_activity(self) -> None:
+        self._idle.mark_meaningful_user_activity()
+
+    def _seconds_since_playback_end(self) -> float | None:
+        ended_at = self._assistant_playback_ended_at
+        if ended_at is None:
+            return None
+        return max(0.0, self._monotonic() - ended_at)
+
+    def _note_assistant_playback_started(self) -> None:
+        if self._assistant_playback_started_at is None:
+            self._assistant_playback_started_at = self._monotonic()
+            self._assistant_playback_ended_at = None
+
+    def _note_assistant_playback_ended(self) -> None:
+        if self._assistant_playback_started_at is not None:
+            self._assistant_playback_ended_at = self._monotonic()
+            self._assistant_playback_started_at = None
+        elif self._assistant_playback_ended_at is None:
+            self._assistant_playback_ended_at = self._monotonic()
 
     def _start(self) -> None:
         self._set_state(RealtimeSessionState.CONNECTING)
@@ -859,6 +921,7 @@ class RealtimeVoiceSession:
         self._microphone = self._make_microphone()
         self._microphone.start()
         self._started_at = self._monotonic()
+        self._idle.start()
         self._set_state(RealtimeSessionState.LISTENING)
         self._logger.info(
             "Realtime session started local_session_id=%s",
@@ -983,6 +1046,7 @@ class RealtimeVoiceSession:
                     connection,
                     timeout=REALTIME_VOICE_RECV_TIMEOUT_SECONDS,
                 )
+                self._maybe_request_idle_timeout()
                 if event is None:
                     continue
                 self._handle_event(event)
@@ -1237,7 +1301,10 @@ class RealtimeVoiceSession:
             return
         if (
             record.user_item_id is not None
-            and record.user_item_id in self._stop_consumed_item_ids
+            and (
+                record.user_item_id in self._stop_consumed_item_ids
+                or record.user_item_id in self._rejected_item_ids
+            )
         ):
             record.invalidated = True
             return
@@ -1287,6 +1354,8 @@ class RealtimeVoiceSession:
             return
         if user_item_id in self._stop_consumed_item_ids:
             return
+        if user_item_id in self._rejected_item_ids:
+            return
         self._assembler.set_current_user_item(user_item_id)
         existing = self._generation_for_user_item(user_item_id)
         if (
@@ -1317,6 +1386,7 @@ class RealtimeVoiceSession:
             self._raise_playback_abort()
             self._abort_playback_stream_now()
             self._discard_playback_for_response(response_id)
+            self._note_assistant_playback_ended()
             claimed_gen = self._claimed_response_ids.get(response_id)
             self._invalidate_generation(claimed_gen)
             self._responding = False
@@ -1349,6 +1419,18 @@ class RealtimeVoiceSession:
         self._stop_consumed_order.append(item_id)
         self._stop_consumed_item_ids.add(item_id)
 
+    def _remember_rejected_item(self, item_id: str) -> None:
+        if item_id in self._rejected_item_ids:
+            return
+        if (
+            len(self._rejected_item_order) >= _MAX_STOP_CONSUMED_ITEM_IDS
+            and self._rejected_item_order
+        ):
+            oldest = self._rejected_item_order.popleft()
+            self._rejected_item_ids.discard(oldest)
+        self._rejected_item_order.append(item_id)
+        self._rejected_item_ids.add(item_id)
+
     def _clear_queued_playback(self) -> None:
         while True:
             try:
@@ -1365,6 +1447,7 @@ class RealtimeVoiceSession:
             item_id,
         )
         self._remember_stop_consumed(item_id)
+        self._mark_meaningful_user_activity()
         record = self._generation_for_user_item(item_id)
         if record is not None:
             self._invalidate_generation(record.generation)
@@ -1380,6 +1463,7 @@ class RealtimeVoiceSession:
         self._raise_playback_abort()
         self._abort_playback_stream_now()
         self._clear_queued_playback()
+        self._note_assistant_playback_ended()
         self._set_state(RealtimeSessionState.LISTENING)
         connection = self._connection
         cancel_id = None
@@ -1400,6 +1484,47 @@ class RealtimeVoiceSession:
                     "Realtime stop cancel failed error_type=%s",
                     type(error).__name__,
                 )
+
+    def _reject_unmeaningful_turn(
+        self,
+        item_id: str,
+        reason: RealtimeTurnRejectReason,
+    ) -> None:
+        """Drop a rejected transcript without treating it as user activity."""
+        self._logger.info("Realtime turn rejected reason=%s", reason.value)
+        if reason is RealtimeTurnRejectReason.SELF_ECHO:
+            self._logger.info("Possible self echo suppressed")
+        self._remember_rejected_item(item_id)
+        record = self._generation_for_user_item(item_id)
+        if record is not None:
+            self._invalidate_generation(record.generation)
+            claimed = record.claimed_response_id
+            if claimed:
+                self._mark_response_cancelled(claimed)
+            connection = self._connection
+            cancel_id = claimed
+            if connection is not None and (
+                cancel_id is not None or record.create_issued
+            ):
+                try:
+                    if cancel_id:
+                        connection.response.cancel(response_id=cancel_id)
+                    else:
+                        connection.response.cancel()
+                except Exception as error:
+                    self._logger.error(
+                        "Realtime rejected-turn cancel failed error_type=%s",
+                        type(error).__name__,
+                    )
+        if self._active_response_id is not None:
+            active = self._active_response_id
+            gen = self._claimed_response_ids.get(active)
+            record_gen = record.generation if record is not None else None
+            if gen is not None and gen == record_gen:
+                self._mark_response_cancelled(active)
+                self._responding = False
+                self._active_response_id = None
+                self._set_state(RealtimeSessionState.LISTENING)
 
     def _on_user_transcript(self, event: object) -> None:
         item_id = getattr(event, "item_id", None)
@@ -1424,6 +1549,24 @@ class RealtimeVoiceSession:
                 self._remember_planned_transcript_item(item_id)
             self._consume_explicit_stop_command(item_id)
             return
+        now = self._monotonic()
+        barged = item_id in self._interrupted_item_ids
+        started_at = self._assistant_playback_started_at
+        seconds_after_start = (
+            max(0.0, now - started_at) if started_at is not None else None
+        )
+        reason = classify_realtime_user_transcript(
+            transcript,
+            barged_during_playback=barged,
+            seconds_after_playback_start=seconds_after_start,
+            playback_active=started_at is not None,
+            seconds_since_playback_end=self._seconds_since_playback_end(),
+            recent_assistant=self._recent_assistant.recent(now),
+        )
+        if reason is not None:
+            self._reject_unmeaningful_turn(item_id, reason)
+            return
+        self._mark_meaningful_user_activity()
         if cleaned and not already_planned:
             self._print(f"Cortana: (Heard) {cleaned}")
             plan = self._plan_finalized_user_transcript(item_id, cleaned)
@@ -1513,6 +1656,7 @@ class RealtimeVoiceSession:
         if response_id != self._active_response_id:
             return
         self._mark_generation_produced_output(response_id)
+        self._note_assistant_playback_started()
         try:
             pcm = base64.b64decode(delta, validate=False)
         except Exception:
@@ -1547,6 +1691,7 @@ class RealtimeVoiceSession:
         cleaned = transcript.strip()
         if cleaned:
             self._print(f"Cortana: {cleaned}")
+            self._recent_assistant.remember(cleaned, now=self._monotonic())
         self._assembler.store_assistant_transcript(response_id, transcript)
 
     def _on_response_done(self, event: object) -> None:
@@ -1561,6 +1706,7 @@ class RealtimeVoiceSession:
                 self._active_response_id = None
                 self._responding = False
                 self._raise_playback_abort()
+                self._note_assistant_playback_ended()
                 self._set_state(RealtimeSessionState.LISTENING)
             return
         status_text = str(status or "")
@@ -1594,6 +1740,7 @@ class RealtimeVoiceSession:
         if self._active_response_id == response_id:
             self._active_response_id = None
             self._responding = False
+            self._note_assistant_playback_ended()
             self._set_state(RealtimeSessionState.LISTENING)
 
     def _observe_completed_turn(self, *, user_item_id: str | None) -> None:
@@ -1976,6 +2123,8 @@ class RealtimeVoiceSession:
         self._interrupted_item_ids.clear()
         self._stop_consumed_item_ids.clear()
         self._stop_consumed_order.clear()
+        self._rejected_item_ids.clear()
+        self._rejected_item_order.clear()
         self._response_generation = 0
         self._pending_response_generation = None
         self._active_response_generation = None
@@ -1993,6 +2142,10 @@ class RealtimeVoiceSession:
         self._playback_abort.clear()
         self._abort_generation = 0
         self._assembler.reset()
+        self._idle.clear()
+        self._recent_assistant.clear()
+        self._assistant_playback_started_at = None
+        self._assistant_playback_ended_at = None
 
         if self._failed.is_set():
             self._set_state(RealtimeSessionState.FAILED)

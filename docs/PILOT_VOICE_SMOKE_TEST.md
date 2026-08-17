@@ -59,6 +59,18 @@ Do not demonstrate voice in a demo if this smoke test fails.
     - Leave realtime and complete one `/voice-turn`.
     - Notes:
 
+12. Idle timeout with silence
+    - Start `/voice-realtime`, say nothing, and confirm it stops around 10 seconds with “I'll stop listening for now.”
+    - Notes:
+
+13. Background noise does not keep the session alive
+    - Start `/voice-realtime` with room/fan noise only and confirm it still auto-stops around 10 seconds.
+    - Notes:
+
+14. Meaningful speech resets the idle timer
+    - At about 8 seconds say a real question and confirm timeout is measured from that accepted turn.
+    - Notes:
+
 ## Results
 
 | Check | PASS | FAIL | Notes |
@@ -70,6 +82,9 @@ Do not demonstrate voice in a demo if this smoke test fails.
 | No freeze |  |  |  |
 | Clean exit |  |  |  |
 | Reconnect works |  |  |  |
+| Idle timeout (~10s silence) |  |  |  |
+| Background noise does not keep session alive |  |  |  |
+| Meaningful speech resets idle timer |  |  |  |
 
 Overall voice smoke: PASS / FAIL
 

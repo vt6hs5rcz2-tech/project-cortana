@@ -10,7 +10,15 @@ from src.accidental_realtime_turn import (
 
 
 def test_protected_short_turns_are_not_fragments() -> None:
-    for phrase in ("Stop.", "No.", "Wait.", "RAM.", "Tuesday."):
+    for phrase in (
+        "Stop.",
+        "No.",
+        "Wait.",
+        "RAM.",
+        "Tuesday.",
+        "Yes.",
+        "Okay.",
+    ):
         assert is_low_information_fragment(phrase) is False
 
 

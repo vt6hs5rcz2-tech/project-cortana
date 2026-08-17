@@ -24,6 +24,7 @@ from src.conversation import ConversationHistory
 from src.conversation_intelligence import ConversationIntelligence
 from src.conversation_loop import process_conversation_turn
 from src.conversation_state import ConversationState
+from src.realtime_idle import REALTIME_IDLE_TIMEOUT_MESSAGE
 from src.realtime_voice import (
     REALTIME_CLEANUP_INCOMPLETE,
     REALTIME_INPUT_OVERFLOW,
@@ -2173,3 +2174,194 @@ def test_voice_dont_stop_is_not_a_control_command() -> None:
     assert "item_keep" not in session._stop_consumed_item_ids
     session.request_stop(error_type="cancelled")
     thread.join(timeout=5)
+
+
+class _FakeClock:
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.t = start
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, seconds: float) -> None:
+        self.t += seconds
+
+
+def _yield_sleep(_seconds: float) -> None:
+    time.sleep(0.001)
+
+
+def _drive_voice_transcript(
+    connection: FakeConnection,
+    item_id: str,
+    transcript: str,
+) -> None:
+    connection.socket.push(
+        FakeEvent(type="input_audio_buffer.committed", item_id=item_id)
+    )
+    connection.socket.push(
+        FakeEvent(
+            type="conversation.item.input_audio_transcription.completed",
+            item_id=item_id,
+            transcript=transcript,
+        )
+    )
+
+
+def test_voice_idle_timeout_lifecycle() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    clock = _FakeClock()
+    thread, session, result_box, printed = _run_session(
+        connection,
+        history,
+        monotonic_fn=clock,
+        sleep_fn=_yield_sleep,
+    )
+    assert session.state.value in {"listening", "responding"}
+    cleanup_calls = {"n": 0}
+    original_cleanup = session._cleanup
+
+    def tracked_cleanup() -> None:
+        cleanup_calls["n"] += 1
+        original_cleanup()
+
+    session._cleanup = tracked_cleanup  # type: ignore[method-assign]
+    clock.advance(9.9)
+    assert _wait_until(lambda: session._idle.triggered is False)
+    assert session._stop.is_set() is False
+    clock.advance(0.2)
+    thread.join(timeout=5)
+    assert thread.is_alive() is False
+    assert result_box["message"] == REALTIME_IDLE_TIMEOUT_MESSAGE
+    assert printed.count(REALTIME_IDLE_TIMEOUT_MESSAGE) == 0
+    assert cleanup_calls["n"] == 1
+    assert connection.closed is True
+    assert session.state.value == "closed"
+
+
+def test_voice_idle_resets_on_valid_turn_not_on_rejected_audio() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    clock = _FakeClock()
+    thread, session, result_box, _printed = _run_session(
+        connection,
+        history,
+        monotonic_fn=clock,
+        sleep_fn=_yield_sleep,
+    )
+    clock.advance(9.0)
+    _drive_voice_transcript(connection, "item_ok", "What's two plus two?")
+    assert _wait_until(
+        lambda: "item_ok" in session._planned_transcript_items,
+        timeout=5,
+    )
+    clock.advance(9.0)
+    time.sleep(0.05)
+    assert session._stop.is_set() is False
+    clock.advance(1.1)
+    thread.join(timeout=5)
+    assert result_box["message"] == REALTIME_IDLE_TIMEOUT_MESSAGE
+
+
+def test_voice_rejected_audio_does_not_reset_idle_timer() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    clock = _FakeClock()
+    thread, session, result_box, printed = _run_session(
+        connection,
+        history,
+        monotonic_fn=clock,
+        sleep_fn=_yield_sleep,
+    )
+    clock.advance(9.0)
+    for index, transcript in enumerate(
+        ("", "   ", "...", "It's...", "The day after Monday is Tuesday.")
+    ):
+        if transcript == "The day after Monday is Tuesday.":
+            session._recent_assistant.remember(transcript, now=clock.t)
+            session._assistant_playback_started_at = clock.t
+        _drive_voice_transcript(connection, f"noise_{index}", transcript)
+    time.sleep(0.2)
+    assert not any("Heard" in line for line in printed)
+    clock.advance(1.1)
+    thread.join(timeout=5)
+    assert result_box["message"] == REALTIME_IDLE_TIMEOUT_MESSAGE
+
+
+def test_voice_short_turns_reset_idle_and_stop_is_control() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    clock = _FakeClock()
+    thread, session, result_box, printed = _run_session(
+        connection,
+        history,
+        monotonic_fn=clock,
+        sleep_fn=_yield_sleep,
+    )
+    for index, phrase in enumerate(("No", "Yes", "Wait", "Okay", "Tuesday", "RAM")):
+        clock.advance(9.0)
+        _drive_voice_transcript(connection, f"short_{index}", phrase)
+        assert _wait_until(
+            lambda item=f"short_{index}": item in session._planned_transcript_items,
+            timeout=5,
+        )
+        assert session._stop.is_set() is False
+    clock.advance(9.0)
+    _drive_voice_transcript(connection, "item_stop", "Stop")
+    assert _wait_until(lambda: "item_stop" in session._stop_consumed_item_ids)
+    assert any("Heard) Stop" in line for line in printed)
+    assert session._stop.is_set() is False
+    clock.advance(10.1)
+    thread.join(timeout=5)
+    assert result_box["message"] == REALTIME_IDLE_TIMEOUT_MESSAGE
+
+
+def test_voice_self_echo_does_not_print_heard() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, session, _result_box, printed = _run_session(connection, history)
+    session._recent_assistant.remember(
+        "The day after Monday is Tuesday.",
+        now=session._monotonic(),
+    )
+    session._assistant_playback_started_at = session._monotonic()
+    _drive_voice_transcript(
+        connection,
+        "echo_1",
+        "The day after Monday is Tuesday.",
+    )
+    time.sleep(0.2)
+    assert not any("Heard" in line for line in printed)
+    assert "echo_1" in session._rejected_item_ids
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+
+def test_voice_restart_after_idle_timeout() -> None:
+    clock = _FakeClock()
+    connection = FakeConnection()
+    history = ConversationHistory()
+    thread, _session, result_box, _printed = _run_session(
+        connection,
+        history,
+        monotonic_fn=clock,
+        sleep_fn=_yield_sleep,
+    )
+    clock.advance(10.1)
+    thread.join(timeout=5)
+    assert result_box["message"] == REALTIME_IDLE_TIMEOUT_MESSAGE
+
+    connection2 = FakeConnection()
+    thread2, session2, result_box2, _printed2 = _run_session(
+        connection2,
+        history,
+        monotonic_fn=clock,
+        sleep_fn=_yield_sleep,
+    )
+    assert session2.state.value in {"listening", "responding"}
+    _drive_voice_transcript(connection2, "next", "Hello")
+    assert _wait_until(lambda: "next" in session2._planned_transcript_items)
+    session2.request_stop(error_type="cancelled")
+    thread2.join(timeout=5)
+    assert result_box2["message"] == REALTIME_STOPPED_MESSAGE

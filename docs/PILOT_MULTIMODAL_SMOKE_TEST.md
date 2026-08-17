@@ -57,6 +57,14 @@ Do not include multimodal in a demo unless this smoke test was run immediately b
     - With the camera unavailable, confirm fallback to `/voice-realtime` rather than a hang or crash.
     - Notes:
 
+11. Idle timeout
+    - Start `/multimodal-realtime` with no interaction and confirm it stops around 10 seconds. Camera indicator should turn off.
+    - Notes:
+
+12. Restart after idle
+    - Start `/multimodal-realtime` again and confirm a visual question still works.
+    - Notes:
+
 ## Results
 
 | Check | PASS | FAIL | OMIT | Notes |
@@ -71,6 +79,9 @@ Do not include multimodal in a demo unless this smoke test was run immediately b
 | Clean stop |  |  |  |  |
 | Restart works |  |  |  |  |
 | Camera-unavailable fallback |  |  |  |  |
+| Idle timeout (~10s) |  |  |  |  |
+| Camera off after idle |  |  |  |  |
+| Restart after idle |  |  |  |  |
 
 Overall multimodal smoke: PASS / FAIL / OMIT FROM DEMO
 
