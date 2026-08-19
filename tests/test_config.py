@@ -631,3 +631,35 @@ def test_realtime_local_vad_unknown_env_value_stays_disabled(monkeypatch) -> Non
     monkeypatch.setenv(REALTIME_LOCAL_VAD_ENV, "maybe")
 
     assert get_realtime_local_vad_enabled() is False
+
+def test_local_stt_disabled_by_default(monkeypatch) -> None:
+    from src.config import (
+        LOCAL_STT_ENV,
+        get_local_stt_enabled,
+    )
+
+    monkeypatch.delenv(LOCAL_STT_ENV, raising=False)
+
+    assert get_local_stt_enabled() is False
+
+
+def test_local_stt_env_can_enable(monkeypatch) -> None:
+    from src.config import (
+        LOCAL_STT_ENV,
+        get_local_stt_enabled,
+    )
+
+    monkeypatch.setenv(LOCAL_STT_ENV, "true")
+
+    assert get_local_stt_enabled() is True
+
+
+def test_local_stt_unknown_env_value_stays_disabled(monkeypatch) -> None:
+    from src.config import (
+        LOCAL_STT_ENV,
+        get_local_stt_enabled,
+    )
+
+    monkeypatch.setenv(LOCAL_STT_ENV, "maybe")
+
+    assert get_local_stt_enabled() is False

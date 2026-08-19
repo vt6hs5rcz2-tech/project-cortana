@@ -3,18 +3,24 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 
 from src.active_memory import ActiveMemoryContext
 from src.ai_service import OpenAIClient
 from src.config import (
+    LOCAL_STT_EXECUTABLE_PATH_ENV,
+    LOCAL_STT_MODEL_PATH_ENV,
+    LOCAL_STT_TIMEOUT_SECONDS,
     MAX_TTS_CHARS,
     MAX_VOICE_UTTERANCE_SECONDS,
     VOICE_INTERACTION_ENABLED,
     VOICE_SAMPLE_RATE_HZ,
+    get_local_stt_enabled,
 )
 from src.conversation import ConversationHistory, MESSAGE_TOO_LONG
 from src.conversation_state import ConversationState
@@ -26,6 +32,7 @@ from src.speech_delivery import (
     build_speech_delivery_plan,
     safe_prepare_spoken_delivery,
 )
+from src.whisper_cpp_transcriber import WhisperCppTranscriber
 from src.voice_input import (
     VOICE_CANCELLED,
     VOICE_DISABLED,
@@ -98,6 +105,57 @@ class VoiceCommandResult:
 VoiceCommandHandler = Callable[[VoiceCommandContext], VoiceCommandResult]
 
 
+
+def _build_optional_local_transcriber() -> WhisperCppTranscriber | None:
+    """Build optional local STT without replacing provider transcription by default."""
+    if not get_local_stt_enabled():
+        return None
+
+    executable_raw = os.environ.get(
+        LOCAL_STT_EXECUTABLE_PATH_ENV,
+        "",
+    ).strip()
+    model_raw = os.environ.get(
+        LOCAL_STT_MODEL_PATH_ENV,
+        "",
+    ).strip()
+
+    if not executable_raw or not model_raw:
+        logger.warning(
+            "Local STT enabled but executable/model path is not configured"
+        )
+        return None
+
+    executable_path = Path(executable_raw)
+    model_path = Path(model_raw)
+
+    if not executable_path.is_file():
+        logger.warning(
+            "Local STT executable is unavailable path=%s",
+            executable_path,
+        )
+        return None
+
+    if not model_path.is_file():
+        logger.warning(
+            "Local STT model is unavailable path=%s",
+            model_path,
+        )
+        return None
+
+    try:
+        return WhisperCppTranscriber(
+            executable_path=executable_path,
+            model_path=model_path,
+            timeout_seconds=LOCAL_STT_TIMEOUT_SECONDS,
+        )
+    except Exception as error:
+        logger.warning(
+            "Local STT initialization failed error_type=%s",
+            type(error).__name__,
+        )
+        return None
+
 def create_default_voice_services(
     *,
     settings: Settings,
@@ -109,7 +167,12 @@ def create_default_voice_services(
     """
     capture = MicrophoneCaptureAdapter()
     audio_client = cast(VoiceAudioClient | None, client)
-    service = VoiceService(settings=settings, client=audio_client)
+    local_transcriber = _build_optional_local_transcriber()
+    service = VoiceService(
+        settings=settings,
+        client=audio_client,
+        local_transcriber=local_transcriber,
+    )
     return capture, service
 
 
@@ -145,7 +208,12 @@ def _require_service(context: VoiceCommandContext) -> VoiceService:
     if context.voice_service is not None:
         return context.voice_service
     audio_client = cast(VoiceAudioClient | None, context.client)
-    return VoiceService(settings=context.settings, client=audio_client)
+    local_transcriber = _build_optional_local_transcriber()
+    return VoiceService(
+        settings=context.settings,
+        client=audio_client,
+        local_transcriber=local_transcriber,
+    )
 
 
 def _handle_voice_status(context: VoiceCommandContext) -> VoiceCommandResult:

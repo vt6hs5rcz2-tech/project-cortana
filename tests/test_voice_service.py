@@ -186,3 +186,95 @@ def test_synthesize_maps_provider_errors() -> None:
     service = VoiceService(settings=_settings(), client=_FakeClient(audio_api))
     with pytest.raises(VoiceServiceError, match="could not generate speech"):
         service.synthesize("Hello")
+
+class _FakeLocalTranscriber:
+    def __init__(self) -> None:
+        self.text = "local transcript"
+        self.error: Exception | None = None
+        self.received: NormalizedAudioInput | None = None
+
+    def transcribe(self, audio: NormalizedAudioInput) -> str:
+        self.received = audio
+        if self.error is not None:
+            raise self.error
+        return self.text
+
+
+def test_transcribe_uses_local_transcriber_when_supplied() -> None:
+    local = _FakeLocalTranscriber()
+    local.text = "  local hello  "
+
+    service = VoiceService(
+        settings=_settings(),
+        client=None,
+        local_transcriber=local,
+    )
+
+    audio = _audio()
+    text = service.transcribe(audio)
+
+    assert text == "local hello"
+    assert local.received is audio
+
+
+def test_transcribe_local_failure_maps_to_voice_service_error() -> None:
+    local = _FakeLocalTranscriber()
+    local.error = RuntimeError("local stt failed")
+
+    service = VoiceService(
+        settings=_settings(),
+        client=None,
+        local_transcriber=local,
+    )
+
+    with pytest.raises(VoiceServiceError, match="could not transcribe"):
+        service.transcribe(_audio())
+
+
+def test_transcribe_local_rejects_blank_and_oversized() -> None:
+    local = _FakeLocalTranscriber()
+
+    service = VoiceService(
+        settings=_settings(),
+        client=None,
+        local_transcriber=local,
+    )
+
+    local.text = "   "
+    with pytest.raises(VoiceServiceValidationError):
+        service.transcribe(_audio())
+
+    local.text = "x" * (MAX_VOICE_TRANSCRIPT_CHARS + 1)
+    with pytest.raises(VoiceServiceValidationError):
+        service.transcribe(_audio())
+
+
+def test_transcribe_without_local_transcriber_still_uses_provider() -> None:
+    audio_api = _FakeAudio()
+    audio_api.transcribe_text = "provider transcript"
+
+    service = VoiceService(
+        settings=_settings(),
+        client=_FakeClient(audio_api),
+    )
+
+    assert service.transcribe(_audio()) == "provider transcript"
+    assert audio_api.last_file is not None
+
+def test_transcribe_local_failure_does_not_fall_back_to_provider() -> None:
+    local = _FakeLocalTranscriber()
+    local.error = RuntimeError("local stt failed")
+
+    audio_api = _FakeAudio()
+    audio_api.transcribe_text = "provider transcript"
+
+    service = VoiceService(
+        settings=_settings(),
+        client=_FakeClient(audio_api),
+        local_transcriber=local,
+    )
+
+    with pytest.raises(VoiceServiceError, match="could not transcribe"):
+        service.transcribe(_audio())
+
+    assert audio_api.last_file is None

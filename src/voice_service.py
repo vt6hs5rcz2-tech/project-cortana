@@ -20,6 +20,7 @@ from src.config import (
     MAX_VOICE_TRANSCRIPT_CHARS,
     VOICE_INTERACTION_ENABLED,
 )
+from src.local_speech_transcriber import LocalSpeechTranscriber
 from src.settings import Settings
 from src.voice_input import NormalizedAudioInput
 
@@ -157,13 +158,33 @@ class VoiceService:
         *,
         settings: Settings,
         client: VoiceAudioClient | None,
+        local_transcriber: LocalSpeechTranscriber | None = None,
     ) -> None:
         self._settings = settings
         self._client = client
+        self._local_transcriber = local_transcriber
 
     def transcribe(self, audio: NormalizedAudioInput) -> str:
         """Return a validated transcript for one normalized WAV utterance."""
         self._assert_enabled()
+
+        if self._local_transcriber is not None:
+            try:
+                local_text = self._local_transcriber.transcribe(audio)
+            except Exception as error:
+                logger.error(
+                    "Local voice transcription failed error_type=%s",
+                    type(error).__name__,
+                )
+                raise VoiceServiceError(VOICE_TRANSCRIPTION_FAILED) from error
+
+            cleaned = local_text.strip()
+            if not cleaned:
+                raise VoiceServiceValidationError(VOICE_EMPTY_TRANSCRIPT)
+            if len(cleaned) > MAX_VOICE_TRANSCRIPT_CHARS:
+                raise VoiceServiceValidationError(VOICE_TRANSCRIPT_TOO_LONG)
+            return cleaned
+
         if self._client is None:
             raise VoiceServiceError(VOICE_TRANSCRIPTION_UNAVAILABLE)
         model = self._settings.transcription_model

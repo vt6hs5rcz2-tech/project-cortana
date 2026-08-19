@@ -149,6 +149,21 @@ ALLOWED_TTS_VOICES = frozenset(
     }
 )
 DEFAULT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
+LOCAL_STT_ENABLED = False
+LOCAL_STT_ENV = "CORTANA_LOCAL_STT"
+LOCAL_STT_EXECUTABLE_PATH_ENV = "CORTANA_LOCAL_STT_EXECUTABLE_PATH"
+LOCAL_STT_MODEL_PATH_ENV = "CORTANA_LOCAL_STT_MODEL_PATH"
+LOCAL_STT_TIMEOUT_SECONDS = 30.0
+
+
+def get_local_stt_enabled() -> bool:
+    """Return whether optional local speech transcription is enabled."""
+    raw = os.environ.get(LOCAL_STT_ENV, "").strip().lower()
+    if not raw:
+        return LOCAL_STT_ENABLED
+    return raw in {"1", "true", "yes", "on"}
+
+
 DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"
 DEFAULT_TTS_VOICE = "coral"
 VOICE_CAPTURE_BLOCKSIZE = 1024

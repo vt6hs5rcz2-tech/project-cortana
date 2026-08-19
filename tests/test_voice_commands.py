@@ -565,3 +565,114 @@ def test_play_wav_maps_backend_runtime_error(
 
     with pytest.raises(VoiceServiceError, match="could not play the spoken response"):
         _play_wav_synchronously(pcm_to_wav_bytes(b"\x00\x00" * 8))
+
+def test_optional_local_stt_factory_disabled_returns_none(monkeypatch) -> None:
+    from src.config import LOCAL_STT_ENV
+    from src.voice_commands import _build_optional_local_transcriber
+
+    monkeypatch.delenv(LOCAL_STT_ENV, raising=False)
+
+    assert _build_optional_local_transcriber() is None
+
+
+def test_optional_local_stt_factory_missing_paths_returns_none(monkeypatch) -> None:
+    from src.config import (
+        LOCAL_STT_ENV,
+        LOCAL_STT_EXECUTABLE_PATH_ENV,
+        LOCAL_STT_MODEL_PATH_ENV,
+    )
+    from src.voice_commands import _build_optional_local_transcriber
+
+    monkeypatch.setenv(LOCAL_STT_ENV, "true")
+    monkeypatch.delenv(LOCAL_STT_EXECUTABLE_PATH_ENV, raising=False)
+    monkeypatch.delenv(LOCAL_STT_MODEL_PATH_ENV, raising=False)
+
+    assert _build_optional_local_transcriber() is None
+
+
+def test_optional_local_stt_factory_missing_executable_returns_none(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from src.config import (
+        LOCAL_STT_ENV,
+        LOCAL_STT_EXECUTABLE_PATH_ENV,
+        LOCAL_STT_MODEL_PATH_ENV,
+    )
+    from src.voice_commands import _build_optional_local_transcriber
+
+    missing_executable = tmp_path / "missing-whisper-cli.exe"
+    model_path = tmp_path / "model.bin"
+    model_path.write_bytes(b"model")
+
+    monkeypatch.setenv(LOCAL_STT_ENV, "true")
+    monkeypatch.setenv(
+        LOCAL_STT_EXECUTABLE_PATH_ENV,
+        str(missing_executable),
+    )
+    monkeypatch.setenv(
+        LOCAL_STT_MODEL_PATH_ENV,
+        str(model_path),
+    )
+
+    assert _build_optional_local_transcriber() is None
+
+
+def test_optional_local_stt_factory_missing_model_returns_none(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from src.config import (
+        LOCAL_STT_ENV,
+        LOCAL_STT_EXECUTABLE_PATH_ENV,
+        LOCAL_STT_MODEL_PATH_ENV,
+    )
+    from src.voice_commands import _build_optional_local_transcriber
+
+    executable_path = tmp_path / "whisper-cli.exe"
+    executable_path.write_bytes(b"exe")
+    missing_model = tmp_path / "missing-model.bin"
+
+    monkeypatch.setenv(LOCAL_STT_ENV, "true")
+    monkeypatch.setenv(
+        LOCAL_STT_EXECUTABLE_PATH_ENV,
+        str(executable_path),
+    )
+    monkeypatch.setenv(
+        LOCAL_STT_MODEL_PATH_ENV,
+        str(missing_model),
+    )
+
+    assert _build_optional_local_transcriber() is None
+
+def test_optional_local_stt_factory_valid_paths_returns_transcriber(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from src.config import (
+        LOCAL_STT_ENV,
+        LOCAL_STT_EXECUTABLE_PATH_ENV,
+        LOCAL_STT_MODEL_PATH_ENV,
+    )
+    from src.voice_commands import _build_optional_local_transcriber
+    from src.whisper_cpp_transcriber import WhisperCppTranscriber
+
+    executable_path = tmp_path / "whisper-cli.exe"
+    model_path = tmp_path / "ggml-small.en.bin"
+
+    executable_path.write_bytes(b"exe")
+    model_path.write_bytes(b"model")
+
+    monkeypatch.setenv(LOCAL_STT_ENV, "true")
+    monkeypatch.setenv(
+        LOCAL_STT_EXECUTABLE_PATH_ENV,
+        str(executable_path),
+    )
+    monkeypatch.setenv(
+        LOCAL_STT_MODEL_PATH_ENV,
+        str(model_path),
+    )
+
+    result = _build_optional_local_transcriber()
+
+    assert isinstance(result, WhisperCppTranscriber)
