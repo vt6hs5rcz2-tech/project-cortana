@@ -599,3 +599,35 @@ def test_process_resource_governance_defaults_disabled() -> None:
     assert MAX_PROCESS_IPC_REQUEST_BYTES == 24_576
     assert MAX_TOOL_TEXT_SEARCH_QUERY_CHARS == 200
     assert MAX_TOOL_TEXT_SEARCH_PENDING_LINE_CHARS == 65_536
+
+def test_realtime_local_vad_disabled_by_default(monkeypatch) -> None:
+    from src.config import (
+        REALTIME_LOCAL_VAD_ENV,
+        get_realtime_local_vad_enabled,
+    )
+
+    monkeypatch.delenv(REALTIME_LOCAL_VAD_ENV, raising=False)
+
+    assert get_realtime_local_vad_enabled() is False
+
+
+def test_realtime_local_vad_env_can_enable(monkeypatch) -> None:
+    from src.config import (
+        REALTIME_LOCAL_VAD_ENV,
+        get_realtime_local_vad_enabled,
+    )
+
+    monkeypatch.setenv(REALTIME_LOCAL_VAD_ENV, "true")
+
+    assert get_realtime_local_vad_enabled() is True
+
+
+def test_realtime_local_vad_unknown_env_value_stays_disabled(monkeypatch) -> None:
+    from src.config import (
+        REALTIME_LOCAL_VAD_ENV,
+        get_realtime_local_vad_enabled,
+    )
+
+    monkeypatch.setenv(REALTIME_LOCAL_VAD_ENV, "maybe")
+
+    assert get_realtime_local_vad_enabled() is False

@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import inspect
 import logging
+import os
 import threading
 import time
 import uuid
@@ -16,6 +17,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from queue import Empty, Full, Queue
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -37,7 +39,10 @@ from src.config import (
     REALTIME_VOICE_RECV_TIMEOUT_SECONDS,
     REALTIME_VOICE_SAMPLE_RATE_HZ,
     REALTIME_VOICE_SAMPLE_WIDTH_BYTES,
+    REALTIME_LOCAL_VAD_MODEL_PATH_ENV,
+    REALTIME_LOCAL_VAD_SPEECH_THRESHOLD,
     get_realtime_idle_timeout_seconds,
+    get_realtime_local_vad_enabled,
 )
 from src.conversation import ConversationHistory
 from src.conversation_intelligence import (
@@ -63,6 +68,7 @@ from src.speech_delivery import (
     append_speech_delivery_policy,
     fingerprint_spoken_text,
 )
+from src.realtime_vad import RealtimeVadObserver
 from src.realtime_voice_input import (
     REALTIME_INPUT_OVERFLOW,
     REALTIME_MICROPHONE_FAILED,
@@ -669,6 +675,7 @@ class RealtimeVoiceSession:
         sleep_fn: Callable[[float], None] = time.sleep,
         conversation_state: ConversationState | None = None,
         speech_delivery_state: SpeechDeliveryState | None = None,
+        vad_observer: RealtimeVadObserver | None = None,
     ) -> None:
         self._settings = settings
         self._client = client
@@ -676,6 +683,7 @@ class RealtimeVoiceSession:
         self._active_memory = active_memory_context
         self._conversation_state = conversation_state
         self._speech_delivery_state = speech_delivery_state
+        self._vad_observer = vad_observer
         self._conversation_intelligence = ConversationIntelligence()
         self._base_instructions = ""
         self._plans_by_item: dict[str, RealtimeConversationPlan] = {}
@@ -1098,6 +1106,15 @@ class RealtimeVoiceSession:
                     )
                 continue
             if action.kind == OutboundActionKind.APPEND_AUDIO and action.frame is not None:
+                if self._vad_observer is not None:
+                    try:
+                        self._vad_observer.observe(action.frame)
+                    except Exception as error:
+                        self._logger.warning(
+                            "Realtime VAD observer failed error_type=%s",
+                            type(error).__name__,
+                        )
+
                 encoded = base64.b64encode(action.frame.pcm_bytes).decode("ascii")
                 try:
                     connection.input_audio_buffer.append(audio=encoded)
@@ -2172,6 +2189,49 @@ class RealtimeVoiceSession:
         return True
 
 
+
+def _build_optional_realtime_vad_observer(
+    *,
+    logger_: logging.Logger,
+) -> RealtimeVadObserver | None:
+    """Build the optional local VAD observer without making it authoritative."""
+    if not get_realtime_local_vad_enabled():
+        return None
+
+    raw_model_path = os.environ.get(
+        REALTIME_LOCAL_VAD_MODEL_PATH_ENV,
+        "",
+    ).strip()
+
+    if not raw_model_path:
+        logger_.warning(
+            "Realtime local VAD enabled but model path is not configured"
+        )
+        return None
+
+    model_path = Path(raw_model_path)
+
+    if not model_path.is_file():
+        logger_.warning(
+            "Realtime local VAD model is unavailable path=%s",
+            model_path,
+        )
+        return None
+
+    try:
+        from src.silero_vad_observer import SileroVadObserver
+
+        return SileroVadObserver(
+            model_path=model_path,
+            speech_threshold=REALTIME_LOCAL_VAD_SPEECH_THRESHOLD,
+        )
+    except Exception as error:
+        logger_.warning(
+            "Realtime local VAD initialization failed error_type=%s",
+            type(error).__name__,
+        )
+        return None
+
 def run_realtime_voice_session(
     *,
     settings: Settings,
@@ -2193,6 +2253,11 @@ def run_realtime_voice_session(
     speech_delivery_state: SpeechDeliveryState | None = None,
 ) -> str:
     """Run one explicit realtime voice session and return the status message."""
+    session_logger = logger_ or logger
+    vad_observer = _build_optional_realtime_vad_observer(
+        logger_=session_logger,
+    )
+
     session = RealtimeVoiceSession(
         settings=settings,
         client=client,
@@ -2207,5 +2272,6 @@ def run_realtime_voice_session(
         sleep_fn=sleep_fn,
         conversation_state=conversation_state,
         speech_delivery_state=speech_delivery_state,
+        vad_observer=vad_observer,
     )
     return session.run()

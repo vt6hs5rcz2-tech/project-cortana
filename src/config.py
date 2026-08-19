@@ -192,6 +192,20 @@ MAX_REALTIME_VOICE_SESSION_MINUTES = 20
 MAX_CANCELLED_REALTIME_RESPONSE_IDS = 16
 REALTIME_VOICE_RECV_TIMEOUT_SECONDS = 0.02
 REALTIME_VOICE_CAPTURE_BLOCKSIZE = REALTIME_VOICE_FRAME_SAMPLES
+REALTIME_LOCAL_VAD_ENABLED = False
+REALTIME_LOCAL_VAD_ENV = "CORTANA_REALTIME_LOCAL_VAD"
+REALTIME_LOCAL_VAD_MODEL_PATH_ENV = "CORTANA_REALTIME_LOCAL_VAD_MODEL_PATH"
+REALTIME_LOCAL_VAD_SPEECH_THRESHOLD = 0.50
+
+
+def get_realtime_local_vad_enabled() -> bool:
+    """Return whether optional local realtime VAD observation is enabled."""
+    raw = os.environ.get(REALTIME_LOCAL_VAD_ENV, "").strip().lower()
+    if not raw:
+        return REALTIME_LOCAL_VAD_ENABLED
+    return raw in {"1", "true", "yes", "on"}
+
+
 ALLOWED_REALTIME_MODELS = frozenset(
     {
         "gpt-realtime",

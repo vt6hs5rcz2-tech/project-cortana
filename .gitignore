@@ -180,3 +180,6 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 .env
+
+# Local benchmark model assets
+benchmarks/vad/*.onnx

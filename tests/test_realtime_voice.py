@@ -292,6 +292,7 @@ def _run_session(
     sleep_fn: Callable[[float], None] | None = None,
     conversation_state: ConversationState | None = None,
     speech_delivery_state: SpeechDeliveryState | None = None,
+    vad_observer: object | None = None,
 ) -> tuple[threading.Thread, RealtimeVoiceSession, dict[str, str], list[str]]:
     FakePlaybackStream.instances.clear()
     lines = printed if printed is not None else []
@@ -313,6 +314,7 @@ def _run_session(
         sleep_fn=sleep_fn or time.sleep,
         conversation_state=conversation_state,
         speech_delivery_state=speech_delivery_state,
+        vad_observer=vad_observer,  # type: ignore[arg-type]
     )
 
     def _target() -> None:
@@ -1200,6 +1202,100 @@ def test_quiet_recv_does_not_starve_microphone_appends() -> None:
     thread.join(timeout=5)
     assert thread.is_alive() is False
 
+
+
+def test_vad_observer_sees_audio_without_changing_delivery() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+    observed: list[RealtimeAudioFrame] = []
+
+    class RecordingObserver:
+        def observe(self, frame: RealtimeAudioFrame) -> None:
+            observed.append(frame)
+
+    feed_stop = threading.Event()
+
+    class FeedingMicrophone(FakeMicrophone):
+        def start(self) -> None:
+            super().start()
+
+            def _feed() -> None:
+                sequence = 0
+                while not feed_stop.is_set() and self.is_active:
+                    try:
+                        self._frame_queue.put(_pcm_frame(sequence), timeout=0.05)
+                        sequence += 1
+                    except Exception:
+                        return
+
+            threading.Thread(target=_feed, daemon=True).start()
+
+        def stop(self) -> None:
+            feed_stop.set()
+            super().stop()
+
+    thread, session, _result_box, _printed = _run_session(
+        connection,
+        history,
+        microphone_factory=lambda q, o, e: FeedingMicrophone(q, o, e),
+        vad_observer=RecordingObserver(),
+    )
+
+    assert _wait_until(lambda: len(connection.input_audio_buffer.appends) >= 5)
+    assert _wait_until(lambda: len(observed) >= 5)
+
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+    assert thread.is_alive() is False
+    assert len(observed) >= 5
+    assert len(connection.input_audio_buffer.appends) >= 5
+
+
+def test_vad_observer_failure_does_not_stop_audio_delivery() -> None:
+    connection = FakeConnection()
+    history = ConversationHistory()
+
+    class FailingObserver:
+        def observe(self, frame: RealtimeAudioFrame) -> None:
+            del frame
+            raise RuntimeError("observer failed")
+
+    feed_stop = threading.Event()
+
+    class FeedingMicrophone(FakeMicrophone):
+        def start(self) -> None:
+            super().start()
+
+            def _feed() -> None:
+                sequence = 0
+                while not feed_stop.is_set() and self.is_active:
+                    try:
+                        self._frame_queue.put(_pcm_frame(sequence), timeout=0.05)
+                        sequence += 1
+                    except Exception:
+                        return
+
+            threading.Thread(target=_feed, daemon=True).start()
+
+        def stop(self) -> None:
+            feed_stop.set()
+            super().stop()
+
+    thread, session, _result_box, _printed = _run_session(
+        connection,
+        history,
+        microphone_factory=lambda q, o, e: FeedingMicrophone(q, o, e),
+        vad_observer=FailingObserver(),
+    )
+
+    assert _wait_until(lambda: len(connection.input_audio_buffer.appends) >= 5)
+
+    session.request_stop(error_type="cancelled")
+    thread.join(timeout=5)
+
+    assert thread.is_alive() is False
+    assert len(connection.input_audio_buffer.appends) >= 5
 
 def test_join_timeout_surfaces_cleanup_incomplete() -> None:
     connection = FakeConnection()
@@ -2365,3 +2461,59 @@ def test_voice_restart_after_idle_timeout() -> None:
     session2.request_stop(error_type="cancelled")
     thread2.join(timeout=5)
     assert result_box2["message"] == REALTIME_STOPPED_MESSAGE
+
+def test_optional_realtime_vad_factory_disabled_returns_none(monkeypatch) -> None:
+    from src.config import REALTIME_LOCAL_VAD_ENV
+    from src.realtime_voice import _build_optional_realtime_vad_observer
+
+    monkeypatch.delenv(REALTIME_LOCAL_VAD_ENV, raising=False)
+
+    result = _build_optional_realtime_vad_observer(
+        logger_=logging.getLogger("test"),
+    )
+
+    assert result is None
+
+
+def test_optional_realtime_vad_factory_missing_model_path_returns_none(
+    monkeypatch,
+) -> None:
+    from src.config import (
+        REALTIME_LOCAL_VAD_ENV,
+        REALTIME_LOCAL_VAD_MODEL_PATH_ENV,
+    )
+    from src.realtime_voice import _build_optional_realtime_vad_observer
+
+    monkeypatch.setenv(REALTIME_LOCAL_VAD_ENV, "true")
+    monkeypatch.delenv(REALTIME_LOCAL_VAD_MODEL_PATH_ENV, raising=False)
+
+    result = _build_optional_realtime_vad_observer(
+        logger_=logging.getLogger("test"),
+    )
+
+    assert result is None
+
+
+def test_optional_realtime_vad_factory_missing_model_file_returns_none(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from src.config import (
+        REALTIME_LOCAL_VAD_ENV,
+        REALTIME_LOCAL_VAD_MODEL_PATH_ENV,
+    )
+    from src.realtime_voice import _build_optional_realtime_vad_observer
+
+    missing = tmp_path / "missing.onnx"
+
+    monkeypatch.setenv(REALTIME_LOCAL_VAD_ENV, "true")
+    monkeypatch.setenv(
+        REALTIME_LOCAL_VAD_MODEL_PATH_ENV,
+        str(missing),
+    )
+
+    result = _build_optional_realtime_vad_observer(
+        logger_=logging.getLogger("test"),
+    )
+
+    assert result is None
